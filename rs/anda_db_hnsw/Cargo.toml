@@ -1,0 +1,26 @@
+[package]
+name = "anda_db_hnsw"
+description = "A high-performance vector search library in Rust."
+repository = "https://github.com/ldclabs/anda_db/tree/main/rs/anda_db_hnsw"
+version = "0.0.1"
+publish = false
+edition.workspace = true
+keywords.workspace = true
+categories.workspace = true
+license.workspace = true
+
+[dependencies]
+ciborium = { workspace = true }
+dashmap = { workspace = true }
+rand = { workspace = true }
+ordered-float = { workspace = true }
+half = { workspace = true }
+serde = { workspace = true }
+parking_lot = { workspace = true }
+zstd = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+structured-logger = { workspace = true }
