@@ -1,0 +1,37 @@
+[package]
+name = "anda_db_tfs"
+description = "A full-text search library using the BM25 ranking algorithm in Rust."
+repository = "https://github.com/ldclabs/anda_db/tree/main/rs/anda_db_tfs"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+keywords.workspace = true
+categories.workspace = true
+license.workspace = true
+
+[dependencies]
+ciborium = { workspace = true }
+serde = { workspace = true }
+parking_lot = { workspace = true }
+rayon = { workspace = true }
+zstd = { workspace = true }
+tantivy-tokenizer-api = { workspace = true }
+tantivy = { workspace = true, optional = true }
+tantivy-jieba = { workspace = true, optional = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
+structured-logger = { workspace = true }
+tantivy = { workspace = true }
+tantivy-jieba = { workspace = true }
+
+[features]
+default = []
+full = ["tantivy", "tantivy-jieba"]
+tantivy = ["dep:tantivy"]
+tantivy-jieba = ["dep:tantivy-jieba", "dep:tantivy"]
+
+[[example]]
+name = "tfs_demo"
+required-features = ["full"]

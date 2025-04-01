@@ -60,13 +60,12 @@ impl DistanceMetric {
             return Err(HnswError::DimensionMismatch);
         }
 
-        let result = match self {
+        match self {
             DistanceMetric::Euclidean => Ok(euclidean_distance(a, b)),
             DistanceMetric::Cosine => Ok(cosine_distance(a, b)),
             DistanceMetric::InnerProduct => Ok(inner_product(a, b)),
             DistanceMetric::Manhattan => Ok(manhattan_distance(a, b)),
-        };
-        result
+        }
     }
 }
 
@@ -212,7 +211,7 @@ impl From<HnswIndexSerdeOwn> for HnswIndex {
             nodes: DashMap::from_iter(val.nodes.into_iter().map(|node| (node.id, node))),
             entry_point: RwLock::new(val.entry_point),
             metadata: RwLock::new(val.metadata),
-            deleted_ids: DashSet::from_iter(val.deleted_ids.into_iter()),
+            deleted_ids: DashSet::from_iter(val.deleted_ids),
             is_dirty: RwLock::new(false),
         }
     }
@@ -223,10 +222,10 @@ impl From<HnswIndex> for HnswIndexSerdeOwn {
         HnswIndexSerdeOwn {
             config: val.config,
             nodes: val.nodes.iter().map(|node| node.value().clone()).collect(),
-            entry_point: val.entry_point.read().clone(),
+            entry_point: *val.entry_point.read(),
             dimension: val.dimension,
             metadata: val.metadata.read().clone(),
-            deleted_ids: val.deleted_ids.iter().map(|item| item.clone()).collect(),
+            deleted_ids: val.deleted_ids.iter().map(|item| *item).collect(),
         }
     }
 }
@@ -268,7 +267,7 @@ impl HnswIndex {
     }
 
     pub fn insert_f32(&self, id: u64, vector: Vec<f32>) -> Result<bool, HnswError> {
-        self.insert(id, vector.into_iter().map(|v| bf16::from_f32(v)).collect())
+        self.insert(id, vector.into_iter().map(bf16::from_f32).collect())
     }
 
     /// 添加向量到索引
@@ -287,7 +286,7 @@ impl HnswIndex {
 
         let mut distance_cache = HashMap::new();
         let mut entry_point_dist = f32::INFINITY;
-        let (mut entry_point_node, current_max_layer) = self.entry_point.read().clone();
+        let (mut entry_point_node, current_max_layer) = *self.entry_point.read();
 
         // 随机确定节点的层数
         let layer = self.layer_gen.generate();
@@ -430,7 +429,7 @@ impl HnswIndex {
 
         let mut distance_cache = HashMap::new();
         let mut current_dist = f32::INFINITY;
-        let (mut current_node, current_max_layer) = self.entry_point.read().clone();
+        let (mut current_node, current_max_layer) = *self.entry_point.read();
         // 从最高层向下搜索入口点
         for current_layer in (1..=current_max_layer).rev() {
             let nearest =
@@ -559,29 +558,26 @@ impl HnswIndex {
             metadata.last_modified = unix_ms();
         }
 
-        let mut w = zstd::Encoder::new(w, 0)?;
         ciborium::into_writer(
             &HnswIndexSerdeRef {
                 config: &self.config,
                 nodes: &self.nodes.iter().map(|node| node.clone()).collect(),
-                entry_point: self.entry_point.read().clone(),
+                entry_point: *self.entry_point.read(),
                 dimension: self.dimension,
                 metadata: &self.metadata.read(),
-                deleted_ids: &self.deleted_ids.iter().map(|item| item.clone()).collect(),
+                deleted_ids: &self.deleted_ids.iter().map(|item| *item).collect(),
             },
-            &mut w,
+            w,
         )
         .map_err(|e| HnswError::Cbor(e.to_string()))?;
-        let _ = w.finish()?;
 
         *self.is_dirty.write() = false;
         Ok(())
     }
 
     pub fn load<R: Read>(r: R) -> Result<Self, HnswError> {
-        let zr = zstd::Decoder::new(r)?;
         let index: HnswIndexSerdeOwn =
-            ciborium::from_reader(zr).map_err(|e| HnswError::Cbor(e.to_string()))?;
+            ciborium::from_reader(r).map_err(|e| HnswError::Cbor(e.to_string()))?;
         let index: HnswIndex = index.into();
         *index.is_dirty.write() = false;
         Ok(index)
@@ -635,7 +631,7 @@ impl HnswIndex {
             if point.0 != deleted_node.id {
                 return Ok(());
             }
-            point.clone()
+            *point
         };
 
         loop {
@@ -772,7 +768,7 @@ mod tests {
     #[test]
     fn test_layer_distribution() {
         let lg = LayerGen::new(10, 16);
-        let mut counts = vec![0; 16];
+        let mut counts = [0; 16];
 
         // 生成大量样本以验证分布
         const SAMPLES: usize = 100_000;
@@ -806,7 +802,7 @@ mod tests {
         println!("Added vectors to index.");
 
         // 搜索最近的邻居
-        let results = index.search_f32(&vec![1.1, 1.1], 2).unwrap();
+        let results = index.search_f32(&[1.1, 1.1], 2).unwrap();
         assert_eq!(results.len(), 2);
         assert!(results[0].1 < results[1].1);
 
@@ -820,11 +816,12 @@ mod tests {
         let loaded_index = HnswIndex::load(&data[..]).unwrap();
 
         println!("Loaded index stats: {:?}", loaded_index.stats());
-        let loaded_results = loaded_index.search_f32(&vec![1.1, 1.1], 2).unwrap();
+        let loaded_results = loaded_index.search_f32(&[1.1, 1.1], 2).unwrap();
         assert_eq!(results, loaded_results);
     }
 
     #[test]
+    #[allow(clippy::approx_constant)]
     fn test_distance_metrics() {
         let v1 = vec![1.0, 0.0];
         let v2 = vec![0.0, 1.0];

@@ -6,3 +6,8 @@
 [![Build Status](https://github.com/ldclabs/anda-db/actions/workflows/ci.yml/badge.svg)](https://github.com/ldclabs/anda-db/actions)
 
 anda_db_hnsw is a implementation of the Hierarchical Navigable Small World (HNSW) algorithm for approximate nearest neighbor search, written in Rust.
+
+## License
+Copyright © 2025 [LDC Labs](https://github.com/ldclabs).
+
+`ldclabs/anda-db` is licensed under the MIT License. See [LICENSE](../../LICENSE) for the full license text.
