@@ -1,4 +1,4 @@
-//! # Anda Full-Text Search Library
+//! # Anda-DB Full-Text Search Library
 //!
 //! This library implements a full-text search engine based on the BM25 ranking algorithm.
 

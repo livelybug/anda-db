@@ -52,7 +52,7 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
 name = "anda_db_hnsw"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "ciborium",
  "dashmap",
@@ -62,10 +62,10 @@ dependencies = [
  "parking_lot",
  "rand 0.9.0",
  "serde",
+ "smallvec",
  "structured-logger",
  "thiserror",
  "tokio",
- "zstd",
 ]
 
 [[package]]
@@ -82,7 +82,6 @@ dependencies = [
  "tantivy-tokenizer-api",
  "thiserror",
  "tokio",
- "zstd",
 ]
 
 [[package]]
@@ -1171,6 +1170,9 @@ name = "smallvec"
 version = "1.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7fcf8323ef1faaee30a44a340193b1ac6814fd9b7b4e88e9d4519a3e4abe1cfd"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "socket2"

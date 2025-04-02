@@ -16,9 +16,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut rng = rand::rng();
 
     let mut inert_start = time::Instant::now();
-    for i in 0..10_000 {
+    for i in 0..100_000 {
         let vector: Vec<f32> = (0..DIM).map(|_| rng.random::<f32>()).collect();
         let _ = index.insert_f32(i as u64, vector)?;
+        // println!("{} inserted vector {}", i, i);
 
         // 模拟搜索查询
         if i % 100 == 0 {
@@ -63,13 +64,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 最终保存
     {
-        let mut file = std::fs::File::create("hnsw_demo.cbor.zst")?;
+        let mut file = std::fs::File::create("hnsw_demo.cbor")?;
         let save_start = time::Instant::now();
         index.save(&mut file)?;
         println!("Saved index in {:?}", save_start.elapsed());
     }
 
-    let file = std::fs::File::open("hnsw_demo.cbor.zst")?;
+    let file = std::fs::File::open("hnsw_demo.cbor")?;
     let save_start = time::Instant::now();
     let index = HnswIndex::load(&file)?;
     println!("Load index in {:?}", save_start.elapsed());

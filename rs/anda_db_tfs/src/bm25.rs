@@ -1,4 +1,4 @@
-//! # BM25 Full-Text Search Library
+//! # Anda-DB BM25 Full-Text Search Library
 //!
 //! This library implements a full-text search engine based on the BM25 ranking algorithm.
 //! BM25 (Best Matching 25) is a ranking function used by search engines to estimate the relevance

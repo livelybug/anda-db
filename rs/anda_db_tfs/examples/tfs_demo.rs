@@ -66,11 +66,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 保存和加载
     {
-        let mut file = std::fs::File::create("tfs_demo.cbor.zst")?;
+        let mut file = std::fs::File::create("tfs_demo.cbor")?;
         index.save(&mut file)?;
     }
 
-    let file = std::fs::File::open("tfs_demo.cbor.zst")?;
+    let file = std::fs::File::open("tfs_demo.cbor")?;
     let loaded_index = BM25Index::load(&file, jieba_tokenizer())?;
     println!("Loaded index with {} documents", loaded_index.len());
 

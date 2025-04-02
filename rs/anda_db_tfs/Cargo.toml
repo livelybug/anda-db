@@ -14,7 +14,6 @@ ciborium = { workspace = true }
 serde = { workspace = true }
 parking_lot = { workspace = true }
 rayon = { workspace = true }
-zstd = { workspace = true }
 tantivy-tokenizer-api = { workspace = true }
 tantivy = { workspace = true, optional = true }
 tantivy-jieba = { workspace = true, optional = true }

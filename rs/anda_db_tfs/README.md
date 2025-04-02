@@ -1,4 +1,4 @@
-# `anda_db_tfs`: A High-Performance Full-Text Search Library in Rust
+# Anda-DB BM25 Full-Text Search Library
 
 [![Crates.io](https://img.shields.io/crates/v/anda_db_tfs)](https://crates.io/crates/anda_db_tfs)
 [![Documentation](https://docs.rs/anda_db_tfs/badge.svg)](https://docs.rs/anda_db_tfs)
