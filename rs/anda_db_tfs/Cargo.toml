@@ -24,6 +24,7 @@ tokio = { workspace = true, features = ["full"] }
 structured-logger = { workspace = true }
 tantivy = { workspace = true }
 tantivy-jieba = { workspace = true }
+criterion = { workspace = true }
 
 [features]
 default = []
@@ -33,4 +34,9 @@ tantivy-jieba = ["dep:tantivy-jieba", "dep:tantivy"]
 
 [[example]]
 name = "tfs_demo"
+required-features = ["full"]
+
+[[bench]]
+name = "tfs_tokenizer"
+harness = false
 required-features = ["full"]
