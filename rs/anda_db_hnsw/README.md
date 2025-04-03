@@ -22,7 +22,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-anda_db_hnsw = "0.1.0"
+anda_db_hnsw = "0.2.0"
 ```
 
 ## Quick Start
@@ -49,12 +49,12 @@ for (id, distance) in results {
 }
 
 // Save index to file
-let mut file = std::fs::File::create("index.cbor")?;
-index.save(&mut file)?;
+let file = tokio::fs::File::create("index.cbor")?;
+index.save(file).await?;
 
 // Load index from file
-let file = std::fs::File::open("index.cbor")?;
-let loaded_index = HnswIndex::load(&file)?;
+let file = tokio::fs::File::open("index.cbor")?;
+let loaded_index = HnswIndex::load(file).await?;
 ```
 
 ## Advanced Usage
@@ -198,15 +198,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Save and load
     {
-        let mut file = std::fs::File::create("hnsw_demo.cbor")?;
+        let file = tokio::fs::File::create("hnsw_demo.cbor").await?;
         let save_start = time::Instant::now();
-        index.save(&mut file)?;
+        index.save(file).await?;
         println!("Saved index in {:?}", save_start.elapsed());
     }
 
-    let file = std::fs::File::open("hnsw_demo.cbor")?;
+    let file = tokio::fs::File::open("hnsw_demo.cbor").await?;
     let load_start = time::Instant::now();
-    let loaded_index = HnswIndex::load(&file)?;
+    let loaded_index = HnswIndex::load(file).await?;
     println!("Loaded index in {:?}", load_start.elapsed());
 
     // Test search on loaded index

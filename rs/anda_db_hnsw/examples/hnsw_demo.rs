@@ -64,15 +64,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 最终保存
     {
-        let mut file = std::fs::File::create("hnsw_demo.cbor")?;
+        let file = tokio::fs::File::create("hnsw_demo.cbor").await?;
         let save_start = time::Instant::now();
-        index.save(&mut file)?;
+        index.save(file).await?;
         println!("Saved index in {:?}", save_start.elapsed());
     }
 
-    let file = std::fs::File::open("hnsw_demo.cbor")?;
+    let file = tokio::fs::File::open("hnsw_demo.cbor").await?;
     let save_start = time::Instant::now();
-    let index = HnswIndex::load(&file)?;
+    let index = HnswIndex::load(file).await?;
     println!("Load index in {:?}", save_start.elapsed());
     let query: Vec<f32> = (0..DIM).map(|_| rng.random::<f32>()).collect();
     let query_start = time::Instant::now();

@@ -24,10 +24,10 @@ use rand::{distr::Uniform, prelude::*, rng};
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::cmp::{Ordering, Reverse};
-use std::collections::{BTreeSet, BinaryHeap, HashMap, HashSet};
-use std::io::{Read, Write};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 pub use half;
 
@@ -41,7 +41,7 @@ pub fn unix_ms() -> u64 {
 }
 
 /// Errors that can occur when working with HNSW index.
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Clone)]
 pub enum HnswError {
     /// Database-related errors.
     #[error("DB error: {0}")]
@@ -244,22 +244,22 @@ pub struct IndexStats {
 #[derive(Clone, Serialize, Deserialize)]
 struct HnswIndexSerdeOwn {
     config: HnswConfig,
-    nodes: Vec<HnswNode>,
+    nodes: DashMap<u64, HnswNode>,
     entry_point: (u64, u8),
     dimension: usize,
     metadata: IndexMetadata,
-    deleted_ids: BTreeSet<u64>,
+    deleted_ids: DashSet<u64>,
 }
 
 /// Serializable HNSW index structure (reference version).
 #[derive(Clone, Serialize)]
 struct HnswIndexSerdeRef<'a> {
     config: &'a HnswConfig,
-    nodes: &'a Vec<HnswNode>,
+    nodes: &'a DashMap<u64, HnswNode>,
     entry_point: (u64, u8),
     dimension: usize,
     metadata: &'a IndexMetadata,
-    deleted_ids: &'a Vec<u64>,
+    deleted_ids: &'a DashSet<u64>,
 }
 
 impl From<HnswIndexSerdeOwn> for HnswIndex {
@@ -270,10 +270,10 @@ impl From<HnswIndexSerdeOwn> for HnswIndex {
             dimension: val.dimension,
             config: val.config,
             layer_gen,
-            nodes: DashMap::from_iter(val.nodes.into_iter().map(|node| (node.id, node))),
+            nodes: val.nodes,
             entry_point: RwLock::new(val.entry_point),
             metadata: RwLock::new(val.metadata),
-            deleted_ids: DashSet::from_iter(val.deleted_ids),
+            deleted_ids: val.deleted_ids,
             is_dirty: RwLock::new(false),
         }
     }
@@ -283,11 +283,11 @@ impl From<HnswIndex> for HnswIndexSerdeOwn {
     fn from(val: HnswIndex) -> Self {
         HnswIndexSerdeOwn {
             config: val.config,
-            nodes: val.nodes.iter().map(|node| node.value().clone()).collect(),
+            nodes: val.nodes,
             entry_point: *val.entry_point.read(),
             dimension: val.dimension,
             metadata: val.metadata.read().clone(),
-            deleted_ids: val.deleted_ids.iter().map(|item| *item).collect(),
+            deleted_ids: val.deleted_ids,
         }
     }
 }
@@ -386,7 +386,7 @@ impl HnswIndex {
 
         let mut distance_cache = HashMap::with_capacity(self.config.ef_construction * 2);
         let mut entry_point_dist = f32::INFINITY;
-        let (mut entry_point_node, current_max_layer) = *self.entry_point.read();
+        let (mut entry_point_node, current_max_layer) = { *self.entry_point.read() };
 
         // Randomly determine the node's layer
         let layer = self.layer_gen.generate(current_max_layer);
@@ -493,33 +493,32 @@ impl HnswIndex {
 
         // Add the new node to the index
         match self.nodes.try_entry(id) {
+            None => {
+                return Err(HnswError::Db(
+                    "Failed to insert node into index".to_string(),
+                ));
+            }
             Some(entry) => match entry {
                 dashmap::Entry::Occupied(_) => {
                     return Err(HnswError::AlreadyExists(id));
                 }
                 dashmap::Entry::Vacant(v) => {
                     v.insert(node);
+                    *self.is_dirty.write() = true;
+                    // Update entry point if new node is at a higher layer
+                    if layer > current_max_layer {
+                        *self.entry_point.write() = (id, layer);
+                    }
+
+                    self.update_metadata(|m| {
+                        if layer > m.stats.max_layer {
+                            m.stats.max_layer = layer;
+                        }
+                        m.stats.insert_count += 1;
+                    });
                 }
             },
-            None => {
-                return Err(HnswError::Db(
-                    "Failed to insert node into index".to_string(),
-                ));
-            }
         }
-
-        *self.is_dirty.write() = true;
-        // Update entry point if new node is at a higher layer
-        if layer > current_max_layer {
-            *self.entry_point.write() = (id, layer);
-        }
-
-        self.update_metadata(|m| {
-            if layer > m.stats.max_layer {
-                m.stats.max_layer = layer;
-            }
-            m.stats.insert_count += 1;
-        });
 
         // Update collected nodes after releasing all locks
         for (node_id, layer, connections) in neighbors_to_update {
@@ -593,7 +592,7 @@ impl HnswIndex {
 
         let mut distance_cache = HashMap::new();
         let mut current_dist = f32::INFINITY;
-        let (mut current_node, current_max_layer) = *self.entry_point.read();
+        let (mut current_node, current_max_layer) = { *self.entry_point.read() };
         // 从最高层向下搜索入口点
         for current_layer in (1..=current_max_layer).rev() {
             let nearest =
@@ -875,26 +874,31 @@ impl HnswIndex {
     /// # Returns
     ///
     /// * `Result<(), HnswError>` - Success or error.
-    pub fn save<W: Write>(&self, w: W) -> Result<(), HnswError> {
+    pub async fn save<W: AsyncWrite + Unpin>(&self, mut w: W) -> Result<(), HnswError> {
         {
             let mut metadata = self.metadata.write();
             metadata.last_modified = unix_ms();
         }
 
+        let mut buf = Vec::new();
         ciborium::into_writer(
             &HnswIndexSerdeRef {
                 config: &self.config,
-                nodes: &self.nodes.iter().map(|node| node.clone()).collect(),
+                nodes: &self.nodes,
                 entry_point: *self.entry_point.read(),
                 dimension: self.dimension,
                 metadata: &self.metadata.read(),
-                deleted_ids: &self.deleted_ids.iter().map(|item| *item).collect(),
+                deleted_ids: &self.deleted_ids,
             },
-            w,
+            &mut buf,
         )
         .map_err(|e| HnswError::Cbor(e.to_string()))?;
 
         *self.is_dirty.write() = false;
+
+        AsyncWriteExt::write_all(&mut w, &buf)
+            .await
+            .map_err(|e| HnswError::Db(e.to_string()))?;
         Ok(())
     }
 
@@ -909,9 +913,17 @@ impl HnswIndex {
     /// # Returns
     ///
     /// * `Result<Self, HnswError>` - Loaded index or error.
-    pub fn load<R: Read>(r: R) -> Result<Self, HnswError> {
+    pub async fn load<R: AsyncRead + Unpin>(mut r: R) -> Result<Self, HnswError> {
+        let data = {
+            let mut buf = Vec::new();
+            AsyncReadExt::read_to_end(&mut r, &mut buf)
+                .await
+                .map_err(|e| HnswError::Db(e.to_string()))?;
+            buf
+        };
+
         let index: HnswIndexSerdeOwn =
-            ciborium::from_reader(r).map_err(|e| HnswError::Cbor(e.to_string()))?;
+            ciborium::from_reader(&data[..]).map_err(|e| HnswError::Cbor(e.to_string()))?;
         let index: HnswIndex = index.into();
         *index.is_dirty.write() = false;
         Ok(index)
@@ -1036,7 +1048,7 @@ impl HnswIndex {
     ///
     /// * `IndexStats` - Current statistics
     pub fn stats(&self) -> IndexStats {
-        let mut stats = self.metadata.read().stats.clone();
+        let mut stats = { self.metadata.read().stats.clone() };
         stats.num_elements = self.nodes.len() as u64;
 
         // 计算平均连接数
@@ -1206,8 +1218,8 @@ mod tests {
         assert!(bottom_ratio > 0.5);
     }
 
-    #[test]
-    fn test_hnsw_basic() {
+    #[tokio::test]
+    async fn test_hnsw_basic() {
         let config = HnswConfig::default();
         let index = HnswIndex::new(2, config);
 
@@ -1229,10 +1241,10 @@ mod tests {
 
         // 测试持久化
         let mut data = Vec::new();
-        index.save(&mut data).unwrap();
+        index.save(&mut data).await.unwrap();
         println!("Serialized data size: {}", data.len());
 
-        let loaded_index = HnswIndex::load(&data[..]).unwrap();
+        let loaded_index = HnswIndex::load(&data[..]).await.unwrap();
 
         println!("Loaded index stats: {:?}", loaded_index.stats());
         let loaded_results = loaded_index.search_f32(&[1.1, 1.1], 2).unwrap();
@@ -1410,8 +1422,8 @@ mod tests {
         assert_eq!(heuristic_results.len(), 5);
     }
 
-    #[test]
-    fn test_file_persistence() {
+    #[tokio::test]
+    async fn test_file_persistence() {
         // 创建临时目录
         let mut data: Vec<u8> = Vec::new();
 
@@ -1427,12 +1439,12 @@ mod tests {
                 index.insert_f32(i, vec![x, y, z]).unwrap();
             }
 
-            index.save(&mut data).unwrap();
+            index.save(&mut data).await.unwrap();
         }
 
         // 从文件加载索引
         {
-            let loaded_index = HnswIndex::load(&data[..]).unwrap();
+            let loaded_index = HnswIndex::load(&data[..]).await.unwrap();
 
             // 验证索引大小
             assert_eq!(loaded_index.len(), 100);

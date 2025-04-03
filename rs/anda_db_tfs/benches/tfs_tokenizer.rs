@@ -51,7 +51,7 @@ pub fn criterion_benchmark(c: &mut Criterion) {
             |b, &text| {
                 let mut tokenizer = default_tokenizer();
                 b.iter(|| {
-                    let tokens = collect_tokens_parallel(&mut tokenizer, black_box(text));
+                    let tokens = collect_tokens_parallel(&mut tokenizer, black_box(text), None);
                     black_box(assert!(!tokens.is_empty()));
                 })
             },

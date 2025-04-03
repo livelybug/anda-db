@@ -23,14 +23,14 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-anda_db_tfs = "0.1.0"
+anda_db_tfs = "0.2.0"
 ```
 
 For full features including tantivy tokenizers and jieba support:
 
 ```toml
 [dependencies]
-anda_db_tfs = { version = "0.1.0", features = ["full"] }
+anda_db_tfs = { version = "0.2.0", features = ["full"] }
 ```
 
 ## Quick Start
@@ -39,29 +39,29 @@ anda_db_tfs = { version = "0.1.0", features = ["full"] }
 use anda_db_tfs::{BM25Index, SimpleTokenizer};
 
 // Create a new index with a simple tokenizer
-let index = BM25Index::new(SimpleTokenizer::default());
+let index = BM25Index::new(SimpleTokenizer::default(), None);
 
 // Add documents to the index
-index.add_document(1, "The quick brown fox jumps over the lazy dog").unwrap();
-index.add_document(2, "A fast brown fox runs past the lazy dog").unwrap();
-index.add_document(3, "The lazy dog sleeps all day").unwrap();
+index.add_document(1, "The quick brown fox jumps over the lazy dog").await.unwrap();
+index.add_document(2, "A fast brown fox runs past the lazy dog").await.unwrap();
+index.add_document(3, "The lazy dog sleeps all day").await.unwrap();
 
 // Search for documents containing "fox"
-let results = index.search("fox", 10);
+let results = index.search("fox", 10).await;
 for (doc_id, score) in results {
     println!("Document {}: score {}", doc_id, score);
 }
 
 // Remove a document
-index.remove_document(3, "The lazy dog sleeps all day");
+index.remove_document(3, "The lazy dog sleeps all day").await;
 
 // Save the index to a file
-let file = std::fs::File::create("index.cbor").unwrap();
-index.save(file).unwrap();
+let file = tokio::fs::File::create("index.cbor").await.unwrap();
+index.save(file).await.unwrap();
 
 // Load the index from a file
-let file = std::fs::File::open("index.cbor").unwrap();
-let loaded_index = BM25Index::load(file, SimpleTokenizer::default()).unwrap();
+let file = tokio::fs::File::open("index.cbor").await.unwrap();
+let loaded_index = BM25Index::load(file, SimpleTokenizer::default()).await.unwrap();
 ```
 
 ## Chinese Text Support
@@ -72,14 +72,14 @@ With the `tantivy-jieba` feature enabled, you can use the jieba tokenizer for Ch
 use anda_db_tfs::{BM25Index, jieba_tokenizer};
 
 // Create an index with jieba tokenizer
-let index = BM25Index::new(jieba_tokenizer());
+let index = BM25Index::new(jieba_tokenizer(), None);
 
 // Add documents with Chinese text
-index.add_document(1, "Rust 是一种系统编程语言").unwrap();
-index.add_document(2, "Rust 快速且内存高效，安全、并发、实用").unwrap();
+index.add_document(1, "Rust 是一种系统编程语言").await.unwrap();
+index.add_document(2, "Rust 快速且内存高效，安全、并发、实用").await.unwrap();
 
 // Search for documents
-let results = index.search("安全", 10);
+let results = index.search("安全", 10).await;
 ```
 
 ## Advanced Usage
@@ -97,7 +97,7 @@ let tokenizer = TokenizerChain::builder(SimpleTokenizer::default())
   .filter(LowerCaser)
   .filter(Stemmer::default())
   .build();
-let index = BM25Index::new(tokenizer).with_params(params);
+let index = BM25Index::new(tokenizer, Some(params));
 ```
 
 ### Batch Document Processing
@@ -115,7 +115,7 @@ let docs = vec![
 ];
 
 // Add documents in batch
-let results = index.add_documents(docs);
+let results = index.add_documents(docs).await;
 ```
 
 ## API Documentation
@@ -126,22 +126,19 @@ The main struct for creating and managing a search index.
 
 ```rust
 // Create a new index
-pub fn new(tokenizer: T) -> Self
-
-// Set custom BM25 parameters
-pub fn with_params(self, params: BM25Params) -> Self
+pub fn new(tokenizer: T, params: Some(BM25Param)) -> Self
 
 // Add a document to the index
-pub fn add_document(&self, id: u64, text: &str) -> Result<(), BM25Error>
+pub async fn add_document(&self, id: u64, text: &str) -> Result<(), BM25Error>
 
 // Add multiple documents to the index
-pub fn add_documents(&self, docs: Vec<(u64, String)>) -> Vec<Result<(), BM25Error>>
+pub async fn add_documents(&self, docs: Vec<(u64, String)>) -> Vec<Result<(), BM25Error>>
 
 // Remove a document from the index
-pub fn remove_document(&self, id: u64, text: &str) -> bool
+pub async fn remove_document(&self, id: u64, text: &str) -> bool
 
 // Search the index
-pub fn search(&self, query: &str, top_k: usize) -> Vec<(u64, f32)>
+pub async fn search(&self, query: &str, top_k: usize) -> Vec<(u64, f32)>
 
 // Get the number of documents in the index
 pub fn len(&self) -> usize
@@ -150,10 +147,10 @@ pub fn len(&self) -> usize
 pub fn is_empty(&self) -> bool
 
 // Save the index to a writer
-pub fn save<W: Write>(&self, w: W) -> Result<(), BM25Error>
+pub async fn save<W: AsyncRead>(&self, w: W) -> Result<(), BM25Error>
 
 // Load the index from a reader
-pub fn load<R: Read>(r: R, tokenizer: T) -> Result<Self, BM25Error>
+pub async fn load<R: AsyncWrite>(r: R, tokenizer: T) -> Result<Self, BM25Error>
 ```
 
 ### BM25Params
@@ -175,7 +172,7 @@ Default values: `k1 = 1.2, b = 0.75`
 
 The library uses a custom error type `BM25Error` for various error conditions:
 
-- `BM25Error::Io`: IO errors during read/write operations.
+- `BM25Error::Db`: Database-related errors.
 - `BM25Error::Cbor`: Serialization/deserialization errors.
 - `BM25Error::AlreadyExists`: When trying to add a document with an ID that already exists.
 - `BM25Error::TokenizeFailed`: When tokenization produces no tokens for a document.

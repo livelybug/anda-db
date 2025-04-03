@@ -52,7 +52,7 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
 name = "anda_db_hnsw"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ciborium",
  "dashmap",
@@ -70,11 +70,11 @@ dependencies = [
 
 [[package]]
 name = "anda_db_tfs"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ciborium",
  "criterion",
- "parking_lot",
+ "dashmap",
  "rayon",
  "serde",
  "structured-logger",
@@ -376,6 +376,7 @@ dependencies = [
  "lock_api",
  "once_cell",
  "parking_lot_core",
+ "serde",
 ]
 
 [[package]]

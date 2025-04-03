@@ -141,6 +141,7 @@ const MIN_PARALLEL_SIZE: usize = 1024 * 10; // 10KB
 ///
 /// * `tokenizer` - Tokenizer to use for processing text
 /// * `text` - Text to tokenize, will be split by "\n\n"
+/// * `inclusive` - Optional list of tokens to include (if provided, only tokens in this list will be returned)
 ///
 /// # Returns
 ///
@@ -149,9 +150,10 @@ const MIN_PARALLEL_SIZE: usize = 1024 * 10; // 10KB
 pub fn collect_tokens_parallel<T: Tokenizer + Send>(
     tokenizer: &mut T,
     text: &str,
+    inclusive: Option<&HashMap<String, usize>>,
 ) -> HashMap<String, usize> {
     if text.len() < MIN_PARALLEL_SIZE {
-        return collect_tokens(tokenizer, text, None);
+        return collect_tokens(tokenizer, text, inclusive);
     }
 
     let chunks: Vec<&str> = text.split("\n\n").collect();
@@ -159,7 +161,7 @@ pub fn collect_tokens_parallel<T: Tokenizer + Send>(
         .par_iter()
         .map(|chunk| {
             let mut local_tokenizer = tokenizer.clone();
-            collect_tokens(&mut local_tokenizer, chunk, None)
+            collect_tokens(&mut local_tokenizer, chunk, inclusive)
         })
         .collect();
 
@@ -191,7 +193,7 @@ pub fn flat_full_text_search<T: Tokenizer>(
     doc_text: &str,
 ) -> HashMap<String, usize> {
     let tokens = collect_tokens(tokenizer, query, None);
-    collect_tokens(tokenizer, doc_text, Some(&tokens))
+    collect_tokens_parallel(tokenizer, doc_text, Some(&tokens))
 }
 
 #[cfg(test)]
@@ -263,7 +265,7 @@ mod tests {
             "The quick brown fox\n\njumps over\n\nthe lazy dog".repeat(MIN_PARALLEL_SIZE);
 
         // 测试并行分词
-        let tokens = collect_tokens_parallel(&mut tokenizer, &large_text);
+        let tokens = collect_tokens_parallel(&mut tokenizer, &large_text, None);
         assert!(!tokens.is_empty());
         assert!(tokens.contains_key("quick"));
         assert!(tokens.contains_key("fox"));
@@ -272,7 +274,7 @@ mod tests {
 
         // 测试小文本（应该使用串行处理）
         let small_text = "The quick brown fox";
-        let tokens = collect_tokens_parallel(&mut tokenizer, small_text);
+        let tokens = collect_tokens_parallel(&mut tokenizer, small_text, None);
         assert_eq!(tokens.len(), 4);
     }
 }
