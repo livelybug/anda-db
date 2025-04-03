@@ -1,4 +1,5 @@
 use rayon::prelude::*;
+use std::collections::HashMap;
 
 pub use tantivy_tokenizer_api::*;
 
@@ -111,25 +112,28 @@ pub fn jieba_tokenizer() -> TokenizerChain {
 ///
 /// # Returns
 ///
-/// A vector of tokens extracted from the text
+/// A HashMap of tokens and their counts.
+/// The keys are the token strings and the values are their counts.
 pub fn collect_tokens<T: Tokenizer>(
     tokenizer: &mut T,
     text: &str,
-    inclusive: Option<&Vec<String>>,
-) -> Vec<String> {
+    inclusive: Option<&HashMap<String, usize>>,
+) -> HashMap<String, usize> {
     let mut stream = tokenizer.token_stream(text);
-    let mut tokens = Vec::new();
+    let mut tokens = HashMap::new();
     while let Some(token) = stream.next() {
         if let Some(inclusive) = inclusive {
-            if !inclusive.contains(&token.text) {
+            if !inclusive.contains_key(&token.text) {
                 continue;
             }
         }
 
-        tokens.push(token.text.to_owned());
+        *tokens.entry(token.text.to_owned()).or_default() += 1;
     }
     tokens
 }
+
+const MIN_PARALLEL_SIZE: usize = 1024 * 10; // 10KB
 
 /// Tokenizes text in parallel using multiple threads
 ///
@@ -140,22 +144,33 @@ pub fn collect_tokens<T: Tokenizer>(
 ///
 /// # Returns
 ///
-/// A vector of tokens extracted from the text
-pub fn collect_tokens_parallel<T: Tokenizer + Send>(tokenizer: &mut T, text: &str) -> Vec<String> {
-    if text.len() < 10000 {
+/// A HashMap of tokens and their counts.
+/// The keys are the token strings and the values are their counts.
+pub fn collect_tokens_parallel<T: Tokenizer + Send>(
+    tokenizer: &mut T,
+    text: &str,
+) -> HashMap<String, usize> {
+    if text.len() < MIN_PARALLEL_SIZE {
         return collect_tokens(tokenizer, text, None);
     }
 
     let chunks: Vec<&str> = text.split("\n\n").collect();
-    let tokens: Vec<String> = chunks
+    let tokens: Vec<HashMap<String, usize>> = chunks
         .par_iter()
-        .flat_map(|chunk| {
+        .map(|chunk| {
             let mut local_tokenizer = tokenizer.clone();
             collect_tokens(&mut local_tokenizer, chunk, None)
         })
         .collect();
 
     tokens
+        .into_iter()
+        .fold(HashMap::new(), |mut acc, token_map| {
+            for (token, count) in token_map {
+                *acc.entry(token).or_default() += count;
+            }
+            acc
+        })
 }
 
 /// Performs a simple full-text search by finding matching tokens in a document
@@ -168,15 +183,14 @@ pub fn collect_tokens_parallel<T: Tokenizer + Send>(tokenizer: &mut T, text: &st
 ///
 /// # Returns
 ///
-/// A vector of matching tokens found in the document
+/// A HashMap of matching tokens and their counts.
+/// The keys are the token strings and the values are their counts.
 pub fn flat_full_text_search<T: Tokenizer>(
     tokenizer: &mut T,
     query: &str,
     doc_text: &str,
-) -> Vec<String> {
-    let mut tokens = collect_tokens(tokenizer, query, None);
-    tokens.sort();
-    tokens.dedup();
+) -> HashMap<String, usize> {
+    let tokens = collect_tokens(tokenizer, query, None);
     collect_tokens(tokenizer, doc_text, Some(&tokens))
 }
 
@@ -195,8 +209,8 @@ mod tests {
             "The quick brown fox jumps over the lazy dog",
         );
         assert_eq!(matches.len(), 2);
-        assert!(matches.contains(&"fox".to_string()));
-        assert!(matches.contains(&"dog".to_string()));
+        assert_eq!(matches.get("fox"), Some(&1));
+        assert_eq!(matches.get("dog"), Some(&1));
 
         // 测试部分匹配
         let matches = flat_full_text_search(
@@ -205,7 +219,7 @@ mod tests {
             "The quick brown fox jumps over the lazy dog",
         );
         assert_eq!(matches.len(), 1);
-        assert!(matches.contains(&"fox".to_string()));
+        assert!(matches.contains_key("fox"));
 
         // 测试无匹配
         let matches = flat_full_text_search(
@@ -223,17 +237,21 @@ mod tests {
         // 测试基本分词
         let tokens = collect_tokens(&mut tokenizer, "The quick brown fox", None);
         assert_eq!(tokens.len(), 4);
-        assert!(tokens.contains(&"the".to_string()));
-        assert!(tokens.contains(&"quick".to_string()));
-        assert!(tokens.contains(&"brown".to_string()));
-        assert!(tokens.contains(&"fox".to_string()));
+        assert_eq!(tokens.get("the"), Some(&1));
+        assert_eq!(tokens.get("quick"), Some(&1));
+        assert_eq!(tokens.get("brown"), Some(&1));
+        assert_eq!(tokens.get("fox"), Some(&1));
 
         // 测试过滤分词
-        let inclusive = vec!["quick".to_string(), "fox".to_string()];
-        let tokens = collect_tokens(&mut tokenizer, "The quick brown fox", Some(&inclusive));
+        let inclusive = HashMap::from([("quick".to_string(), 1), ("fox".to_string(), 1)]);
+        let tokens = collect_tokens(
+            &mut tokenizer,
+            "The quick brown fox, foxes",
+            Some(&inclusive),
+        );
         assert_eq!(tokens.len(), 2);
-        assert!(tokens.contains(&"quick".to_string()));
-        assert!(tokens.contains(&"fox".to_string()));
+        assert_eq!(tokens.get("quick"), Some(&1));
+        assert_eq!(tokens.get("fox"), Some(&2));
     }
 
     #[test]
@@ -241,15 +259,16 @@ mod tests {
         let mut tokenizer = default_tokenizer();
 
         // 创建一个大文本，确保触发并行处理
-        let large_text = "The quick brown fox\n\njumps over\n\nthe lazy dog".repeat(1000);
+        let large_text =
+            "The quick brown fox\n\njumps over\n\nthe lazy dog".repeat(MIN_PARALLEL_SIZE);
 
         // 测试并行分词
         let tokens = collect_tokens_parallel(&mut tokenizer, &large_text);
         assert!(!tokens.is_empty());
-        assert!(tokens.contains(&"quick".to_string()));
-        assert!(tokens.contains(&"fox".to_string()));
-        assert!(tokens.contains(&"jump".to_string()));
-        assert!(tokens.contains(&"dog".to_string()));
+        assert!(tokens.contains_key("quick"));
+        assert!(tokens.contains_key("fox"));
+        assert!(tokens.contains_key("jump"));
+        assert!(tokens.contains_key("dog"));
 
         // 测试小文本（应该使用串行处理）
         let small_text = "The quick brown fox";

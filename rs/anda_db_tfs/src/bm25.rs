@@ -152,8 +152,8 @@ where
         }
 
         let mut token_freqs: HashMap<String, usize> = HashMap::with_capacity(tokens_len / 2);
-        for token in tokens {
-            *token_freqs.entry(token).or_default() += 1;
+        for (token, freq) in tokens {
+            *token_freqs.entry(token).or_default() += freq;
         }
 
         let mut data = self.data.write();
@@ -210,8 +210,8 @@ where
         };
         // Count token frequencies
         let mut token_freqs: HashMap<String, usize> = HashMap::with_capacity(tokens.len() / 2);
-        for token in tokens {
-            *token_freqs.entry(token).or_default() += 1;
+        for (token, freq) in tokens {
+            *token_freqs.entry(token).or_default() += freq;
         }
 
         let mut data = self.data.write();
@@ -292,7 +292,7 @@ where
 
         let term_scores: Vec<HashMap<u64, f32>> = query_terms
             .par_iter()
-            .filter_map(|term| {
+            .filter_map(|(term, _)| {
                 data.postings.get(term).map(|postings| {
                     let df = data.token_doc_freq.get(term).cloned().unwrap_or(0) as f32;
                     let idf = ((data.doc_tokens.len() as f32 - df + 0.5) / (df + 0.5) + 1.0).ln();
@@ -406,11 +406,12 @@ where
         };
 
         // parallel tokenize
-        let mut processed_docs: Vec<(u64, Vec<String>, Result<(), BM25Error>)> = docs
+        #[allow(clippy::type_complexity)]
+        let mut processed_docs: Vec<(u64, HashMap<String, usize>, Result<(), BM25Error>)> = docs
             .par_iter()
             .map(|(id, text)| {
                 if existing_ids.contains(id) {
-                    return (*id, Vec::new(), Err(BM25Error::AlreadyExists(*id)));
+                    return (*id, HashMap::new(), Err(BM25Error::AlreadyExists(*id)));
                 }
 
                 let mut tokenizer = self.tokenizer.clone();
@@ -419,7 +420,7 @@ where
                 if tokens.is_empty() {
                     (
                         *id,
-                        Vec::new(),
+                        HashMap::new(),
                         Err(BM25Error::TokenizeFailed {
                             id: *id,
                             text: text.clone(),
@@ -443,7 +444,7 @@ where
                 }
             }
 
-            let valid_docs: Vec<(u64, Vec<String>)> = processed_docs
+            let valid_docs: Vec<(u64, HashMap<String, usize>)> = processed_docs
                 .iter()
                 .filter_map(|(id, tokens, result)| {
                     if result.is_ok() {
@@ -461,8 +462,8 @@ where
                     let tokens_len = tokens.len();
                     let mut token_freqs: HashMap<String, usize> =
                         HashMap::with_capacity(tokens_len / 2);
-                    for token in tokens {
-                        *token_freqs.entry(token.clone()).or_default() += 1;
+                    for (token, freq) in tokens {
+                        *token_freqs.entry(token.clone()).or_default() += freq;
                     }
                     (*id, tokens_len, token_freqs)
                 })
