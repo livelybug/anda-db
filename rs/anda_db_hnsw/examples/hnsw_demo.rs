@@ -2,6 +2,15 @@ use anda_db_hnsw::{HnswConfig, HnswIndex};
 use rand::Rng;
 use tokio::time;
 
+pub fn unix_ms() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time before Unix epoch");
+    ts.as_millis() as u64
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     structured_logger::Builder::new().init();
@@ -10,7 +19,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 创建索引 (384维向量，如BERT嵌入)
     let config = HnswConfig::default();
-    let index = HnswIndex::new(DIM, config);
+    let index = HnswIndex::new(DIM, config, unix_ms());
 
     // 模拟数据流
     let mut rng = rand::rng();
@@ -18,7 +27,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut inert_start = time::Instant::now();
     for i in 0..100_000 {
         let vector: Vec<f32> = (0..DIM).map(|_| rng.random::<f32>()).collect();
-        let _ = index.insert_f32(i as u64, vector)?;
+        let _ = index.insert_f32(i as u64, vector, unix_ms())?;
         // println!("{} inserted vector {}", i, i);
 
         // 模拟搜索查询
@@ -41,7 +50,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if i % 1000 == 0 && i > 0 {
             let to_remove = rng.random_range(0..i);
             let remove_start = time::Instant::now();
-            index.remove(to_remove)?;
+            index.remove(to_remove, unix_ms())?;
             println!(
                 "{} Removed vector {} in {:?}",
                 i,
@@ -55,7 +64,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stats = index.stats();
     println!("Index statistics:");
     println!("- Total vectors: {}", stats.num_elements);
-    println!("- Deleted vectors: {}", stats.num_deleted);
     println!("- Max layer: {}", stats.max_layer);
     println!("- Avg connections: {:.2}", stats.avg_connections);
     println!("- Search operations: {}", stats.search_count);
@@ -66,8 +74,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let file = tokio::fs::File::create("hnsw_demo.cbor").await?;
         let save_start = time::Instant::now();
-        index.save(file).await?;
-        println!("Saved index in {:?}", save_start.elapsed());
+        index.save_all(file, unix_ms()).await?;
+        println!("Saved index with nodes in {:?}", save_start.elapsed());
     }
 
     let file = tokio::fs::File::open("hnsw_demo.cbor").await?;

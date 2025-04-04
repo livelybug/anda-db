@@ -24,4 +24,5 @@ tokio = { workspace = true, features = ["sync", "parking_lot"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
+futures = { workspace = true }
 structured-logger = { workspace = true }

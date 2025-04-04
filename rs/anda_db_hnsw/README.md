@@ -33,11 +33,11 @@ use anda_db_hnsw::{HnswConfig, HnswIndex};
 // Create a new index for 384-dimensional vectors
 const DIM: usize = 384;
 let config = HnswConfig::default();
-let index = HnswIndex::new(DIM, config);
+let index = HnswIndex::new(DIM, config, now_ms);
 
 // Insert vectors
 let vector1: Vec<f32> = vec![0.1, 0.2, /* ... */]; // 384 dimensions
-index.insert_f32(1, vector1)?;
+index.insert_f32(1, vector1, now_ms)?;
 
 // Search for nearest neighbors
 let query: Vec<f32> = vec![0.15, 0.25, /* ... */]; // 384 dimensions
@@ -50,7 +50,7 @@ for (id, distance) in results {
 
 // Save index to file
 let file = tokio::fs::File::create("index.cbor")?;
-index.save(file).await?;
+index.save(file, now_ms).await?;
 
 // Load index from file
 let file = tokio::fs::File::open("index.cbor")?;
@@ -121,7 +121,6 @@ let removed = index.remove(vector_id)?;
 // Get index statistics
 let stats = index.stats();
 println!("Total vectors: {}", stats.num_elements);
-println!("Deleted vectors: {}", stats.num_deleted);
 println!("Max layer: {}", stats.max_layer);
 println!("Avg connections: {:.2}", stats.avg_connections);
 println!("Search operations: {}", stats.search_count);
@@ -138,29 +137,40 @@ use anda_db_hnsw::{HnswConfig, HnswIndex};
 use rand::Rng;
 use tokio::time;
 
+pub fn unix_ms() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time before Unix epoch");
+    ts.as_millis() as u64
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    structured_logger::Builder::new().init();
+
     const DIM: usize = 384;
 
-    // Create index (384-dimensional vectors, like BERT embeddings)
+    // 创建索引 (384维向量，如BERT嵌入)
     let config = HnswConfig::default();
-    let index = HnswIndex::new(DIM, config);
+    let index = HnswIndex::new(DIM, config, unix_ms());
 
-    // Simulate data stream
-    let mut rng = rand::thread_rng();
+    // 模拟数据流
+    let mut rng = rand::rng();
 
-    let mut insert_start = time::Instant::now();
+    let mut inert_start = time::Instant::now();
     for i in 0..100_000 {
-        // Generate random vector
-        let vector: Vec<f32> = (0..DIM).map(|_| rng.gen::<f32>()).collect();
-        let _ = index.insert_f32(i as u64, vector)?;
+        let vector: Vec<f32> = (0..DIM).map(|_| rng.random::<f32>()).collect();
+        let _ = index.insert_f32(i as u64, vector, unix_ms())?;
+        // println!("{} inserted vector {}", i, i);
 
-        // Simulate search queries
+        // 模拟搜索查询
         if i % 100 == 0 {
-            println!("{} inserted 100 vectors in {:?}", i, insert_start.elapsed());
-            insert_start = time::Instant::now();
+            println!("{} inserted 100 vectors in {:?}", i, inert_start.elapsed());
+            inert_start = time::Instant::now();
 
-            let query: Vec<f32> = (0..DIM).map(|_| rng.gen::<f32>()).collect();
+            let query: Vec<f32> = (0..DIM).map(|_| rng.random::<f32>()).collect();
             let query_start = time::Instant::now();
             let results = index.search_f32(&query, 10)?;
             println!(
@@ -171,11 +181,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
 
-        // Simulate deletion
+        // 模拟删除
         if i % 1000 == 0 && i > 0 {
-            let to_remove = rng.gen_range(0..i);
+            let to_remove = rng.random_range(0..i);
             let remove_start = time::Instant::now();
-            index.remove(to_remove as u64)?;
+            index.remove(to_remove, unix_ms())?;
             println!(
                 "{} Removed vector {} in {:?}",
                 i,
@@ -185,34 +195,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Print statistics
+    // 打印统计信息
     let stats = index.stats();
     println!("Index statistics:");
     println!("- Total vectors: {}", stats.num_elements);
-    println!("- Deleted vectors: {}", stats.num_deleted);
     println!("- Max layer: {}", stats.max_layer);
     println!("- Avg connections: {:.2}", stats.avg_connections);
     println!("- Search operations: {}", stats.search_count);
     println!("- Insert operations: {}", stats.insert_count);
     println!("- Delete operations: {}", stats.delete_count);
 
-    // Save and load
+    // 最终保存
     {
         let file = tokio::fs::File::create("hnsw_demo.cbor").await?;
         let save_start = time::Instant::now();
-        index.save(file).await?;
-        println!("Saved index in {:?}", save_start.elapsed());
+        index.save_all(file, unix_ms()).await?;
+        println!("Saved index with nodes in {:?}", save_start.elapsed());
     }
 
     let file = tokio::fs::File::open("hnsw_demo.cbor").await?;
-    let load_start = time::Instant::now();
-    let loaded_index = HnswIndex::load(file).await?;
-    println!("Loaded index in {:?}", load_start.elapsed());
-
-    // Test search on loaded index
-    let query: Vec<f32> = (0..DIM).map(|_| rng.gen::<f32>()).collect();
+    let save_start = time::Instant::now();
+    let index = HnswIndex::load(file).await?;
+    println!("Load index in {:?}", save_start.elapsed());
+    let query: Vec<f32> = (0..DIM).map(|_| rng.random::<f32>()).collect();
     let query_start = time::Instant::now();
-    let results = loaded_index.search_f32(&query, 10)?;
+    let results = index.search_f32(&query, 10)?;
     println!(
         "Search returned {} results in {:?}",
         results.len(),
@@ -221,6 +228,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+
 ```
 
 ## Error Handling

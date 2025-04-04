@@ -17,6 +17,7 @@ edition = "2024"
 license = "MIT"
 
 [workspace.dependencies]
+futures = { version = "0.3" }
 tokio = { version = "1.44" }
 ciborium = "0.2"
 dashmap = "6.1"
