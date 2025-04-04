@@ -3,7 +3,7 @@
 [![Crates.io](https://img.shields.io/crates/v/anda_db_hnsw)](https://crates.io/crates/anda_db_hnsw)
 [![Documentation](https://docs.rs/anda_db_hnsw/badge.svg)](https://docs.rs/anda_db_hnsw)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Build Status](https://github.com/ldclabs/anda-db/actions/workflows/ci.yml/badge.svg)](https://github.com/ldclabs/anda-db/actions)
+[![Build Status](https://github.com/ldclabs/anda-db/actions/workflows/test.yml/badge.svg)](https://github.com/ldclabs/anda-db/actions)
 
 A high-performance implementation of Hierarchical Navigable Small World (HNSW) algorithm for approximate nearest neighbor search in high-dimensional spaces.
 

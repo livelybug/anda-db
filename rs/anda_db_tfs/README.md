@@ -3,7 +3,7 @@
 [![Crates.io](https://img.shields.io/crates/v/anda_db_tfs)](https://crates.io/crates/anda_db_tfs)
 [![Documentation](https://docs.rs/anda_db_tfs/badge.svg)](https://docs.rs/anda_db_tfs)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Build Status](https://github.com/ldclabs/anda-db/actions/workflows/ci.yml/badge.svg)](https://github.com/ldclabs/anda-db/actions)
+[![Build Status](https://github.com/ldclabs/anda-db/actions/workflows/test.yml/badge.svg)](https://github.com/ldclabs/anda-db/actions)
 
 `anda_db_tfs` is a full-text search library implementing the BM25 ranking algorithm in Rust. BM25 (Best Matching 25) is a ranking function used by search engines to estimate the relevance of documents to a given search query. It's an extension of the TF-IDF model.
 

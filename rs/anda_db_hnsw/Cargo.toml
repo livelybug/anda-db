@@ -20,7 +20,7 @@ smallvec = { workspace = true, features = ["serde", "const_new"] }
 parking_lot = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }
-tokio = { workspace = true, features = ["sync", "parking_lot"] }
+tokio = { workspace = true, features = ["sync", "parking_lot", "io-util"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
