@@ -18,6 +18,7 @@ tantivy-tokenizer-api = { workspace = true }
 tantivy = { workspace = true, optional = true }
 tantivy-jieba = { workspace = true, optional = true }
 thiserror = { workspace = true }
+parking_lot = { workspace = true }
 tokio = { workspace = true, features = ["sync", "parking_lot", "io-util"] }
 
 [dev-dependencies]

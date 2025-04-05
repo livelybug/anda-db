@@ -30,35 +30,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     ];
 
-    let rs = index
-        .add_documents(
-            docs.iter()
-                .into_iter()
-                .map(|doc| (doc.id, doc.text.clone()))
-                .collect(),
-        )
-        .await;
+    let rs = index.insert_batch(
+        docs.iter()
+            .into_iter()
+            .map(|doc| (doc.id, doc.text.clone()))
+            .collect(),
+        0,
+    );
     assert_eq!(rs.len(), 3);
 
     // 搜索
-    let results = index.search("rust memory", 2).await;
+    let results = index.search("rust memory", 2);
     for (doc_id, score) in results {
         println!("Found doc {}, score: {:.2}", doc_id, score);
     }
 
-    let results = index.search("安全", 2).await;
+    let results = index.search("安全", 2);
     for (doc_id, score) in results {
         println!("Found doc {}, score: {:.2}", doc_id, score);
     }
 
     // 删除文档
-    index.remove_document(docs[2].id, &docs[2].text).await;
+    index.remove(docs[2].id, &docs[2].text, 0);
     println!("Total documents after removal: {}", index.len());
 
     // 保存和加载
     {
         let file = tokio::fs::File::create("tfs_demo.cbor").await?;
-        index.save(file).await?;
+        index.store_all(file, 0).await?;
     }
 
     let file = tokio::fs::File::open("tfs_demo.cbor").await?;

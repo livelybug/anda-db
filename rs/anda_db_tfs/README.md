@@ -23,14 +23,14 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-anda_db_tfs = "0.2.0"
+anda_db_tfs = "0.2"
 ```
 
 For full features including tantivy tokenizers and jieba support:
 
 ```toml
 [dependencies]
-anda_db_tfs = { version = "0.2.0", features = ["full"] }
+anda_db_tfs = { version = "0.2", features = ["full"] }
 ```
 
 ## Quick Start
@@ -42,22 +42,22 @@ use anda_db_tfs::{BM25Index, SimpleTokenizer};
 let index = BM25Index::new(SimpleTokenizer::default(), None);
 
 // Add documents to the index
-index.add_document(1, "The quick brown fox jumps over the lazy dog").await.unwrap();
-index.add_document(2, "A fast brown fox runs past the lazy dog").await.unwrap();
-index.add_document(3, "The lazy dog sleeps all day").await.unwrap();
+index.insert(1, "The quick brown fox jumps over the lazy dog", now_ms).unwrap();
+index.insert(2, "A fast brown fox runs past the lazy dog", now_ms).unwrap();
+index.insert(3, "The lazy dog sleeps all day", now_ms).unwrap();
 
 // Search for documents containing "fox"
-let results = index.search("fox", 10).await;
+let results = index.search("fox", 10);
 for (doc_id, score) in results {
     println!("Document {}: score {}", doc_id, score);
 }
 
 // Remove a document
-index.remove_document(3, "The lazy dog sleeps all day").await;
+index.remove(3, "The lazy dog sleeps all day", now_ms);
 
-// Save the index to a file
+// Store the index to a file
 let file = tokio::fs::File::create("index.cbor").await.unwrap();
-index.save(file).await.unwrap();
+index.store(file, now_ms).await.unwrap();
 
 // Load the index from a file
 let file = tokio::fs::File::open("index.cbor").await.unwrap();
@@ -75,11 +75,11 @@ use anda_db_tfs::{BM25Index, jieba_tokenizer};
 let index = BM25Index::new(jieba_tokenizer(), None);
 
 // Add documents with Chinese text
-index.add_document(1, "Rust 是一种系统编程语言").await.unwrap();
-index.add_document(2, "Rust 快速且内存高效，安全、并发、实用").await.unwrap();
+index.insert(1, "Rust 是一种系统编程语言", now_ms).unwrap();
+index.insert(2, "Rust 快速且内存高效，安全、并发、实用", now_ms).unwrap();
 
 // Search for documents
-let results = index.search("安全", 10).await;
+let results = index.search("安全", 10);
 ```
 
 ## Advanced Usage
@@ -115,7 +115,7 @@ let docs = vec![
 ];
 
 // Add documents in batch
-let results = index.add_documents(docs).await;
+let results = index.insert(docs, now_ms);
 ```
 
 ## API Documentation
@@ -125,31 +125,43 @@ let results = index.add_documents(docs).await;
 The main struct for creating and managing a search index.
 
 ```rust
-// Create a new index
+// Creates a new index
 pub fn new(tokenizer: T, params: Some(BM25Param)) -> Self
 
-// Add a document to the index
-pub async fn add_document(&self, id: u64, text: &str) -> Result<(), BM25Error>
-
-// Add multiple documents to the index
-pub async fn add_documents(&self, docs: Vec<(u64, String)>) -> Vec<Result<(), BM25Error>>
-
-// Remove a document from the index
-pub async fn remove_document(&self, id: u64, text: &str) -> bool
-
-// Search the index
-pub async fn search(&self, query: &str, top_k: usize) -> Vec<(u64, f32)>
-
-// Get the number of documents in the index
+// Gets the number of documents in the index
 pub fn len(&self) -> usize
 
-// Check if the index is empty
+// Checks if the index is empty
 pub fn is_empty(&self) -> bool
 
-// Save the index to a writer
-pub async fn save<W: AsyncRead>(&self, w: W) -> Result<(), BM25Error>
+/// Returns the index update version
+pub fn version(&self) -> u64
 
-// Load the index from a reader
+/// Returns the index metadata
+pub fn metadata(&self) -> IndexMetadata
+
+/// Gets current statistics about the index
+pub fn stats(&self) -> IndexStats
+
+// Adds a document to the index
+pub fn insert(&self, id: u64, text: &str, now_ms: u64) -> Result<(), BM25Error>
+
+// Adds multiple documents to the index
+pub fn insert_batch(&self, docs: Vec<(u64, String)>, now_ms: u64) -> Vec<Result<(), BM25Error>>
+
+// Removes a document from the index
+pub fn remove(&self, id: u64, text: &str, now_ms: u64) -> bool
+
+// Searches the index
+pub fn search(&self, query: &str, top_k: usize) -> Vec<(u64, f32)>
+
+// Stores the index without postings to a writer.
+pub async fn store<W: AsyncRead>(&self, w: W, now_ms: u64) -> Result<(), BM25Error>
+
+// Stores the index with postings to a writer.
+pub async fn store_all<W: AsyncRead>(&self, w: W, now_ms: u64) -> Result<(), BM25Error>
+
+// Loads the index from a reader
 pub async fn load<R: AsyncWrite>(r: R, tokenizer: T) -> Result<Self, BM25Error>
 ```
 

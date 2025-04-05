@@ -6,8 +6,11 @@ use ordered_float::OrderedFloat;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
-use std::cmp::{Ordering, Reverse};
-use std::collections::{BTreeSet, BinaryHeap, HashMap, HashSet};
+use std::{
+    cmp::{Ordering, Reverse},
+    collections::{BTreeSet, BinaryHeap, HashMap, HashSet},
+    sync::atomic::{self, AtomicU64},
+};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -145,29 +148,26 @@ pub struct HnswNode {
 }
 
 /// Mapping function for a node.
-pub type NodeMapFn<R> = fn(&HnswNode) -> R;
+pub type NodeMapFn<R> = fn(&HnswNode) -> Option<R>;
 
 /// No-op function for node mapping.
-pub const NODE_NOOP_FN: NodeMapFn<()> = |_: &HnswNode| {};
+pub const NODE_NOOP_FN: NodeMapFn<()> = |_: &HnswNode| None;
 
-/// Function to serialize a node into a byte vector in CBOR format.
+/// Function to serialize a node into binary in CBOR format.
 pub const NODE_SERIALIZE_FN: NodeMapFn<Vec<u8>> = |node: &HnswNode| {
     let mut buf = Vec::new();
     ciborium::into_writer(node, &mut buf).expect("Failed to serialize node");
-    buf
+    Some(buf)
 };
 
 /// Function to retrieve the version of a node.
-pub const NODE_VERSION_FN: NodeMapFn<u64> = |node: &HnswNode| node.version;
+pub const NODE_VERSION_FN: NodeMapFn<u64> = |node: &HnswNode| Some(node.version);
 
 /// Index metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexMetadata {
     /// Dimension of vectors in the index.
     pub dimension: u8,
-
-    /// Creation timestamp (unix ms).
-    pub created_at: u64,
 
     /// Last insertion timestamp (unix ms).
     pub last_inserted: u64,
@@ -230,7 +230,7 @@ struct HnswIndexSerdeRef<'a> {
 impl From<HnswIndexSerdeOwn> for HnswIndex {
     fn from(val: HnswIndexSerdeOwn) -> Self {
         let layer_gen = val.config.layer_gen();
-
+        let search_count = AtomicU64::new(val.metadata.stats.search_count);
         HnswIndex {
             dimension: val.dimension,
             config: val.config,
@@ -238,6 +238,7 @@ impl From<HnswIndexSerdeOwn> for HnswIndex {
             nodes: val.nodes,
             entry_point: RwLock::new(val.entry_point),
             metadata: RwLock::new(val.metadata),
+            search_count,
         }
     }
 }
@@ -273,6 +274,9 @@ pub struct HnswIndex {
 
     /// Index metadata.
     metadata: RwLock<IndexMetadata>,
+
+    /// Number of search operations performed.
+    search_count: AtomicU64,
 }
 
 impl HnswIndex {
@@ -287,7 +291,8 @@ impl HnswIndex {
     /// # Returns
     ///
     /// * `HnswIndex` - A new HNSW index.
-    pub fn new(dimension: usize, config: HnswConfig, now_ms: u64) -> Self {
+    pub fn new(dimension: usize, config: Option<HnswConfig>) -> Self {
+        let config = config.unwrap_or_default();
         let layer_gen = config.layer_gen();
 
         Self {
@@ -298,13 +303,13 @@ impl HnswIndex {
             entry_point: RwLock::new((0, 0)),
             metadata: RwLock::new(IndexMetadata {
                 dimension: dimension as u8,
-                created_at: now_ms,
-                last_inserted: now_ms,
-                last_deleted: now_ms,
-                last_saved: now_ms,
+                last_inserted: 0,
+                last_deleted: 0,
+                last_saved: 0,
                 stats: IndexStats::default(),
                 version: 0,
             }),
+            search_count: AtomicU64::new(0),
         }
     }
 
@@ -342,7 +347,22 @@ impl HnswIndex {
 
     /// Returns the index metadata
     pub fn metadata(&self) -> IndexMetadata {
-        self.metadata.read().clone()
+        let mut metadata = { self.metadata.read().clone() };
+        metadata.stats.num_elements = self.nodes.len() as u64;
+        metadata.stats.search_count = self.search_count.load(atomic::Ordering::Relaxed);
+
+        let total_connections: u64 = self
+            .nodes
+            .iter()
+            .map(|n| n.neighbors.iter().map(|v| v.len() as u64).sum::<u64>())
+            .sum();
+
+        metadata.stats.avg_connections = if metadata.stats.num_elements > 0 {
+            total_connections as f32 / metadata.stats.num_elements as f32
+        } else {
+            0.0
+        };
+        metadata
     }
 
     /// Gets current statistics about the index
@@ -353,6 +373,7 @@ impl HnswIndex {
     pub fn stats(&self) -> IndexStats {
         let mut stats = { self.metadata.read().stats.clone() };
         stats.num_elements = self.nodes.len() as u64;
+        stats.search_count = self.search_count.load(atomic::Ordering::Relaxed);
 
         let total_connections: u64 = self
             .nodes
@@ -360,9 +381,8 @@ impl HnswIndex {
             .map(|n| n.neighbors.iter().map(|v| v.len() as u64).sum::<u64>())
             .sum();
 
-        let active_nodes = self.nodes.len();
-        stats.avg_connections = if active_nodes > 0 {
-            total_connections as f32 / active_nodes as f32
+        stats.avg_connections = if stats.num_elements > 0 {
+            total_connections as f32 / stats.num_elements as f32
         } else {
             0.0
         };
@@ -376,9 +396,9 @@ impl HnswIndex {
     }
 
     /// Gets a node by ID and applies a function to it.
-    pub fn get_node_with<R, F>(&self, id: u64, f: F) -> Result<R, HnswError>
+    pub fn get_node_with<R, F>(&self, id: u64, f: F) -> Result<Option<R>, HnswError>
     where
-        F: FnOnce(&HnswNode) -> R,
+        F: FnOnce(&HnswNode) -> Option<R>,
     {
         self.nodes
             .get(&id)
@@ -453,7 +473,7 @@ impl HnswIndex {
         hook: F,
     ) -> Result<Vec<(u64, R)>, HnswError>
     where
-        F: Fn(&HnswNode) -> R,
+        F: Fn(&HnswNode) -> Option<R>,
     {
         if vector.len() != self.dimension {
             return Err(HnswError::DimensionMismatch);
@@ -495,7 +515,9 @@ impl HnswIndex {
         if self.nodes.is_empty() {
             *self.entry_point.write() = (id, layer);
             node.version = 1;
-            updated_node_hook_result.push((id, hook(&node)));
+            if let Some(rt) = hook(&node) {
+                updated_node_hook_result.push((id, rt));
+            }
 
             self.nodes.insert(id, node);
             self.update_metadata(|m| {
@@ -592,7 +614,9 @@ impl HnswIndex {
                 return Err(HnswError::AlreadyExists(id));
             }
             dashmap::Entry::Vacant(v) => {
-                updated_node_hook_result.push((id, hook(&node)));
+                if let Some(rt) = hook(&node) {
+                    updated_node_hook_result.push((id, rt));
+                }
                 v.insert(node);
                 // Update entry point if new node is at a higher layer
                 if layer > current_max_layer {
@@ -600,7 +624,7 @@ impl HnswIndex {
                 }
 
                 self.update_metadata(|m| {
-                    m.version = m.version.saturating_add(1);
+                    m.version += 1;
                     m.last_inserted = now_ms;
                     if layer > m.stats.max_layer {
                         m.stats.max_layer = layer;
@@ -642,8 +666,10 @@ impl HnswIndex {
 
         for id in updated_neighbors {
             if let Some(mut node) = self.nodes.get_mut(&id) {
-                node.version = node.version.saturating_add(1);
-                updated_node_hook_result.push((id, hook(&node)));
+                node.version += 1;
+                if let Some(rt) = hook(&node) {
+                    updated_node_hook_result.push((id, rt));
+                }
             }
         }
 
@@ -695,7 +721,7 @@ impl HnswIndex {
         hook: F,
     ) -> Result<Vec<(u64, R)>, HnswError>
     where
-        F: Fn(&HnswNode) -> R,
+        F: Fn(&HnswNode) -> Option<R>,
     {
         self.insert_with(
             id,
@@ -705,6 +731,69 @@ impl HnswIndex {
         )
     }
 
+    /// Removes a vector from the index
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - ID of the vector to remove
+    /// * `now_ms` - Current timestamp in milliseconds
+    ///
+    /// # Returns
+    ///
+    /// * `bool` - True if the node was deleted, false otherwise
+    pub fn remove(&self, id: u64, now_ms: u64) -> bool {
+        let (deleted, _) = self.remove_with(id, now_ms, NODE_NOOP_FN);
+        deleted
+    }
+
+    /// Removes a vector from the index
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - ID of the vector to remove
+    /// * `now_ms` - Current timestamp in milliseconds
+    /// * `hook` - A function that is called with the updated neighbors after removal. It can be used for incremental persistence.
+    ///
+    /// # Returns
+    ///
+    /// * `(bool, Vec<(u64, R)>)` - Tuple containing a boolean indicating if the node was deleted and a vector of updated node's (ID, hook result) pairs.
+    pub fn remove_with<R, F>(&self, id: u64, now_ms: u64, hook: F) -> (bool, Vec<(u64, R)>)
+    where
+        F: Fn(&HnswNode) -> Option<R>,
+    {
+        let mut deleted = false;
+
+        let mut updated_node_hook_result: Vec<(u64, R)> = Vec::new();
+        if let Some((_, node)) = self.nodes.remove(&id) {
+            deleted = true;
+            self.try_update_entry_point(&node);
+            self.update_metadata(|m| {
+                m.version += 1;
+                m.last_deleted = now_ms;
+                m.stats.delete_count += 1;
+            });
+
+            // 遍历所有节点，删除与已删除节点的连接
+            self.nodes.iter_mut().for_each(|mut n| {
+                let mut updated = false;
+                for layer in 0..=(n.layer as usize) {
+                    if let Some(pos) = n.neighbors[layer].iter().position(|&(idx, _)| idx == id) {
+                        n.neighbors[layer].swap_remove(pos);
+                        updated = true;
+                    }
+                }
+                if updated {
+                    n.version += 1;
+                    if let Some(rt) = hook(&n) {
+                        updated_node_hook_result.push((n.id, rt));
+                    }
+                }
+            });
+        }
+
+        (deleted, updated_node_hook_result)
+    }
+
     /// Searches for the k nearest neighbors to the query vector
     ///
     /// Results are sorted by ascending distance (closest first)
@@ -712,12 +801,12 @@ impl HnswIndex {
     /// # Arguments
     ///
     /// * `query` - Query vector
-    /// * `k` - Number of nearest neighbors to return
+    /// * `top_k` - Number of nearest neighbors to return
     ///
     /// # Returns
     ///
     /// * `Result<Vec<(u64, f32)>, HnswError>` - Vector of (id, distance) pairs
-    pub fn search(&self, query: &[bf16], k: usize) -> Result<Vec<(u64, f32)>, HnswError> {
+    pub fn search(&self, query: &[bf16], top_k: usize) -> Result<Vec<(u64, f32)>, HnswError> {
         if query.len() != self.dimension {
             return Err(HnswError::DimensionMismatch);
         }
@@ -742,13 +831,11 @@ impl HnswIndex {
         }
 
         // 在底层搜索最近的邻居
-        let ef = self.config.ef_search.max(k);
+        let ef = self.config.ef_search.max(top_k);
         let mut results = self.search_layer(query, current_node, 0, ef, &mut distance_cache)?;
-        results.truncate(k);
+        results.truncate(top_k);
 
-        self.update_metadata(|m| {
-            m.stats.search_count += 1;
-        });
+        self.search_count.fetch_add(1, atomic::Ordering::Relaxed);
 
         Ok(results)
     }
@@ -760,15 +847,15 @@ impl HnswIndex {
     /// # Arguments
     ///
     /// * `query` - Query vector as f32 values
-    /// * `k` - Number of nearest neighbors to return
+    /// * `top_k` - Number of nearest neighbors to return
     ///
     /// # Returns
     ///
     /// * `Result<Vec<(u64, f32)>, HnswError>` - Vector of (id, distance) pairs sorted by ascending distance
-    pub fn search_f32(&self, query: &[f32], k: usize) -> Result<Vec<(u64, f32)>, HnswError> {
+    pub fn search_f32(&self, query: &[f32], top_k: usize) -> Result<Vec<(u64, f32)>, HnswError> {
         self.search(
             &query.iter().map(|v| bf16::from_f32(*v)).collect::<Vec<_>>(),
-            k,
+            top_k,
         )
     }
 
@@ -999,19 +1086,19 @@ impl HnswIndex {
         }
     }
 
-    /// Saves the index without nodes to a writer.
+    /// Stores the index without nodes to a writer.
     ///
     /// Serializes the index using CBOR format.
     ///
     /// # Arguments
     ///
-    /// * `w` - Writer to save the index to.
+    /// * `w` - Writer to store the index to.
     /// * `now_ms` - Current timestamp in milliseconds.
     ///
     /// # Returns
     ///
     /// * `Result<(), HnswError>` - Success or error.
-    pub async fn save<W: AsyncWrite + Unpin>(
+    pub async fn store<W: AsyncWrite + Unpin>(
         &self,
         mut w: W,
         now_ms: u64,
@@ -1034,25 +1121,25 @@ impl HnswIndex {
             .map_err(|e| HnswError::Db(e.to_string()))?;
 
         self.update_metadata(|m| {
-            m.last_saved = now_ms;
+            m.last_saved = now_ms.max(m.last_saved);
         });
 
         Ok(())
     }
 
-    /// Saves the index with nodes to a writer.
+    /// Stores the index with nodes to a writer.
     ///
     /// Serializes the index using CBOR format.
     ///
     /// # Arguments
     ///
-    /// * `w` - Writer to save the index to.
+    /// * `w` - Writer to store the index to.
     /// * `now_ms` - Current timestamp in milliseconds.
     ///
     /// # Returns
     ///
     /// * `Result<(), HnswError>` - Success or error.
-    pub async fn save_all<W: AsyncWrite + Unpin>(
+    pub async fn store_all<W: AsyncWrite + Unpin>(
         &self,
         mut w: W,
         now_ms: u64,
@@ -1075,7 +1162,7 @@ impl HnswIndex {
             .map_err(|e| HnswError::Db(e.to_string()))?;
 
         self.update_metadata(|m| {
-            m.last_saved = now_ms;
+            m.last_saved = now_ms.max(m.last_saved);
         });
 
         Ok(())
@@ -1107,71 +1194,6 @@ impl HnswIndex {
         Ok(index)
     }
 
-    /// Removes a vector from the index
-    ///
-    /// # Arguments
-    ///
-    /// * `id` - ID of the vector to remove
-    /// * `now_ms` - Current timestamp in milliseconds
-    ///
-    /// # Returns
-    ///
-    /// * `Result<bool, HnswError>` - True if the node was deleted, false otherwise
-    pub fn remove(&self, id: u64, now_ms: u64) -> Result<bool, HnswError> {
-        self.remove_with(id, now_ms, NODE_NOOP_FN)
-            .map(|(deleted, _)| deleted)
-    }
-
-    /// Removes a vector from the index
-    ///
-    /// # Arguments
-    ///
-    /// * `id` - ID of the vector to remove
-    /// * `now_ms` - Current timestamp in milliseconds
-    /// * `hook` - A function that is called with the updated neighbors after removal. It can be used for incremental persistence.
-    ///
-    /// # Returns
-    ///
-    /// * `Result<(bool, Vec<(u64, R)>), HnswError>` - Tuple containing a boolean indicating if the node was deleted and a vector of updated node's (ID, hook result) pairs.
-    pub fn remove_with<R, F>(
-        &self,
-        id: u64,
-        now_ms: u64,
-        hook: F,
-    ) -> Result<(bool, Vec<(u64, R)>), HnswError>
-    where
-        F: Fn(&HnswNode) -> R,
-    {
-        let mut deleted = false;
-
-        let mut updated_node_hook_result: Vec<(u64, R)> = Vec::new();
-        if let Some((_, node)) = self.nodes.remove(&id) {
-            deleted = true;
-            self.try_update_entry_point(&node)?;
-            self.update_metadata(|m| {
-                m.version = m.version.saturating_add(1);
-                m.last_deleted = now_ms;
-                m.stats.delete_count += 1;
-            });
-
-            // 遍历所有节点，删除与已删除节点的连接
-            self.nodes.iter_mut().for_each(|mut n| {
-                let mut updated = false;
-                for layer in 0..=(n.layer as usize) {
-                    if let Some(pos) = n.neighbors[layer].iter().position(|&(idx, _)| idx == id) {
-                        n.neighbors[layer].swap_remove(pos);
-                        updated = true;
-                    }
-                }
-                if updated {
-                    updated_node_hook_result.push((n.id, hook(&n)));
-                }
-            });
-        }
-
-        Ok((deleted, updated_node_hook_result))
-    }
-
     /// Updates the entry point after a node deletion
     ///
     /// # Arguments
@@ -1181,11 +1203,11 @@ impl HnswIndex {
     /// # Returns
     ///
     /// * `Result<(), HnswError>` - Success or error
-    fn try_update_entry_point(&self, deleted_node: &HnswNode) -> Result<(), HnswError> {
+    fn try_update_entry_point(&self, deleted_node: &HnswNode) {
         let (_, mut max_layer) = {
             let point = self.entry_point.read();
             if point.0 != deleted_node.id {
-                return Ok(());
+                return;
             }
             *point
         };
@@ -1195,7 +1217,7 @@ impl HnswIndex {
                 for &(neighbor, _) in neighbors {
                     if let Some(neighbor_node) = self.nodes.get(&neighbor) {
                         *self.entry_point.write() = (neighbor, neighbor_node.layer);
-                        return Ok(());
+                        return;
                     }
                 }
             }
@@ -1220,7 +1242,6 @@ impl HnswIndex {
                 entry_point.1
             );
         }
-        Ok(())
     }
 
     /// Updates the index metadata
@@ -1243,8 +1264,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_hnsw_basic() {
-        let config = HnswConfig::default();
-        let index = HnswIndex::new(2, config, 0);
+        let index = HnswIndex::new(2, None);
 
         // 添加一些二维向量
         index.insert_f32(1, vec![1.0, 1.0], 0).unwrap();
@@ -1257,7 +1277,7 @@ mod tests {
         let ids = index.node_ids();
         assert_eq!(ids.into_iter().collect::<Vec<_>>(), vec![1, 2, 3, 4, 5]);
 
-        let data = index.get_node_with(1, NODE_SERIALIZE_FN).unwrap();
+        let data = index.get_node_with(1, NODE_SERIALIZE_FN).unwrap().unwrap();
         let node: HnswNode = ciborium::from_reader(&data[..]).unwrap();
         println!("Node data: {:?}", node);
         assert_eq!(node.vector, vec![bf16::from_f32(1.0), bf16::from_f32(1.0)]);
@@ -1271,7 +1291,7 @@ mod tests {
 
         // 测试持久化
         let mut data = Vec::new();
-        index.save_all(&mut data, 0).await.unwrap();
+        index.store_all(&mut data, 0).await.unwrap();
         println!("Serialized data size: {}", data.len());
 
         let loaded_index = HnswIndex::load(&data[..]).await.unwrap();
@@ -1292,7 +1312,7 @@ mod tests {
             distance_metric: DistanceMetric::Euclidean,
             ..Default::default()
         };
-        let index = HnswIndex::new(2, config, 0);
+        let index = HnswIndex::new(2, Some(config));
         index.insert_f32(1, v1.clone(), 0).unwrap();
         let results = index.search_f32(&v2, 1).unwrap();
         assert!((results[0].1 - 1.4142135).abs() < 1e-6);
@@ -1302,7 +1322,7 @@ mod tests {
             distance_metric: DistanceMetric::Cosine,
             ..Default::default()
         };
-        let index = HnswIndex::new(2, config, 0);
+        let index = HnswIndex::new(2, Some(config));
         index.insert_f32(1, v1.clone(), 0).unwrap();
         let results = index.search_f32(&v2, 1).unwrap();
         assert!((results[0].1 - 1.0).abs() < 1e-6);
@@ -1312,7 +1332,7 @@ mod tests {
             distance_metric: DistanceMetric::InnerProduct,
             ..Default::default()
         };
-        let index = HnswIndex::new(2, config, 0);
+        let index = HnswIndex::new(2, Some(config));
         index.insert_f32(1, v1.clone(), 0).unwrap();
         let results = index.search_f32(&v2, 1).unwrap();
         assert!((results[0].1 - 0.0).abs() < 1e-6);
@@ -1328,7 +1348,7 @@ mod tests {
             distance_metric: DistanceMetric::Manhattan,
             ..Default::default()
         };
-        let index = HnswIndex::new(2, config, 0);
+        let index = HnswIndex::new(2, Some(config));
         index.insert_f32(1, v1.clone(), 0).unwrap();
         let results = index.search_f32(&v2, 1).unwrap();
         assert!((results[0].1 - 2.0).abs() < 1e-6);
@@ -1336,8 +1356,7 @@ mod tests {
 
     #[test]
     fn test_empty_index() {
-        let config = HnswConfig::default();
-        let index = HnswIndex::new(3, config, 0);
+        let index = HnswIndex::new(3, None);
 
         // 空索引搜索应该返回错误
         let result = index.search_f32(&[1.0, 2.0, 3.0], 5);
@@ -1346,8 +1365,7 @@ mod tests {
 
     #[test]
     fn test_dimension_mismatch() {
-        let config = HnswConfig::default();
-        let index = HnswIndex::new(3, config, 0);
+        let index = HnswIndex::new(3, None);
 
         // 插入维度不匹配的向量
         let result = index.insert_f32(1, vec![1.0, 2.0], 0);
@@ -1363,8 +1381,7 @@ mod tests {
 
     #[test]
     fn test_duplicate_insert() {
-        let config = HnswConfig::default();
-        let index = HnswIndex::new(2, config, 0);
+        let index = HnswIndex::new(2, None);
 
         // 首次插入成功
         index.insert_f32(1, vec![1.0, 2.0], 0).unwrap();
@@ -1376,8 +1393,7 @@ mod tests {
 
     #[test]
     fn test_remove() {
-        let config = HnswConfig::default();
-        let index = HnswIndex::new(2, config, 0);
+        let index = HnswIndex::new(2, None);
 
         // 添加向量
         index.insert_f32(1, vec![1.0, 1.0], 0).unwrap();
@@ -1387,12 +1403,12 @@ mod tests {
         assert_eq!(index.len(), 3);
 
         // 删除存在的向量
-        let deleted = index.remove(2, 0).unwrap();
+        let deleted = index.remove(2, 0);
         assert!(deleted);
         assert_eq!(index.len(), 2);
 
         // 删除不存在的向量
-        let deleted = index.remove(4, 0).unwrap();
+        let deleted = index.remove(4, 0);
         assert!(!deleted);
 
         // 搜索应该只返回剩余的向量
@@ -1407,7 +1423,7 @@ mod tests {
             max_elements: Some(3),
             ..Default::default()
         };
-        let index = HnswIndex::new(2, config, 0);
+        let index = HnswIndex::new(2, Some(config));
 
         // 添加向量直到达到最大容量
         index.insert_f32(1, vec![1.0, 1.0], 0).unwrap();
@@ -1426,14 +1442,14 @@ mod tests {
             select_neighbors_strategy: SelectNeighborsStrategy::Simple,
             ..Default::default()
         };
-        let simple_index = HnswIndex::new(2, config, 0);
+        let simple_index = HnswIndex::new(2, Some(config));
 
         // 测试启发式策略
         let config = HnswConfig {
             select_neighbors_strategy: SelectNeighborsStrategy::Heuristic,
             ..Default::default()
         };
-        let heuristic_index = HnswIndex::new(2, config, 0);
+        let heuristic_index = HnswIndex::new(2, Some(config));
 
         // 添加相同的向量到两个索引
         for i in 0..20 {
@@ -1459,8 +1475,7 @@ mod tests {
 
         // 创建并填充索引
         {
-            let config = HnswConfig::default();
-            let index = HnswIndex::new(3, config, 0);
+            let index = HnswIndex::new(3, None);
 
             for i in 0..100 {
                 let x = (i % 10) as f32;
@@ -1469,7 +1484,7 @@ mod tests {
                 index.insert_f32(i, vec![x, y, z], 0).unwrap();
             }
 
-            index.save_all(&mut data, 0).await.unwrap();
+            index.store_all(&mut data, 0).await.unwrap();
         }
 
         // 从文件加载索引
@@ -1487,8 +1502,7 @@ mod tests {
 
     #[test]
     fn test_stats() {
-        let config = HnswConfig::default();
-        let index = HnswIndex::new(2, config, 0);
+        let index = HnswIndex::new(2, None);
 
         // 初始状态
         let stats = index.stats();
@@ -1515,8 +1529,8 @@ mod tests {
         assert_eq!(stats.search_count, 5);
 
         // 删除向量
-        index.remove(5, 0).unwrap();
-        index.remove(6, 0).unwrap();
+        index.remove(5, 0);
+        index.remove(6, 0);
 
         let stats = index.stats();
         assert_eq!(stats.num_elements, 8);
@@ -1551,8 +1565,7 @@ mod tests {
     fn test_large_dimension() {
         // 测试高维向量
         let dim = 128;
-        let config = HnswConfig::default();
-        let index = HnswIndex::new(dim, config, 0);
+        let index = HnswIndex::new(dim, None);
 
         // 创建一些高维向量
         for i in 0..10 {
@@ -1571,8 +1584,7 @@ mod tests {
 
     #[test]
     fn test_entry_point_update() {
-        let config = HnswConfig::default();
-        let index = HnswIndex::new(2, config, 0);
+        let index = HnswIndex::new(2, None);
 
         // 添加向量
         index.insert_f32(1, vec![1.0, 1.0], 0).unwrap();
@@ -1582,7 +1594,7 @@ mod tests {
         assert_eq!(entry_id, 1);
 
         // 删除入口点
-        index.remove(entry_id, 0).unwrap();
+        index.remove(entry_id, 0);
 
         // 添加新向量，应该成为新的入口点
         index.insert_f32(2, vec![2.0, 2.0], 0).unwrap();
@@ -1596,8 +1608,7 @@ mod tests {
         use std::sync::Arc;
         use tokio::sync::Barrier;
 
-        let config = HnswConfig::default();
-        let index = Arc::new(HnswIndex::new(3, config, 0));
+        let index = Arc::new(HnswIndex::new(3, None));
         let mut handles: Vec<tokio::task::JoinHandle<Result<(), HnswError>>> =
             Vec::with_capacity(10);
         let barrier = Arc::new(Barrier::new(10));
@@ -1623,11 +1634,7 @@ mod tests {
                 // 插入操作
                 for i in 0..10 {
                     let id = base_id + i;
-                    index_clone.insert_f32(
-                        id as u64,
-                        vec![id as f32, id as f32, id as f32],
-                        0,
-                    )?;
+                    index_clone.insert_f32(id as u64, vec![id as f32, id as f32, id as f32], 0)?;
                 }
 
                 // 搜索操作
@@ -1638,7 +1645,7 @@ mod tests {
                 // 删除操作
                 for i in 0..5 {
                     let id = base_id + i;
-                    let _ = index_clone.remove(id as u64, 0)?;
+                    let _ = index_clone.remove(id as u64, 0);
                 }
                 Ok(())
             }));

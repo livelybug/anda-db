@@ -22,7 +22,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-anda_db_hnsw = "0.2.0"
+anda_db_hnsw = "0.2"
 ```
 
 ## Quick Start
@@ -32,8 +32,7 @@ use anda_db_hnsw::{HnswConfig, HnswIndex};
 
 // Create a new index for 384-dimensional vectors
 const DIM: usize = 384;
-let config = HnswConfig::default();
-let index = HnswIndex::new(DIM, config, now_ms);
+let index = HnswIndex::new(DIM, None);
 
 // Insert vectors
 let vector1: Vec<f32> = vec![0.1, 0.2, /* ... */]; // 384 dimensions
@@ -152,20 +151,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     const DIM: usize = 384;
 
-    // 创建索引 (384维向量，如BERT嵌入)
-    let config = HnswConfig::default();
-    let index = HnswIndex::new(DIM, config, unix_ms());
+    let index = HnswIndex::new(DIM, None);
 
-    // 模拟数据流
     let mut rng = rand::rng();
 
     let mut inert_start = time::Instant::now();
-    for i in 0..100_000 {
+    for i in 0..10_000 {
         let vector: Vec<f32> = (0..DIM).map(|_| rng.random::<f32>()).collect();
         let _ = index.insert_f32(i as u64, vector, unix_ms())?;
         // println!("{} inserted vector {}", i, i);
 
-        // 模拟搜索查询
         if i % 100 == 0 {
             println!("{} inserted 100 vectors in {:?}", i, inert_start.elapsed());
             inert_start = time::Instant::now();
@@ -181,11 +176,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
 
-        // 模拟删除
         if i % 1000 == 0 && i > 0 {
             let to_remove = rng.random_range(0..i);
             let remove_start = time::Instant::now();
-            index.remove(to_remove, unix_ms())?;
+            index.remove(to_remove, unix_ms());
             println!(
                 "{} Removed vector {} in {:?}",
                 i,
@@ -195,7 +189,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // 打印统计信息
     let stats = index.stats();
     println!("Index statistics:");
     println!("- Total vectors: {}", stats.num_elements);
@@ -205,18 +198,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("- Insert operations: {}", stats.insert_count);
     println!("- Delete operations: {}", stats.delete_count);
 
-    // 最终保存
     {
         let file = tokio::fs::File::create("hnsw_demo.cbor").await?;
-        let save_start = time::Instant::now();
-        index.save_all(file, unix_ms()).await?;
-        println!("Saved index with nodes in {:?}", save_start.elapsed());
+        let store_start = time::Instant::now();
+        index.store_all(file, unix_ms()).await?;
+        println!("Stored index with nodes in {:?}", store_start.elapsed());
     }
 
     let file = tokio::fs::File::open("hnsw_demo.cbor").await?;
-    let save_start = time::Instant::now();
+    let load_start = time::Instant::now();
     let index = HnswIndex::load(file).await?;
-    println!("Load index in {:?}", save_start.elapsed());
+    println!("Load index in {:?}", load_start.elapsed());
     let query: Vec<f32> = (0..DIM).map(|_| rng.random::<f32>()).collect();
     let query_start = time::Instant::now();
     let results = index.search_f32(&query, 10)?;

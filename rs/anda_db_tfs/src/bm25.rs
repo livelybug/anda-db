@@ -1,15 +1,15 @@
 //! # Anda-DB BM25 Full-Text Search Library
 
 use dashmap::DashMap;
+use parking_lot::RwLock;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::sync::Arc;
-use thiserror::Error;
-use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    sync::RwLock,
+use std::{
+    collections::{BTreeSet, HashMap},
+    sync::atomic::{AtomicU64, Ordering},
 };
+use thiserror::Error;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::tokenizer::*;
 
@@ -23,6 +23,10 @@ pub enum BM25Error {
     /// CBOR serialization/deserialization errors
     #[error("CBOR serialization error: {0}")]
     Cbor(String),
+
+    /// Error when a token is not found.
+    #[error("Not found {0:?}")]
+    TokenNotFound(String),
 
     /// Error when trying to add a document with an ID that already exists
     #[error("Document {0} already exists")]
@@ -50,20 +54,82 @@ impl Default for BM25Params {
     }
 }
 
+/// Type alias for posting values: (version, Vec<(document_id, token_frequency)>)
+pub type PostingValue = (u64, Vec<(u64, usize)>);
+
+/// Mapping function for a posting.
+pub type PostingMapFn<R> = fn(&str, &PostingValue) -> Option<R>;
+
+/// No-op function for posting mapping.
+pub const POSTING_NOOP_FN: PostingMapFn<()> = |_: &str, _: &PostingValue| None;
+
+/// Function to serialize a posting into binary in CBOR format.
+pub const POSTING_SERIALIZE_FN: PostingMapFn<Vec<u8>> = |token: &str, val: &PostingValue| {
+    let mut buf = Vec::new();
+    ciborium::into_writer(&(token, val), &mut buf).expect("Failed to serialize posting value");
+    Some(buf)
+};
+
+/// Function to retrieve the version of a posting.
+pub const NODE_VERSION_FN: PostingMapFn<u64> = |_: &str, val: &PostingValue| Some(val.0);
+
 /// Internal data structure for the BM25 index
-#[derive(Debug)]
 struct BM25IndexData {
     /// BM25 algorithm parameters
     params: BM25Params,
 
-    /// Average number of tokens per document
-    avg_doc_tokens: RwLock<f32>,
-
     /// Maps document IDs to their token counts
     doc_tokens: DashMap<u64, usize>,
 
-    /// Inverted index mapping tokens to (document_id, term_frequency) pairs
-    postings: DashMap<String, Vec<(u64, usize)>>,
+    /// Inverted index mapping tokens to (version, Vec<(document_id, term_frequency)>)
+    postings: DashMap<String, PostingValue>,
+
+    /// Index metadata.
+    metadata: RwLock<IndexMetadata>,
+
+    /// Average number of tokens per document
+    avg_doc_tokens: RwLock<f32>,
+
+    /// Number of search operations performed.
+    search_count: AtomicU64,
+}
+
+/// Index metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexMetadata {
+    /// Last insertion timestamp (unix ms).
+    pub last_inserted: u64,
+
+    /// Last deletion timestamp (unix ms).
+    pub last_deleted: u64,
+
+    /// Last saved timestamp (unix ms).
+    pub last_saved: u64,
+
+    /// Updated version for the index. It will be incremented when the index is updated.
+    pub version: u64,
+
+    /// Index statistics.
+    pub stats: IndexStats,
+}
+
+/// Index statistics.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct IndexStats {
+    /// Number of elements in the index.
+    pub num_elements: u64,
+
+    /// Average number of tokens per document
+    pub avg_doc_tokens: f32,
+
+    /// Number of search operations performed.
+    pub search_count: u64,
+
+    /// Number of insert operations performed.
+    pub insert_count: u64,
+
+    /// Number of delete operations performed.
+    pub delete_count: u64,
 }
 
 /// Serializable BM25 index structure (owned version).
@@ -72,7 +138,8 @@ struct BM25IndexDataSerdeOwn {
     params: BM25Params,
     avg_doc_tokens: f32,
     doc_tokens: DashMap<u64, usize>,
-    postings: DashMap<String, Vec<(u64, usize)>>,
+    postings: DashMap<String, PostingValue>,
+    metadata: IndexMetadata,
 }
 
 #[derive(Clone, Serialize)]
@@ -80,28 +147,29 @@ struct BM25IndexDataSerdeRef<'a> {
     params: &'a BM25Params,
     avg_doc_tokens: f32,
     doc_tokens: &'a DashMap<u64, usize>,
-    postings: &'a DashMap<String, Vec<(u64, usize)>>,
+    postings: &'a DashMap<String, PostingValue>,
+    metadata: &'a IndexMetadata,
 }
 
 impl From<BM25IndexDataSerdeOwn> for BM25IndexData {
     fn from(data: BM25IndexDataSerdeOwn) -> Self {
+        let search_count = AtomicU64::new(data.metadata.stats.search_count);
         BM25IndexData {
             params: data.params,
-            avg_doc_tokens: RwLock::new(data.avg_doc_tokens),
             doc_tokens: data.doc_tokens,
             postings: data.postings,
+            metadata: RwLock::new(data.metadata),
+            avg_doc_tokens: RwLock::new(data.avg_doc_tokens),
+            search_count,
         }
     }
 }
 
 /// BM25 search index with customizable tokenization
-#[derive(Clone)]
 pub struct BM25Index<T: Tokenizer + Clone> {
     /// Tokenizer used to process text
     tokenizer: T,
-
-    /// Thread-safe shared index data
-    data: Arc<BM25IndexData>,
+    data: BM25IndexData,
 }
 
 impl<T> BM25Index<T>
@@ -112,28 +180,138 @@ where
     pub fn new(tokenizer: T, params: Option<BM25Params>) -> Self {
         BM25Index {
             tokenizer,
-            data: Arc::new(BM25IndexData {
+            data: BM25IndexData {
                 doc_tokens: DashMap::new(),
-                avg_doc_tokens: RwLock::new(0.0),
                 postings: DashMap::new(),
                 params: params.unwrap_or_default(),
-            }),
+                metadata: RwLock::new(IndexMetadata {
+                    last_inserted: 0,
+                    last_deleted: 0,
+                    last_saved: 0,
+                    version: 0,
+                    stats: IndexStats::default(),
+                }),
+                avg_doc_tokens: RwLock::new(0.0),
+                search_count: AtomicU64::new(0),
+            },
         }
     }
 
-    /// Adds a document to the index
+    /// Returns the number of documents in the index
+    pub fn len(&self) -> usize {
+        self.data.doc_tokens.len()
+    }
+
+    /// Returns whether the index is empty
+    pub fn is_empty(&self) -> bool {
+        self.data.doc_tokens.is_empty()
+    }
+
+    /// Returns the index update version
+    pub fn version(&self) -> u64 {
+        self.data.metadata.read().version
+    }
+
+    /// Returns the index metadata
+    pub fn metadata(&self) -> IndexMetadata {
+        let mut metadata = self.data.metadata.read().clone();
+        metadata.stats.search_count = self.data.search_count.load(Ordering::Relaxed);
+        metadata.stats.num_elements = self.data.doc_tokens.len() as u64;
+        metadata.stats.avg_doc_tokens = *self.data.avg_doc_tokens.read();
+        metadata
+    }
+
+    /// Gets current statistics about the index
+    ///
+    /// # Returns
+    ///
+    /// * `IndexStats` - Current statistics
+    pub fn stats(&self) -> IndexStats {
+        let mut stats = { self.data.metadata.read().stats.clone() };
+        stats.search_count = self.data.search_count.load(Ordering::Relaxed);
+        stats.num_elements = self.data.doc_tokens.len() as u64;
+        stats.avg_doc_tokens = *self.data.avg_doc_tokens.read();
+        stats
+    }
+
+    /// Gets all tokens in the index.
+    pub fn tokens(&self) -> BTreeSet<String> {
+        self.data.postings.iter().map(|v| v.key().clone()).collect()
+    }
+
+    /// Gets a posting by token and applies a function to it.
+    pub fn get_posting_with<R, F>(&self, token: &str, f: F) -> Result<Option<R>, BM25Error>
+    where
+        F: FnOnce(&str, &PostingValue) -> Option<R>,
+    {
+        self.data
+            .postings
+            .get(token)
+            .map(|v| f(token, &v))
+            .ok_or_else(|| BM25Error::TokenNotFound(token.to_string()))
+    }
+
+    /// Sets the posting if it is not already present or if the version is newer.
+    /// This method is only used to bootstrap the index from persistent storage.
+    pub fn set_posting(&self, token: String, value: PostingValue) -> bool {
+        match self.data.postings.entry(token) {
+            dashmap::Entry::Occupied(mut v) => {
+                let n = v.get_mut();
+                if n.0 < value.0 {
+                    *n = value;
+                    return true;
+                }
+                false
+            }
+            dashmap::Entry::Vacant(v) => {
+                v.insert(value);
+                true
+            }
+        }
+    }
+
+    /// Inserts a document to the index
     ///
     /// # Arguments
     ///
     /// * `id` - Unique document identifier
     /// * `text` - Document text content
+    /// * `now_ms` - Current timestamp in milliseconds
     ///
     /// # Returns
     ///
     /// * `Ok(())` if the document was successfully added
     /// * `Err(BM25Error::AlreadyExists)` if a document with the same ID already exists
     /// * `Err(BM25Error::TokenizeFailed)` if tokenization produced no tokens
-    pub async fn add_document(&self, id: u64, text: &str) -> Result<(), BM25Error> {
+    pub fn insert(&self, id: u64, text: &str, now_ms: u64) -> Result<(), BM25Error> {
+        self.insert_with(id, text, now_ms, POSTING_NOOP_FN)
+            .map(|_| ())
+    }
+
+    /// Inserts a document to the index
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Unique document identifier
+    /// * `text` - Document text content
+    /// * `now_ms` - Current timestamp in milliseconds
+    /// * `hook` - Function to apply to each token and its posting value
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` if the document was successfully added
+    /// * `Err(BM25Error::AlreadyExists)` if a document with the same ID already exists
+    /// * `Err(BM25Error::TokenizeFailed)` if tokenization produced no tokens
+    pub fn insert_with<R, F>(
+        &self,
+        id: u64,
+        text: &str,
+        now_ms: u64,
+        hook: F,
+    ) -> Result<Vec<(String, R)>, BM25Error>
+    where
+        F: Fn(&str, &PostingValue) -> Option<R>,
+    {
         if self.data.doc_tokens.contains_key(&id) {
             return Err(BM25Error::AlreadyExists(id));
         }
@@ -152,23 +330,41 @@ where
             });
         }
 
-        // Update document length and count
-        self.data.doc_tokens.insert(id, token_freqs.values().sum());
-        // Update inverted index
-        for (token, freq) in token_freqs {
-            self.data
-                .postings
-                .entry(token.clone())
-                .or_default()
-                .push((id, freq));
+        let docs = self.data.doc_tokens.len();
+        let tokens: usize = token_freqs.values().sum();
+        let total_tokens: usize = self.data.doc_tokens.iter().map(|r| *r.value()).sum();
+        let mut updated_posting_hook_result: Vec<(String, R)> =
+            Vec::with_capacity(token_freqs.len());
+        match self.data.doc_tokens.entry(id) {
+            dashmap::Entry::Occupied(_) => {
+                return Err(BM25Error::AlreadyExists(id));
+            }
+            dashmap::Entry::Vacant(v) => {
+                v.insert(tokens);
+
+                // Update inverted index
+                for (token, freq) in token_freqs {
+                    let mut entry = self.data.postings.entry(token.clone()).or_default();
+                    entry.0 += 1; // increment update version
+                    entry.1.push((id, freq));
+                    if let Some(rt) = hook(&token, &entry) {
+                        updated_posting_hook_result.push((token, rt));
+                    }
+                }
+
+                // Calculate new average document length
+                let avg_doc_tokens = (total_tokens + tokens) as f32 / (docs + 1) as f32;
+                *self.data.avg_doc_tokens.write() = avg_doc_tokens;
+
+                self.update_metadata(|m| {
+                    m.version += 1;
+                    m.last_inserted = now_ms;
+                    m.stats.insert_count += 1;
+                });
+            }
         }
 
-        // Calculate new average document length
-        let total_tokens: usize = self.data.doc_tokens.iter().map(|r| *r.value()).sum();
-        let avg_doc_tokens = total_tokens as f32 / self.data.doc_tokens.len() as f32;
-        *self.data.avg_doc_tokens.write().await = avg_doc_tokens;
-
-        Ok(())
+        Ok(updated_posting_hook_result)
     }
 
     /// Removes a document from the index
@@ -182,9 +378,35 @@ where
     ///
     /// * `true` if the document was found and removed
     /// * `false` if the document was not found
-    pub async fn remove_document(&self, id: u64, text: &str) -> bool {
-        if !self.data.doc_tokens.contains_key(&id) {
-            return false;
+    pub fn remove(&self, id: u64, text: &str, now_ms: u64) -> bool {
+        let (deleted, _) = self.remove_with(id, text, now_ms, POSTING_NOOP_FN);
+        deleted
+    }
+
+    /// Removes a document from the index
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Document identifier to remove
+    /// * `text` - Original document text (needed to identify tokens to remove)
+    ///
+    /// # Returns
+    ///
+    /// * `true` if the document was found and removed
+    /// * `false` if the document was not found
+    pub fn remove_with<R, F>(
+        &self,
+        id: u64,
+        text: &str,
+        now_ms: u64,
+        hook: F,
+    ) -> (bool, Vec<(String, R)>)
+    where
+        F: Fn(&str, &PostingValue) -> Option<R>,
+    {
+        if self.data.doc_tokens.remove(&id).is_none() {
+            // Document not found
+            return (false, Vec::new());
         }
 
         // Tokenize the document
@@ -193,26 +415,28 @@ where
             collect_tokens_parallel(&mut tokenizer, text, None)
         };
 
+        let mut updated_posting_hook_result: Vec<(String, R)> =
+            Vec::with_capacity(token_freqs.len());
         // Remove from inverted index
         let mut tokens_to_remove = Vec::new();
-        for token in token_freqs.keys() {
-            if let Some(mut postings) = self.data.postings.get_mut(token) {
+        for (token, _) in token_freqs {
+            if let Some(mut posting) = self.data.postings.get_mut(&token) {
                 // Remove document from postings list
-                if let Some(pos) = postings.iter().position(|&(idx, _)| idx == id) {
-                    postings.swap_remove(pos);
-                }
-
-                if postings.is_empty() {
-                    tokens_to_remove.push(token);
+                if let Some(pos) = posting.1.iter().position(|&(idx, _)| idx == id) {
+                    posting.0 += 1; // increment update version
+                    posting.1.swap_remove(pos);
+                    if posting.1.is_empty() {
+                        tokens_to_remove.push(token.clone());
+                    }
+                    if let Some(rt) = hook(&token, &posting) {
+                        updated_posting_hook_result.push((token, rt));
+                    }
                 }
             }
         }
 
-        // Remove from document storage
-        self.data.doc_tokens.remove(&id);
-
         for token in tokens_to_remove {
-            self.data.postings.remove(token);
+            self.data.postings.remove(&token);
         }
 
         // Recalculate average document length
@@ -222,9 +446,14 @@ where
         } else {
             total_tokens as f32 / self.data.doc_tokens.len() as f32
         };
-        *self.data.avg_doc_tokens.write().await = avg_doc_tokens;
+        *self.data.avg_doc_tokens.write() = avg_doc_tokens;
+        self.update_metadata(|m| {
+            m.version += 1;
+            m.last_deleted = now_ms;
+            m.stats.delete_count += 1;
+        });
 
-        true
+        (true, updated_posting_hook_result)
     }
 
     /// Searches the index for documents matching the query
@@ -237,31 +466,31 @@ where
     /// # Returns
     ///
     /// A vector of (document_id, score) pairs, sorted by descending score
-    pub async fn search(&self, query: &str, top_k: usize) -> Vec<(u64, f32)> {
+    pub fn search(&self, query: &str, top_k: usize) -> Vec<(u64, f32)> {
         let mut tokenizer = self.tokenizer.clone();
         let query_terms = collect_tokens(&mut tokenizer, query, None);
         if query_terms.is_empty() {
             return Vec::new();
         }
 
-        if self.data.doc_tokens.is_empty() {
+        if self.data.postings.is_empty() {
             return Vec::new();
         }
 
         let mut scores: HashMap<u64, f32> =
             HashMap::with_capacity(self.data.doc_tokens.len().min(1000));
         let doc_tokens = self.data.doc_tokens.len() as f32;
-        let avg_doc_tokens = self.data.avg_doc_tokens.read().await.max(1.0);
+        let avg_doc_tokens = self.data.avg_doc_tokens.read().max(1.0);
         let term_scores: Vec<HashMap<u64, f32>> = query_terms
             .par_iter()
             .filter_map(|(term, _)| {
                 self.data.postings.get(term).map(|postings| {
-                    let df = postings.len() as f32;
+                    let df = postings.1.len() as f32;
                     let idf = ((doc_tokens - df + 0.5) / (df + 0.5) + 1.0).ln();
 
                     // compute BM25 score for each document
                     let mut term_scores = HashMap::new();
-                    for (doc_id, tf) in postings.iter() {
+                    for (doc_id, tf) in postings.1.iter() {
                         let tokens = self
                             .data
                             .doc_tokens
@@ -289,44 +518,40 @@ where
             }
         }
 
-        let mut sorted_scores: Vec<(u64, f32)> = scores.into_iter().collect();
+        self.data.search_count.fetch_add(1, Ordering::Relaxed);
 
+        let mut sorted_scores: Vec<(u64, f32)> = scores.into_iter().collect();
         // Convert to vector and sort by score (descending)
         sorted_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         sorted_scores.truncate(top_k);
         sorted_scores
     }
 
-    /// Returns the number of documents in the index
-    pub fn len(&self) -> usize {
-        self.data.doc_tokens.len()
-    }
-
-    /// Returns whether the index is empty
-    pub fn is_empty(&self) -> bool {
-        self.data.doc_tokens.is_empty()
-    }
-
-    /// Serializes the index to a writer
+    /// Stores the index without postings to a writer.
     ///
     /// # Arguments
     ///
     /// * `w` - Any type implementing the `tokio::io::AsyncWrite` trait
+    /// * `now_ms` - Current timestamp in milliseconds
     ///
     /// # Returns
     ///
-    /// * `Ok(())` if serialization was successful
-    /// * `Err(BM25Error::Cbor)` if serialization failed
-    pub async fn save<W: AsyncWrite + Unpin>(&self, mut w: W) -> Result<(), BM25Error> {
+    /// * `Result<(), BM25Error>` - Success or error.
+    pub async fn store<W: AsyncWrite + Unpin>(
+        &self,
+        mut w: W,
+        now_ms: u64,
+    ) -> Result<(), BM25Error> {
         // clone data to avoid holding the lock for a long time
         let serialized_data = {
             let mut buf = Vec::new();
             ciborium::into_writer(
                 &BM25IndexDataSerdeRef {
                     params: &self.data.params,
-                    avg_doc_tokens: *self.data.avg_doc_tokens.read().await,
+                    avg_doc_tokens: *self.data.avg_doc_tokens.read(),
                     doc_tokens: &self.data.doc_tokens,
-                    postings: &self.data.postings,
+                    postings: &DashMap::new(),
+                    metadata: &self.data.metadata.read(),
                 },
                 &mut buf,
             )
@@ -337,6 +562,52 @@ where
         AsyncWriteExt::write_all(&mut w, &serialized_data)
             .await
             .map_err(|e| BM25Error::Db(e.to_string()))?;
+
+        self.update_metadata(|m| {
+            m.last_saved = now_ms.max(m.last_saved);
+        });
+        Ok(())
+    }
+
+    /// Stores the index with postings to a writer.
+    ///
+    /// # Arguments
+    ///
+    /// * `w` - Any type implementing the `tokio::io::AsyncWrite` trait
+    /// * `now_ms` - Current timestamp in milliseconds
+    ///
+    /// # Returns
+    ///
+    /// * `Result<(), BM25Error>` - Success or error.
+    pub async fn store_all<W: AsyncWrite + Unpin>(
+        &self,
+        mut w: W,
+        now_ms: u64,
+    ) -> Result<(), BM25Error> {
+        // clone data to avoid holding the lock for a long time
+        let serialized_data = {
+            let mut buf = Vec::new();
+            ciborium::into_writer(
+                &BM25IndexDataSerdeRef {
+                    params: &self.data.params,
+                    avg_doc_tokens: *self.data.avg_doc_tokens.read(),
+                    doc_tokens: &self.data.doc_tokens,
+                    postings: &self.data.postings,
+                    metadata: &self.data.metadata.read(),
+                },
+                &mut buf,
+            )
+            .map_err(|e| BM25Error::Cbor(e.to_string()))?;
+            buf
+        };
+
+        AsyncWriteExt::write_all(&mut w, &serialized_data)
+            .await
+            .map_err(|e| BM25Error::Db(e.to_string()))?;
+
+        self.update_metadata(|m| {
+            m.last_saved = now_ms.max(m.last_saved);
+        });
         Ok(())
     }
 
@@ -349,8 +620,7 @@ where
     ///
     /// # Returns
     ///
-    /// * `Ok(BM25Index)` if deserialization was successful
-    /// * `Err(BM25Error::Cbor)` if deserialization failed
+    /// * `Result<(), BM25Error>` - Success or error.
     pub async fn load<R: AsyncRead + Unpin>(mut r: R, tokenizer: T) -> Result<Self, BM25Error> {
         let data = {
             let mut buf = Vec::new();
@@ -364,9 +634,22 @@ where
             ciborium::from_reader(&data[..]).map_err(|e| BM25Error::Cbor(e.to_string()))?;
 
         Ok(BM25Index {
-            data: Arc::new(index_data.into()),
+            data: index_data.into(),
             tokenizer,
         })
+    }
+
+    /// Updates the index metadata
+    ///
+    /// # Arguments
+    ///
+    /// * `f` - Function that modifies the metadata
+    fn update_metadata<F>(&self, f: F)
+    where
+        F: FnOnce(&mut IndexMetadata),
+    {
+        let mut metadata = self.data.metadata.write();
+        f(&mut metadata);
     }
 }
 
@@ -384,7 +667,11 @@ where
     ///
     /// A vector of `Ok(())` if the documents were successfully added, or `Err(BM25Error)` if any document failed to add.
     /// The vector is in the same order as the input `docs` vector.
-    pub async fn add_documents(&self, docs: Vec<(u64, String)>) -> Vec<Result<(), BM25Error>> {
+    pub fn insert_batch(
+        &self,
+        docs: Vec<(u64, String)>,
+        now_ms: u64,
+    ) -> Vec<Result<(), BM25Error>> {
         if docs.is_empty() {
             return Vec::new();
         }
@@ -443,23 +730,29 @@ where
             .map(|(_, _, result)| result.clone())
             .collect();
 
+        let mut insert_count = 0u64;
         for (id, token_freqs, result) in processed_docs {
             if result.is_ok() {
+                insert_count += 1;
                 let tokens_len = token_freqs.values().sum();
                 self.data.doc_tokens.insert(id, tokens_len);
                 for (token, freq) in token_freqs {
-                    self.data
-                        .postings
-                        .entry(token.clone())
-                        .or_default()
-                        .push((id, freq));
+                    let mut entry = self.data.postings.entry(token).or_default();
+                    entry.0 += 1; // increment update version
+                    entry.1.push((id, freq));
                 }
             }
         }
 
         let total_tokens: usize = self.data.doc_tokens.iter().map(|r| *r.value()).sum();
         let avg_doc_tokens = total_tokens as f32 / self.data.doc_tokens.len() as f32;
-        *self.data.avg_doc_tokens.write().await = avg_doc_tokens;
+        *self.data.avg_doc_tokens.write() = avg_doc_tokens;
+
+        self.update_metadata(|m| {
+            m.version += 1;
+            m.last_inserted = now_ms;
+            m.stats.insert_count += insert_count;
+        });
 
         results
     }
@@ -470,80 +763,69 @@ mod tests {
     use super::*;
 
     // 创建一个简单的测试索引
-    async fn create_test_index() -> BM25Index<TokenizerChain> {
+    fn create_test_index() -> BM25Index<TokenizerChain> {
         let index = BM25Index::new(default_tokenizer(), None);
 
         // 添加一些测试文档
         index
-            .add_document(1, "The quick brown fox jumps over the lazy dog")
-            .await
+            .insert(1, "The quick brown fox jumps over the lazy dog", 0)
             .unwrap();
         index
-            .add_document(2, "A fast brown fox runs past the lazy dog")
-            .await
+            .insert(2, "A fast brown fox runs past the lazy dog", 0)
             .unwrap();
+        index.insert(3, "The lazy dog sleeps all day", 0).unwrap();
         index
-            .add_document(3, "The lazy dog sleeps all day")
-            .await
-            .unwrap();
-        index
-            .add_document(4, "Quick brown foxes are rare in the wild")
-            .await
+            .insert(4, "Quick brown foxes are rare in the wild", 0)
             .unwrap();
 
         index
     }
 
-    #[tokio::test]
-    async fn test_add_document() {
-        let index = create_test_index().await;
+    #[test]
+    fn test_insert() {
+        let index = create_test_index();
         assert_eq!(index.len(), 4);
 
         // 测试添加新文档
         index
-            .add_document(5, "A new document about cats and dogs")
-            .await
+            .insert(5, "A new document about cats and dogs", 0)
             .unwrap();
         assert_eq!(index.len(), 5);
 
         // 测试添加已存在的文档ID
-        let result = index.add_document(3, "This should fail").await;
+        let result = index.insert(3, "This should fail", 0);
         assert!(matches!(result, Err(BM25Error::AlreadyExists(3))));
 
         // 测试添加空文档
-        let result = index.add_document(6, "").await;
+        let result = index.insert(6, "", 0);
         assert!(matches!(
             result,
             Err(BM25Error::TokenizeFailed { id: 6, .. })
         ));
     }
 
-    #[tokio::test]
-    async fn test_remove_document() {
-        let index = create_test_index().await;
+    #[test]
+    fn test_remove() {
+        let index = create_test_index();
         assert_eq!(index.len(), 4);
 
         // 测试移除存在的文档
-        let removed = index
-            .remove_document(2, "A fast brown fox runs past the lazy dog")
-            .await;
+        let removed = index.remove(2, "A fast brown fox runs past the lazy dog", 0);
         assert!(removed);
         assert_eq!(index.len(), 3);
 
         // 测试移除不存在的文档
-        let removed = index
-            .remove_document(99, "This document doesn't exist")
-            .await;
+        let removed = index.remove(99, "This document doesn't exist", 0);
         assert!(!removed);
         assert_eq!(index.len(), 3);
     }
 
-    #[tokio::test]
-    async fn test_search() {
-        let index = create_test_index().await;
+    #[test]
+    fn test_search() {
+        let index = create_test_index();
 
         // 测试基本搜索功能
-        let results = index.search("fox", 10).await;
+        let results = index.search("fox", 10);
         assert_eq!(results.len(), 3); // 应该找到3个包含"fox"的文档
 
         // 检查结果排序 - 文档1和2应该排在前面，因为它们都包含"fox"
@@ -552,24 +834,24 @@ mod tests {
         assert!(results.iter().any(|(id, _)| *id == 4));
 
         // 测试多词搜索
-        let results = index.search("quick fox dog", 10).await;
+        let results = index.search("quick fox dog", 10);
         assert!(results[0].0 == 1); // 文档1应该排在最前面，因为它同时包含"quick", "fox", "dog"
 
         // 测试top_k限制
-        let results = index.search("dog", 2).await;
+        let results = index.search("dog", 2);
         assert_eq!(results.len(), 2); // 应该只返回2个结果，尽管有3个文档包含"dog"
 
         // 测试空查询
-        let results = index.search("", 10).await;
+        let results = index.search("", 10);
         assert_eq!(results.len(), 0);
 
         // 测试无匹配查询
-        let results = index.search("elephant giraffe", 10).await;
+        let results = index.search("elephant giraffe", 10);
         assert_eq!(results.len(), 0);
     }
 
-    #[tokio::test]
-    async fn test_empty_index() {
+    #[test]
+    fn test_empty_index() {
         let tokenizer = default_tokenizer();
         let index = BM25Index::new(tokenizer, None);
 
@@ -577,19 +859,19 @@ mod tests {
         assert!(index.is_empty());
 
         // 测试空索引的搜索
-        let results = index.search("test", 10).await;
+        let results = index.search("test", 10);
         assert_eq!(results.len(), 0);
     }
 
     #[tokio::test]
     async fn test_serialization() {
-        let index = create_test_index().await;
+        let index = create_test_index();
 
         // 创建临时文件
         let mut data: Vec<u8> = Vec::new();
 
         // 保存索引
-        index.save(&mut data).await.unwrap();
+        index.store_all(&mut data, 0).await.unwrap();
 
         // 加载索引
         let tokenizer = default_tokenizer();
@@ -599,8 +881,8 @@ mod tests {
         assert_eq!(loaded_index.len(), index.len());
 
         // 验证搜索结果
-        let mut original_results = index.search("fox", 10).await;
-        let mut loaded_results = loaded_index.search("fox", 10).await;
+        let mut original_results = index.search("fox", 10);
+        let mut loaded_results = loaded_index.search("fox", 10);
 
         assert_eq!(original_results.len(), loaded_results.len());
         original_results.sort_by(|a, b| a.0.cmp(&b.0));
@@ -612,8 +894,8 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_add_documents_parallel() {
+    #[test]
+    fn test_insert_batch_parallel() {
         let tokenizer = default_tokenizer();
         let index = BM25Index::new(tokenizer, None);
 
@@ -627,7 +909,7 @@ mod tests {
         ];
 
         // 并行添加文档
-        let results = index.add_documents(docs).await;
+        let results = index.insert_batch(docs, 0);
 
         // 验证结果
         assert_eq!(results.len(), 5);
@@ -637,7 +919,7 @@ mod tests {
         assert_eq!(index.len(), 5);
 
         // 测试搜索
-        let search_results = index.search("fox", 10).await;
+        let search_results = index.search("fox", 10);
         assert_eq!(search_results.len(), 3);
 
         // 测试添加已存在的文档
@@ -646,7 +928,7 @@ mod tests {
             (6, "This should succeed".to_string()),
         ];
 
-        let results = index.add_documents(duplicate_docs).await;
+        let results = index.insert_batch(duplicate_docs, 0);
         assert_eq!(results.len(), 2);
         assert!(matches!(results[0], Err(BM25Error::AlreadyExists(3))));
         assert!(results[1].is_ok());
@@ -655,37 +937,33 @@ mod tests {
         assert_eq!(index.len(), 6);
     }
 
-    #[tokio::test]
-    async fn test_bm25_params() {
+    #[test]
+    fn test_bm25_params() {
         let tokenizer = default_tokenizer();
 
         // 使用默认参数
-        let default_index = create_test_index().await;
+        let default_index = create_test_index();
 
         // 使用自定义参数
         let custom_index = BM25Index::new(tokenizer, Some(BM25Params { k1: 1.5, b: 0.75 }));
 
         // 添加相同的文档
         custom_index
-            .add_document(1, "The quick brown fox jumps over the lazy dog")
-            .await
+            .insert(1, "The quick brown fox jumps over the lazy dog", 0)
             .unwrap();
         custom_index
-            .add_document(2, "A fast brown fox runs past the lazy dog")
-            .await
+            .insert(2, "A fast brown fox runs past the lazy dog", 0)
             .unwrap();
         custom_index
-            .add_document(3, "The lazy dog sleeps all day")
-            .await
+            .insert(3, "The lazy dog sleeps all day", 0)
             .unwrap();
         custom_index
-            .add_document(4, "Quick brown foxes are rare in the wild")
-            .await
+            .insert(4, "Quick brown foxes are rare in the wild", 0)
             .unwrap();
 
         // 搜索相同的查询
-        let default_results = default_index.search("fox", 10).await;
-        let custom_results = custom_index.search("fox", 10).await;
+        let default_results = default_index.search("fox", 10);
+        let custom_results = custom_index.search("fox", 10);
 
         // 验证结果数量相同但分数不同
         assert_eq!(default_results.len(), custom_results.len());

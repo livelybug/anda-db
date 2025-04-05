@@ -11,6 +11,8 @@ pub fn unix_ms() -> u64 {
     ts.as_millis() as u64
 }
 
+// cargo build --example hnsw_demo --release
+// ./target/release/examples/hnsw_demo
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     structured_logger::Builder::new().init();
@@ -18,14 +20,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     const DIM: usize = 384;
 
     // 创建索引 (384维向量，如BERT嵌入)
-    let config = HnswConfig::default();
-    let index = HnswIndex::new(DIM, config, unix_ms());
+    let mut config = HnswConfig::default();
+    config.max_elements = Some(1_000_000);
+    // 39900 inserted 100 vectors in 2.482874333s
+    // 39900 Search returned 10 results in 4.483417ms
+    // 40000 inserted 100 vectors in 2.736496208s
+    // 40000 Search returned 10 results in 3.011458ms
+    // 40000 Removed vector 21574 in 13.337416ms
+    // config.select_neighbors_strategy = SelectNeighborsStrategy::Simple;
+    // 39900 inserted 100 vectors in 631.205083ms
+    // 39900 Search returned 10 results in 2.442875ms
+    // 40000 inserted 100 vectors in 637.636791ms
+    // 40000 Search returned 10 results in 2.136208ms
+    // 40000 Removed vector 13432 in 12.864834ms
+    let index = HnswIndex::new(DIM, Some(config));
 
     // 模拟数据流
     let mut rng = rand::rng();
 
     let mut inert_start = time::Instant::now();
-    for i in 0..100_000 {
+    for i in 0..50_000 {
         let vector: Vec<f32> = (0..DIM).map(|_| rng.random::<f32>()).collect();
         let _ = index.insert_f32(i as u64, vector, unix_ms())?;
         // println!("{} inserted vector {}", i, i);
@@ -50,7 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if i % 1000 == 0 && i > 0 {
             let to_remove = rng.random_range(0..i);
             let remove_start = time::Instant::now();
-            index.remove(to_remove, unix_ms())?;
+            index.remove(to_remove, unix_ms());
             println!(
                 "{} Removed vector {} in {:?}",
                 i,
@@ -73,15 +87,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 最终保存
     {
         let file = tokio::fs::File::create("hnsw_demo.cbor").await?;
-        let save_start = time::Instant::now();
-        index.save_all(file, unix_ms()).await?;
-        println!("Saved index with nodes in {:?}", save_start.elapsed());
+        let store_start = time::Instant::now();
+        index.store_all(file, unix_ms()).await?;
+        println!("Stored index with nodes in {:?}", store_start.elapsed());
     }
 
     let file = tokio::fs::File::open("hnsw_demo.cbor").await?;
-    let save_start = time::Instant::now();
+    let load_start = time::Instant::now();
     let index = HnswIndex::load(file).await?;
-    println!("Load index in {:?}", save_start.elapsed());
+    println!("Load index in {:?}", load_start.elapsed());
     let query: Vec<f32> = (0..DIM).map(|_| rng.random::<f32>()).collect();
     let query_start = time::Instant::now();
     let results = index.search_f32(&query, 10)?;
