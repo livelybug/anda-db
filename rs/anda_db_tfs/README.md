@@ -155,6 +155,10 @@ pub fn remove(&self, id: u64, text: &str, now_ms: u64) -> bool
 // Searches the index
 pub fn search(&self, query: &str, top_k: usize) -> Vec<(u64, f32)>
 
+/// Searches the index for documents matching the query expression,
+/// which can include boolean operators (AND, OR, NOT).
+pub fn search_advanced(&self, query: &str, top_k: usize) -> Vec<(u64, f32)>
+
 // Stores the index without postings to a writer.
 pub async fn store<W: AsyncRead>(&self, w: W, now_ms: u64) -> Result<(), BM25Error>
 

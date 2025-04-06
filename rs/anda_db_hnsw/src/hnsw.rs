@@ -493,7 +493,7 @@ impl HnswIndex {
 
         let mut updated_node_hook_result: Vec<(u64, R)> = Vec::new();
         let mut distance_cache = HashMap::with_capacity(self.config.ef_construction * 2);
-        let mut entry_point_dist = f32::INFINITY;
+        let mut entry_point_dist = f32::MAX;
         let (mut entry_point_node, current_max_layer) = { *self.entry_point.read() };
 
         // Randomly determine the node's layer
@@ -816,7 +816,7 @@ impl HnswIndex {
         }
 
         let mut distance_cache = HashMap::new();
-        let mut current_dist = f32::INFINITY;
+        let mut current_dist = f32::MAX;
         let (mut current_node, current_max_layer) = { *self.entry_point.read() };
         // 从最高层向下搜索入口点
         for current_layer in (1..=current_max_layer).rev() {
@@ -939,7 +939,7 @@ impl HnswIndex {
                                     }
                                     Err(e) => {
                                         log::warn!("Distance calculation error: {:?}", e);
-                                        distance_cache.insert(neighbor, f32::INFINITY);
+                                        distance_cache.insert(neighbor, f32::MAX);
                                     }
                                 };
                             }
@@ -1002,10 +1002,10 @@ impl HnswIndex {
                 // Greedily add remaining nodes while considering diversity
                 while selected.len() < m && !remaining.is_empty() {
                     let mut best_candidate_idx = 0;
-                    let mut best_distance_improvement = f32::NEG_INFINITY;
+                    let mut best_distance_improvement = f32::MIN;
 
                     for (i, &(cand_id, cand_dist)) in remaining.iter().enumerate() {
-                        let mut min_dist_to_selected = f32::INFINITY;
+                        let mut min_dist_to_selected = f32::MAX;
                         for &(sel_id, _) in &selected {
                             let cache_key = if cand_id < sel_id {
                                 (cand_id, sel_id)

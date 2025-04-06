@@ -13,7 +13,9 @@
 //! - Customizable tokenization
 
 pub mod bm25;
+pub mod query;
 pub mod tokenizer;
 
 pub use bm25::*;
+pub use query::*;
 pub use tokenizer::*;
