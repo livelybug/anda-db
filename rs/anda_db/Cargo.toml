@@ -1,0 +1,40 @@
+[package]
+name = "anda_db"
+version = "0.1.0"
+description = "A multimodal knowledge database for AI with text and vector search"
+keywords = ["database", "vector", "search", "embedding", "ai"]
+categories = ["database", "data-structures", "text-processing"]
+repository = "https://github.com/ldclabs/anda_db/tree/main/rs/anda_db"
+publish = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ciborium = { workspace = true }
+compact_str = { workspace = true }
+dashmap = { workspace = true, features = ["serde"] }
+half = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_bytes = { workspace = true }
+rayon = { workspace = true }
+tantivy-tokenizer-api = { workspace = true }
+tantivy = { workspace = true, optional = true }
+tantivy-jieba = { workspace = true, optional = true }
+thiserror = { workspace = true }
+parking_lot = { workspace = true }
+tokio = { workspace = true, features = ["sync", "parking_lot", "io-util"] }
+ic_auth_types = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
+structured-logger = { workspace = true }
+tantivy = { workspace = true }
+tantivy-jieba = { workspace = true }
+criterion = { workspace = true }
+
+[features]
+default = []
+full = ["tantivy", "tantivy-jieba"]
+tantivy = ["dep:tantivy"]
+tantivy-jieba = ["dep:tantivy-jieba", "dep:tantivy"]

@@ -20,12 +20,15 @@ license = "MIT"
 futures = { version = "0.3" }
 tokio = { version = "1.44" }
 ciborium = "0.2"
+compact_str = { version = "0.9", features = ["bytes", "serde", "smallvec"] }
 dashmap = "6.1"
 rand = "0.9"
 rayon = "1.10"
 ordered-float = "5.0"
 half = { version = "2.5", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }
+serde_bytes = "0.11"
+serde_json = "1.0"
 thiserror = "1.0"
 parking_lot = "0.12"
 log = "0.4"
@@ -35,3 +38,4 @@ tantivy-jieba = "0.11"
 structured-logger = "1"
 smallvec = "1.14"
 criterion = "0.5"
+ic_auth_types = { version = "0.2" }
