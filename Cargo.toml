@@ -20,7 +20,6 @@ license = "MIT"
 futures = { version = "0.3" }
 tokio = { version = "1.44" }
 ciborium = "0.2"
-compact_str = { version = "0.9", features = ["bytes", "serde", "smallvec"] }
 dashmap = "6.1"
 rand = "0.9"
 rayon = "1.10"

@@ -10,8 +10,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+anda_db_derive = { path = "../anda_db_derive" }
 ciborium = { workspace = true }
-compact_str = { workspace = true }
 dashmap = { workspace = true, features = ["serde"] }
 half = { workspace = true }
 serde = { workspace = true }
