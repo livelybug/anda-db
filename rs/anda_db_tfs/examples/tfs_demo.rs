@@ -1,5 +1,6 @@
 use anda_db_tfs::{BM25Index, jieba_tokenizer};
 use serde::{Deserialize, Serialize};
+use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Document {
@@ -12,7 +13,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     structured_logger::Builder::new().init();
 
     // 创建索引
-    let index = BM25Index::new(jieba_tokenizer(), None);
+    let index = BM25Index::new("anda_db_tfs_bm25".to_string(), jieba_tokenizer(), None);
 
     // 批量添加文档
     let docs = vec![
@@ -56,11 +57,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 保存和加载
     {
-        let file = tokio::fs::File::create("tfs_demo.cbor").await?;
+        let file = tokio::fs::File::create("tfs_demo.cbor")
+            .await?
+            .compat_write();
         index.store_all(file, 0).await?;
     }
 
-    let file = tokio::fs::File::open("tfs_demo.cbor").await?;
+    let file = tokio::fs::File::open("tfs_demo.cbor").await?.compat();
     let loaded_index = BM25Index::load(file, jieba_tokenizer()).await?;
     println!("Loaded index with {} documents", loaded_index.len());
 

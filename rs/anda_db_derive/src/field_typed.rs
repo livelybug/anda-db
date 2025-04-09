@@ -200,8 +200,7 @@ fn determine_field_type(ty: &Type) -> Result<proc_macro2::TokenStream, String> {
                 "f32" => Ok(quote! { FieldType::F32 }),
                 "f64" => Ok(quote! { FieldType::F64 }),
                 "bf16" => Ok(quote! { FieldType::Bf16 }),
-                "ByteArray" => Ok(quote! { FieldType::Bytes }),
-                "ByteBuf" => Ok(quote! { FieldType::Bytes }),
+                "Bytes" | "ByteArray" | "ByteBuf" => Ok(quote! { FieldType::Bytes }),
                 "HashMap" | "BTreeMap" => {
                     // 处理 HashMap 和 BTreeMap 类型
                     if let PathArguments::AngleBracketed(args) = &segment.arguments {
@@ -232,23 +231,23 @@ fn determine_field_type(ty: &Type) -> Result<proc_macro2::TokenStream, String> {
                 }
                 _ => {
                     // 处理嵌套路径
-                    if path.segments.len() > 1 {
-                        // 尝试检查完整路径
-                        let full_path = path
-                            .segments
-                            .iter()
-                            .map(|seg| seg.ident.to_string())
-                            .collect::<Vec<_>>()
-                            .join("::");
+                    // if path.segments.len() > 1 {
+                    //     // 尝试检查完整路径
+                    //     let full_path = path
+                    //         .segments
+                    //         .iter()
+                    //         .map(|seg| seg.ident.to_string())
+                    //         .collect::<Vec<_>>()
+                    //         .join("::");
 
-                        match full_path.as_str() {
-                            "half::bf16" => return Ok(quote! { FieldType::Bf16 }),
-                            "serde_bytes::ByteArray" | "serde_bytes::ByteBuf" => {
-                                return Ok(quote! { FieldType::Bytes });
-                            }
-                            _ => {}
-                        }
-                    }
+                    //     match full_path.as_str() {
+                    //         "half::bf16" => return Ok(quote! { FieldType::Bf16 }),
+                    //         "serde_bytes::ByteArray" | "serde_bytes::ByteBuf" => {
+                    //             return Ok(quote! { FieldType::Bytes });
+                    //         }
+                    //         _ => {}
+                    //     }
+                    // }
 
                     // 处理自定义结构体类型 - 尝试使用该结构体的 field_type 方法
                     // 将其他结构体类型也映射为 FieldType::Map

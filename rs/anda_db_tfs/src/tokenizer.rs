@@ -175,13 +175,13 @@ pub fn collect_tokens_parallel<T: Tokenizer + Send>(
         })
 }
 
-/// Performs a simple full-text search by finding matching tokens in a document
+/// Performs a simple full-text search by finding matching tokens in a segment
 ///
 /// # Arguments
 ///
 /// * `tokenizer` - Tokenizer to use for processing text
 /// * `query` - Search query text
-/// * `doc_text` - Document text to search in
+/// * `text` - Segment text to search in
 ///
 /// # Returns
 ///
@@ -190,10 +190,10 @@ pub fn collect_tokens_parallel<T: Tokenizer + Send>(
 pub fn flat_full_text_search<T: Tokenizer>(
     tokenizer: &mut T,
     query: &str,
-    doc_text: &str,
+    text: &str,
 ) -> HashMap<String, usize> {
     let tokens = collect_tokens(tokenizer, query, None);
-    collect_tokens_parallel(tokenizer, doc_text, Some(&tokens))
+    collect_tokens_parallel(tokenizer, text, Some(&tokens))
 }
 
 #[cfg(test)]

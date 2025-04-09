@@ -1,6 +1,7 @@
 //! # Anda-DB BM25 Full-Text Search Library
 
 use dashmap::DashMap;
+use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use parking_lot::RwLock;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -8,57 +9,59 @@ use std::{
     collections::{BTreeSet, HashMap},
     sync::atomic::{AtomicU64, Ordering},
 };
-use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+use crate::error::*;
 use crate::query::*;
 use crate::tokenizer::*;
 
-/// Errors that can occur during BM25 index operations
-#[derive(Error, Debug, Clone)]
-pub enum BM25Error {
-    /// Database-related errors.
-    #[error("DB error: {0}")]
-    Db(String),
+/// BM25 search index with customizable tokenization
+pub struct BM25Index<T: Tokenizer + Clone> {
+    /// Index name
+    name: String,
 
-    /// CBOR serialization/deserialization errors
-    #[error("CBOR serialization error: {0}")]
-    Cbor(String),
+    /// Tokenizer used to process text
+    tokenizer: T,
 
-    /// Error when a token is not found.
-    #[error("Not found {0:?}")]
-    TokenNotFound(String),
+    /// BM25 algorithm parameters
+    config: BM25Config,
 
-    /// Error when trying to add a document with an ID that already exists
-    #[error("Document {0} already exists")]
-    AlreadyExists(u64),
+    /// Maps segment IDs to their token counts
+    seg_tokens: DashMap<u64, usize>,
 
-    /// Error when tokenization produces no tokens for a document
-    #[error("Document {id} tokenization failed: {text:?}")]
-    TokenizeFailed { id: u64, text: String },
+    /// Inverted index mapping tokens to (version, Vec<(segment_id, term_frequency)>)
+    postings: DashMap<String, PostingValue>,
+
+    /// Index metadata.
+    metadata: RwLock<BM25IndexMetadata>,
+
+    /// Average number of tokens per segment
+    avg_seg_tokens: RwLock<f32>,
+
+    /// Number of search operations performed.
+    search_count: AtomicU64,
 }
 
-/// Parameters for the BM25 ranking algorithm
+/// configuration parameters for the BM25 ranking algorithm
 ///
 /// - `k1`: Controls term frequency saturation. Higher values give more weight to term frequency.
-/// - `b`: Controls document length normalization. 0.0 means no normalization, 1.0 means full normalization.
+/// - `b`: Controls segment length normalization. 0.0 means no normalization, 1.0 means full normalization.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BM25Params {
+pub struct BM25Config {
     pub k1: f32,
     pub b: f32,
 }
 
-impl Default for BM25Params {
+impl Default for BM25Config {
     /// Returns default BM25 parameters (k1=1.2, b=0.75) which work well for most use cases
     fn default() -> Self {
-        BM25Params { k1: 1.2, b: 0.75 }
+        BM25Config { k1: 1.2, b: 0.75 }
     }
 }
 
-/// Type alias for posting values: (version, Vec<(document_id, token_frequency)>)
+/// Type alias for posting values: (update version, Vec<(segment_id, token_frequency)>)
 pub type PostingValue = (u64, Vec<(u64, usize)>);
 
-/// Mapping function for a posting.
+/// Mapping function for a posting: (token, posting value) -> Option<R>
 pub type PostingMapFn<R> = fn(&str, &PostingValue) -> Option<R>;
 
 /// No-op function for posting mapping.
@@ -74,30 +77,20 @@ pub const POSTING_SERIALIZE_FN: PostingMapFn<Vec<u8>> = |token: &str, val: &Post
 /// Function to retrieve the version of a posting.
 pub const NODE_VERSION_FN: PostingMapFn<u64> = |_: &str, val: &PostingValue| Some(val.0);
 
-/// Internal data structure for the BM25 index
-struct BM25IndexData {
-    /// BM25 algorithm parameters
-    params: BM25Params,
-
-    /// Maps document IDs to their token counts
-    doc_tokens: DashMap<u64, usize>,
-
-    /// Inverted index mapping tokens to (version, Vec<(document_id, term_frequency)>)
-    postings: DashMap<String, PostingValue>,
-
-    /// Index metadata.
-    metadata: RwLock<IndexMetadata>,
-
-    /// Average number of tokens per document
-    avg_doc_tokens: RwLock<f32>,
-
-    /// Number of search operations performed.
-    search_count: AtomicU64,
-}
-
 /// Index metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IndexMetadata {
+pub struct BM25IndexMetadata {
+    /// Index name.
+    pub name: String,
+    /// BM25 algorithm parameters
+    pub config: BM25Config,
+    /// Index statistics.
+    pub stats: BM25IndexStats,
+}
+
+/// Index statistics.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct BM25IndexStats {
     /// Last insertion timestamp (unix ms).
     pub last_inserted: u64,
 
@@ -110,18 +103,11 @@ pub struct IndexMetadata {
     /// Updated version for the index. It will be incremented when the index is updated.
     pub version: u64,
 
-    /// Index statistics.
-    pub stats: IndexStats,
-}
-
-/// Index statistics.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct IndexStats {
     /// Number of elements in the index.
     pub num_elements: u64,
 
-    /// Average number of tokens per document
-    pub avg_doc_tokens: f32,
+    /// Average number of tokens per segment
+    pub avg_seg_tokens: f32,
 
     /// Number of search operations performed.
     pub search_count: u64,
@@ -135,90 +121,115 @@ pub struct IndexStats {
 
 /// Serializable BM25 index structure (owned version).
 #[derive(Clone, Serialize, Deserialize)]
-struct BM25IndexDataSerdeOwn {
-    params: BM25Params,
-    avg_doc_tokens: f32,
-    doc_tokens: DashMap<u64, usize>,
+struct BM25IndexOwned {
+    seg_tokens: DashMap<u64, usize>,
     postings: DashMap<String, PostingValue>,
-    metadata: IndexMetadata,
+    metadata: BM25IndexMetadata,
 }
 
 #[derive(Clone, Serialize)]
-struct BM25IndexDataSerdeRef<'a> {
-    params: &'a BM25Params,
-    avg_doc_tokens: f32,
-    doc_tokens: &'a DashMap<u64, usize>,
+struct BM25IndexRef<'a> {
+    seg_tokens: &'a DashMap<u64, usize>,
     postings: &'a DashMap<String, PostingValue>,
-    metadata: &'a IndexMetadata,
-}
-
-impl From<BM25IndexDataSerdeOwn> for BM25IndexData {
-    fn from(data: BM25IndexDataSerdeOwn) -> Self {
-        let search_count = AtomicU64::new(data.metadata.stats.search_count);
-        BM25IndexData {
-            params: data.params,
-            doc_tokens: data.doc_tokens,
-            postings: data.postings,
-            metadata: RwLock::new(data.metadata),
-            avg_doc_tokens: RwLock::new(data.avg_doc_tokens),
-            search_count,
-        }
-    }
-}
-
-/// BM25 search index with customizable tokenization
-pub struct BM25Index<T: Tokenizer + Clone> {
-    /// Tokenizer used to process text
-    tokenizer: T,
-    data: BM25IndexData,
+    metadata: &'a BM25IndexMetadata,
 }
 
 impl<T> BM25Index<T>
 where
     T: Tokenizer + Clone,
 {
-    /// Creates a new empty BM25 index with the given tokenizer and optional parameters.
-    pub fn new(tokenizer: T, params: Option<BM25Params>) -> Self {
+    /// Creates a new empty BM25 index with the given tokenizer and optional config.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Name of the index
+    /// * `tokenizer` - Tokenizer to use for processing text
+    /// * `config` - Optional BM25 configuration parameters
+    ///
+    /// # Returns
+    ///
+    /// * `BM25Index` - A new instance of the BM25 index
+    pub fn new(name: String, tokenizer: T, config: Option<BM25Config>) -> Self {
+        let config = config.unwrap_or_default();
         BM25Index {
+            name: name.clone(),
             tokenizer,
-            data: BM25IndexData {
-                doc_tokens: DashMap::new(),
-                postings: DashMap::new(),
-                params: params.unwrap_or_default(),
-                metadata: RwLock::new(IndexMetadata {
-                    last_inserted: 0,
-                    last_deleted: 0,
-                    last_saved: 0,
-                    version: 0,
-                    stats: IndexStats::default(),
-                }),
-                avg_doc_tokens: RwLock::new(0.0),
-                search_count: AtomicU64::new(0),
-            },
+            config: config.clone(),
+            seg_tokens: DashMap::new(),
+            postings: DashMap::new(),
+            metadata: RwLock::new(BM25IndexMetadata {
+                name,
+                config,
+                stats: BM25IndexStats::default(),
+            }),
+            avg_seg_tokens: RwLock::new(0.0),
+            search_count: AtomicU64::new(0),
         }
     }
 
-    /// Returns the number of documents in the index
+    /// Loads an index from a reader
+    ///
+    /// # Arguments
+    ///
+    /// * `r` - Any type implementing the [`futures::io::AsyncRead`] trait
+    /// * `tokenizer` - Tokenizer to use with the loaded index
+    ///
+    /// # Returns
+    ///
+    /// * `Result<(), BM25Error>` - Success or error.
+    pub async fn load<R: AsyncRead + Unpin>(mut r: R, tokenizer: T) -> Result<Self, BM25Error> {
+        let data = {
+            let mut buf = Vec::new();
+            AsyncReadExt::read_to_end(&mut r, &mut buf)
+                .await
+                .map_err(|err| BM25Error::Generic {
+                    name: "unknown".to_string(),
+                    source: err.into(),
+                })?;
+            buf
+        };
+
+        let index: BM25IndexOwned =
+            ciborium::from_reader(&data[..]).map_err(|err| BM25Error::Serialization {
+                name: "unknown".to_string(),
+                source: err.into(),
+            })?;
+        let search_count = AtomicU64::new(index.metadata.stats.search_count);
+        let avg_seg_tokens = RwLock::new(index.metadata.stats.avg_seg_tokens);
+
+        Ok(BM25Index {
+            name: index.metadata.name.clone(),
+            tokenizer,
+            config: index.metadata.config.clone(),
+            seg_tokens: index.seg_tokens,
+            postings: index.postings,
+            metadata: RwLock::new(index.metadata),
+            avg_seg_tokens,
+            search_count,
+        })
+    }
+
+    /// Returns the number of segments in the index
     pub fn len(&self) -> usize {
-        self.data.doc_tokens.len()
+        self.seg_tokens.len()
     }
 
     /// Returns whether the index is empty
     pub fn is_empty(&self) -> bool {
-        self.data.doc_tokens.is_empty()
+        self.seg_tokens.is_empty()
     }
 
-    /// Returns the index update version
-    pub fn version(&self) -> u64 {
-        self.data.metadata.read().version
+    /// Returns the index name
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
     /// Returns the index metadata
-    pub fn metadata(&self) -> IndexMetadata {
-        let mut metadata = self.data.metadata.read().clone();
-        metadata.stats.search_count = self.data.search_count.load(Ordering::Relaxed);
-        metadata.stats.num_elements = self.data.doc_tokens.len() as u64;
-        metadata.stats.avg_doc_tokens = *self.data.avg_doc_tokens.read();
+    pub fn metadata(&self) -> BM25IndexMetadata {
+        let mut metadata = self.metadata.read().clone();
+        metadata.stats.search_count = self.search_count.load(Ordering::Relaxed);
+        metadata.stats.num_elements = self.seg_tokens.len() as u64;
+        metadata.stats.avg_seg_tokens = *self.avg_seg_tokens.read();
         metadata
     }
 
@@ -227,17 +238,17 @@ where
     /// # Returns
     ///
     /// * `IndexStats` - Current statistics
-    pub fn stats(&self) -> IndexStats {
-        let mut stats = { self.data.metadata.read().stats.clone() };
-        stats.search_count = self.data.search_count.load(Ordering::Relaxed);
-        stats.num_elements = self.data.doc_tokens.len() as u64;
-        stats.avg_doc_tokens = *self.data.avg_doc_tokens.read();
+    pub fn stats(&self) -> BM25IndexStats {
+        let mut stats = { self.metadata.read().stats.clone() };
+        stats.search_count = self.search_count.load(Ordering::Relaxed);
+        stats.num_elements = self.seg_tokens.len() as u64;
+        stats.avg_seg_tokens = *self.avg_seg_tokens.read();
         stats
     }
 
     /// Gets all tokens in the index.
     pub fn tokens(&self) -> BTreeSet<String> {
-        self.data.postings.iter().map(|v| v.key().clone()).collect()
+        self.postings.iter().map(|v| v.key().clone()).collect()
     }
 
     /// Gets a posting by token and applies a function to it.
@@ -245,17 +256,19 @@ where
     where
         F: FnOnce(&str, &PostingValue) -> Option<R>,
     {
-        self.data
-            .postings
+        self.postings
             .get(token)
             .map(|v| f(token, &v))
-            .ok_or_else(|| BM25Error::TokenNotFound(token.to_string()))
+            .ok_or_else(|| BM25Error::NotFound {
+                name: self.name.clone(),
+                token: token.to_string(),
+            })
     }
 
     /// Sets the posting if it is not already present or if the version is newer.
     /// This method is only used to bootstrap the index from persistent storage.
     pub fn set_posting(&self, token: String, value: PostingValue) -> bool {
-        match self.data.postings.entry(token) {
+        match self.postings.entry(token) {
             dashmap::Entry::Occupied(mut v) => {
                 let n = v.get_mut();
                 if n.0 < value.0 {
@@ -271,37 +284,37 @@ where
         }
     }
 
-    /// Inserts a document to the index
+    /// Inserts a segment to the index
     ///
     /// # Arguments
     ///
-    /// * `id` - Unique document identifier
-    /// * `text` - Document text content
+    /// * `id` - Unique segment identifier
+    /// * `text` - Segment text content
     /// * `now_ms` - Current timestamp in milliseconds
     ///
     /// # Returns
     ///
-    /// * `Ok(())` if the document was successfully added
-    /// * `Err(BM25Error::AlreadyExists)` if a document with the same ID already exists
+    /// * `Ok(())` if the segment was successfully added
+    /// * `Err(BM25Error::AlreadyExists)` if a segment with the same ID already exists
     /// * `Err(BM25Error::TokenizeFailed)` if tokenization produced no tokens
     pub fn insert(&self, id: u64, text: &str, now_ms: u64) -> Result<(), BM25Error> {
         self.insert_with(id, text, now_ms, POSTING_NOOP_FN)
             .map(|_| ())
     }
 
-    /// Inserts a document to the index
+    /// Inserts a segment to the index with hook function
     ///
     /// # Arguments
     ///
-    /// * `id` - Unique document identifier
-    /// * `text` - Document text content
+    /// * `id` - Unique segment identifier
+    /// * `text` - Segment text content
     /// * `now_ms` - Current timestamp in milliseconds
     /// * `hook` - Function to apply to each token and its posting value
     ///
     /// # Returns
     ///
-    /// * `Ok(())` if the document was successfully added
-    /// * `Err(BM25Error::AlreadyExists)` if a document with the same ID already exists
+    /// * `Ok(())` if the segment was successfully added
+    /// * `Err(BM25Error::AlreadyExists)` if a segment with the same ID already exists
     /// * `Err(BM25Error::TokenizeFailed)` if tokenization produced no tokens
     pub fn insert_with<R, F>(
         &self,
@@ -313,11 +326,14 @@ where
     where
         F: Fn(&str, &PostingValue) -> Option<R>,
     {
-        if self.data.doc_tokens.contains_key(&id) {
-            return Err(BM25Error::AlreadyExists(id));
+        if self.seg_tokens.contains_key(&id) {
+            return Err(BM25Error::AlreadyExists {
+                name: self.name.clone(),
+                id,
+            });
         }
 
-        // Tokenize the document
+        // Tokenize the segment
         let token_freqs = {
             let mut tokenizer = self.tokenizer.clone();
             collect_tokens_parallel(&mut tokenizer, text, None)
@@ -326,26 +342,30 @@ where
         // Count token frequencies
         if token_freqs.is_empty() {
             return Err(BM25Error::TokenizeFailed {
+                name: self.name.clone(),
                 id,
                 text: text.to_string(),
             });
         }
 
-        let docs = self.data.doc_tokens.len();
+        let docs = self.seg_tokens.len();
         let tokens: usize = token_freqs.values().sum();
-        let total_tokens: usize = self.data.doc_tokens.iter().map(|r| *r.value()).sum();
+        let total_tokens: usize = self.seg_tokens.iter().map(|r| *r.value()).sum();
         let mut updated_posting_hook_result: Vec<(String, R)> =
             Vec::with_capacity(token_freqs.len());
-        match self.data.doc_tokens.entry(id) {
+        match self.seg_tokens.entry(id) {
             dashmap::Entry::Occupied(_) => {
-                return Err(BM25Error::AlreadyExists(id));
+                return Err(BM25Error::AlreadyExists {
+                    name: self.name.clone(),
+                    id,
+                });
             }
             dashmap::Entry::Vacant(v) => {
                 v.insert(tokens);
 
                 // Update inverted index
                 for (token, freq) in token_freqs {
-                    let mut entry = self.data.postings.entry(token.clone()).or_default();
+                    let mut entry = self.postings.entry(token.clone()).or_default();
                     entry.0 += 1; // increment update version
                     entry.1.push((id, freq));
                     if let Some(rt) = hook(&token, &entry) {
@@ -353,13 +373,13 @@ where
                     }
                 }
 
-                // Calculate new average document length
-                let avg_doc_tokens = (total_tokens + tokens) as f32 / (docs + 1) as f32;
-                *self.data.avg_doc_tokens.write() = avg_doc_tokens;
+                // Calculate new average segment length
+                let avg_seg_tokens = (total_tokens + tokens) as f32 / (docs + 1) as f32;
+                *self.avg_seg_tokens.write() = avg_seg_tokens;
 
                 self.update_metadata(|m| {
-                    m.version += 1;
-                    m.last_inserted = now_ms;
+                    m.stats.version += 1;
+                    m.stats.last_inserted = now_ms;
                     m.stats.insert_count += 1;
                 });
             }
@@ -368,33 +388,33 @@ where
         Ok(updated_posting_hook_result)
     }
 
-    /// Removes a document from the index
+    /// Removes a segment from the index
     ///
     /// # Arguments
     ///
-    /// * `id` - Document identifier to remove
-    /// * `text` - Original document text (needed to identify tokens to remove)
+    /// * `id` - Segment identifier to remove
+    /// * `text` - Original segment text (needed to identify tokens to remove)
     ///
     /// # Returns
     ///
-    /// * `true` if the document was found and removed
-    /// * `false` if the document was not found
+    /// * `true` if the segment was found and removed
+    /// * `false` if the segment was not found
     pub fn remove(&self, id: u64, text: &str, now_ms: u64) -> bool {
         let (deleted, _) = self.remove_with(id, text, now_ms, POSTING_NOOP_FN);
         deleted
     }
 
-    /// Removes a document from the index
+    /// Removes a segment from the index with hook function.
     ///
     /// # Arguments
     ///
-    /// * `id` - Document identifier to remove
-    /// * `text` - Original document text (needed to identify tokens to remove)
+    /// * `id` - Segment identifier to remove
+    /// * `text` - Original segment text (needed to identify tokens to remove)
     ///
     /// # Returns
     ///
-    /// * `true` if the document was found and removed
-    /// * `false` if the document was not found
+    /// * `true` if the segment was found and removed
+    /// * `false` if the segment was not found
     pub fn remove_with<R, F>(
         &self,
         id: u64,
@@ -405,12 +425,12 @@ where
     where
         F: Fn(&str, &PostingValue) -> Option<R>,
     {
-        if self.data.doc_tokens.remove(&id).is_none() {
-            // Document not found
+        if self.seg_tokens.remove(&id).is_none() {
+            // Segment not found
             return (false, Vec::new());
         }
 
-        // Tokenize the document
+        // Tokenize the segment
         let token_freqs = {
             let mut tokenizer = self.tokenizer.clone();
             collect_tokens_parallel(&mut tokenizer, text, None)
@@ -421,8 +441,8 @@ where
         // Remove from inverted index
         let mut tokens_to_remove = Vec::new();
         for (token, _) in token_freqs {
-            if let Some(mut posting) = self.data.postings.get_mut(&token) {
-                // Remove document from postings list
+            if let Some(mut posting) = self.postings.get_mut(&token) {
+                // Remove segment from postings list
                 if let Some(pos) = posting.1.iter().position(|&(idx, _)| idx == id) {
                     posting.0 += 1; // increment update version
                     posting.1.swap_remove(pos);
@@ -437,27 +457,27 @@ where
         }
 
         for token in tokens_to_remove {
-            self.data.postings.remove(&token);
+            self.postings.remove(&token);
         }
 
-        // Recalculate average document length
-        let total_tokens: usize = self.data.doc_tokens.iter().map(|r| *r.value()).sum();
-        let avg_doc_tokens = if self.data.doc_tokens.is_empty() {
+        // Recalculate average segment length
+        let total_tokens: usize = self.seg_tokens.iter().map(|r| *r.value()).sum();
+        let avg_seg_tokens = if self.seg_tokens.is_empty() {
             0.0
         } else {
-            total_tokens as f32 / self.data.doc_tokens.len() as f32
+            total_tokens as f32 / self.seg_tokens.len() as f32
         };
-        *self.data.avg_doc_tokens.write() = avg_doc_tokens;
+        *self.avg_seg_tokens.write() = avg_seg_tokens;
         self.update_metadata(|m| {
-            m.version += 1;
-            m.last_deleted = now_ms;
+            m.stats.version += 1;
+            m.stats.last_deleted = now_ms;
             m.stats.delete_count += 1;
         });
 
         (true, updated_posting_hook_result)
     }
 
-    /// Searches the index for documents matching the query
+    /// Searches the index for segments matching the query
     ///
     /// # Arguments
     ///
@@ -466,11 +486,11 @@ where
     ///
     /// # Returns
     ///
-    /// A vector of (document_id, score) pairs, sorted by descending score
+    /// A vector of (segment_id, score) pairs, sorted by descending score
     pub fn search(&self, query: &str, top_k: usize) -> Vec<(u64, f32)> {
         let scored_docs = self.score_term(query.trim());
 
-        self.data.search_count.fetch_add(1, Ordering::Relaxed);
+        self.search_count.fetch_add(1, Ordering::Relaxed);
         let mut sorted_scores: Vec<(u64, f32)> = scored_docs.into_iter().collect();
         // Convert to vector and sort by score (descending)
         sorted_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -478,7 +498,7 @@ where
         sorted_scores
     }
 
-    /// Searches the index for documents matching the query expression
+    /// Searches the index for segments matching the query expression
     ///
     /// # Arguments
     ///
@@ -488,12 +508,12 @@ where
     ///
     /// # Returns
     ///
-    /// A vector of (document_id, score) pairs, sorted by descending score
+    /// A vector of (segment_id, score) pairs, sorted by descending score
     pub fn search_advanced(&self, query: &str, top_k: usize) -> Vec<(u64, f32)> {
         let query_expr = QueryType::parse(query);
         let scored_docs = self.execute_query(&query_expr);
 
-        self.data.search_count.fetch_add(1, Ordering::Relaxed);
+        self.search_count.fetch_add(1, Ordering::Relaxed);
         // Convert to vector and sort by score (descending)
         let mut results: Vec<(u64, f32)> = scored_docs.into_iter().collect();
         results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -502,7 +522,7 @@ where
         results
     }
 
-    /// Execute a query expression, returning a mapping of document IDs to scores
+    /// Execute a query expression, returning a mapping of segment IDs to scores
     fn execute_query(&self, query: &QueryType) -> HashMap<u64, f32> {
         match query {
             QueryType::Term(term) => self.score_term(term),
@@ -514,7 +534,7 @@ where
 
     /// Scores a single term
     fn score_term(&self, term: &str) -> HashMap<u64, f32> {
-        if self.data.postings.is_empty() {
+        if self.postings.is_empty() {
             return HashMap::new();
         }
 
@@ -524,31 +544,29 @@ where
             return HashMap::new();
         }
 
-        let mut scores: HashMap<u64, f32> =
-            HashMap::with_capacity(self.data.doc_tokens.len().min(1000));
-        let doc_tokens = self.data.doc_tokens.len() as f32;
-        let avg_doc_tokens = self.data.avg_doc_tokens.read().max(1.0);
+        let mut scores: HashMap<u64, f32> = HashMap::with_capacity(self.seg_tokens.len().min(1000));
+        let seg_tokens = self.seg_tokens.len() as f32;
+        let avg_seg_tokens = self.avg_seg_tokens.read().max(1.0);
         let term_scores: Vec<HashMap<u64, f32>> = query_terms
             .par_iter()
             .filter_map(|(term, _)| {
-                self.data.postings.get(term).map(|postings| {
+                self.postings.get(term).map(|postings| {
                     let df = postings.1.len() as f32;
-                    let idf = ((doc_tokens - df + 0.5) / (df + 0.5) + 1.0).ln();
+                    let idf = ((seg_tokens - df + 0.5) / (df + 0.5) + 1.0).ln();
 
-                    // compute BM25 score for each document
+                    // compute BM25 score for each segment
                     let mut term_scores = HashMap::new();
                     for (doc_id, tf) in postings.1.iter() {
                         let tokens = self
-                            .data
-                            .doc_tokens
+                            .seg_tokens
                             .get(doc_id)
                             .map(|v| *v as f32)
                             .unwrap_or(0.0);
-                        let tf_component = (*tf as f32 * (self.data.params.k1 + 1.0))
+                        let tf_component = (*tf as f32 * (self.config.k1 + 1.0))
                             / (*tf as f32
-                                + self.data.params.k1
-                                    * (1.0 - self.data.params.b
-                                        + self.data.params.b * tokens / avg_doc_tokens));
+                                + self.config.k1
+                                    * (1.0 - self.config.b
+                                        + self.config.b * tokens / avg_seg_tokens));
 
                         let score = idf * tf_component;
                         term_scores.insert(*doc_id, score);
@@ -558,7 +576,7 @@ where
             })
             .collect();
 
-        // merge term scores into a single score for each document
+        // merge term scores into a single score for each segment
         for term_score in term_scores {
             for (doc_id, score) in term_score {
                 *scores.entry(doc_id).or_default() += score;
@@ -610,7 +628,7 @@ where
                 continue;
             }
 
-            // Retain only documents that are in both results
+            // Retain only segments that are in both results
             result.retain(|k, _| sub_result.contains_key(k));
             if result.is_empty() {
                 return HashMap::new();
@@ -634,7 +652,7 @@ where
     ///
     /// # Arguments
     ///
-    /// * `w` - Any type implementing the `tokio::io::AsyncWrite` trait
+    /// * `w` - Any type implementing the [`futures::io::AsyncWrite`] trait
     /// * `now_ms` - Current timestamp in milliseconds
     ///
     /// # Returns
@@ -647,36 +665,40 @@ where
     ) -> Result<(), BM25Error> {
         // clone data to avoid holding the lock for a long time
         let serialized_data = {
-            let mut buf = Vec::new();
+            let mut buf = Vec::with_capacity(8192);
+            self.update_metadata(|m| {
+                m.stats.last_saved = now_ms.max(m.stats.last_saved);
+            });
             ciborium::into_writer(
-                &BM25IndexDataSerdeRef {
-                    params: &self.data.params,
-                    avg_doc_tokens: *self.data.avg_doc_tokens.read(),
-                    doc_tokens: &self.data.doc_tokens,
+                &BM25IndexRef {
+                    seg_tokens: &self.seg_tokens,
                     postings: &DashMap::new(),
-                    metadata: &self.data.metadata.read(),
+                    metadata: &self.metadata(),
                 },
                 &mut buf,
             )
-            .map_err(|e| BM25Error::Cbor(e.to_string()))?;
+            .map_err(|err| BM25Error::Serialization {
+                name: self.name.clone(),
+                source: err.into(),
+            })?;
             buf
         };
 
         AsyncWriteExt::write_all(&mut w, &serialized_data)
             .await
-            .map_err(|e| BM25Error::Db(e.to_string()))?;
+            .map_err(|err| BM25Error::Generic {
+                name: self.name.clone(),
+                source: err.into(),
+            })?;
 
-        self.update_metadata(|m| {
-            m.last_saved = now_ms.max(m.last_saved);
-        });
         Ok(())
     }
 
-    /// Stores the index with postings to a writer.
+    /// Stores the index with postings to a writer. It maybe very large.
     ///
     /// # Arguments
     ///
-    /// * `w` - Any type implementing the `tokio::io::AsyncWrite` trait
+    /// * `w` - Any type implementing the [`futures::io::AsyncWrite`] trait
     /// * `now_ms` - Current timestamp in milliseconds
     ///
     /// # Returns
@@ -690,56 +712,32 @@ where
         // clone data to avoid holding the lock for a long time
         let serialized_data = {
             let mut buf = Vec::new();
+            self.update_metadata(|m| {
+                m.stats.last_saved = now_ms.max(m.stats.last_saved);
+            });
             ciborium::into_writer(
-                &BM25IndexDataSerdeRef {
-                    params: &self.data.params,
-                    avg_doc_tokens: *self.data.avg_doc_tokens.read(),
-                    doc_tokens: &self.data.doc_tokens,
-                    postings: &self.data.postings,
-                    metadata: &self.data.metadata.read(),
+                &BM25IndexRef {
+                    seg_tokens: &self.seg_tokens,
+                    postings: &self.postings,
+                    metadata: &self.metadata(),
                 },
                 &mut buf,
             )
-            .map_err(|e| BM25Error::Cbor(e.to_string()))?;
+            .map_err(|err| BM25Error::Serialization {
+                name: self.name.clone(),
+                source: err.into(),
+            })?;
             buf
         };
 
         AsyncWriteExt::write_all(&mut w, &serialized_data)
             .await
-            .map_err(|e| BM25Error::Db(e.to_string()))?;
+            .map_err(|err| BM25Error::Generic {
+                name: self.name.clone(),
+                source: err.into(),
+            })?;
 
-        self.update_metadata(|m| {
-            m.last_saved = now_ms.max(m.last_saved);
-        });
         Ok(())
-    }
-
-    /// Deserializes an index from a reader
-    ///
-    /// # Arguments
-    ///
-    /// * `r` - Any type implementing the `Read` trait
-    /// * `tokenizer` - Tokenizer to use with the loaded index
-    ///
-    /// # Returns
-    ///
-    /// * `Result<(), BM25Error>` - Success or error.
-    pub async fn load<R: AsyncRead + Unpin>(mut r: R, tokenizer: T) -> Result<Self, BM25Error> {
-        let data = {
-            let mut buf = Vec::new();
-            AsyncReadExt::read_to_end(&mut r, &mut buf)
-                .await
-                .map_err(|e| BM25Error::Db(e.to_string()))?;
-            buf
-        };
-
-        let index_data: BM25IndexDataSerdeOwn =
-            ciborium::from_reader(&data[..]).map_err(|e| BM25Error::Cbor(e.to_string()))?;
-
-        Ok(BM25Index {
-            data: index_data.into(),
-            tokenizer,
-        })
     }
 
     /// Updates the index metadata
@@ -749,9 +747,9 @@ where
     /// * `f` - Function that modifies the metadata
     fn update_metadata<F>(&self, f: F)
     where
-        F: FnOnce(&mut IndexMetadata),
+        F: FnOnce(&mut BM25IndexMetadata),
     {
-        let mut metadata = self.data.metadata.write();
+        let mut metadata = self.metadata.write();
         f(&mut metadata);
     }
 }
@@ -760,15 +758,16 @@ impl<T> BM25Index<T>
 where
     T: Tokenizer + Clone + Send + Sync,
 {
-    /// Adds multiple documents to the index in parallel
+    /// Inserts multiple segments to the index in parallel
     ///
     /// # Arguments
     ///
-    /// * `docs` - Vector of (document_id, document_text) pairs
+    /// * `docs` - Vector of (segment_id, segment_text) pairs
+    /// * `now_ms` - Current timestamp in milliseconds
     ///
     /// # Returns
     ///
-    /// A vector of `Ok(())` if the documents were successfully added, or `Err(BM25Error)` if any document failed to add.
+    /// A vector of `Ok(())` if the segments were successfully added, or `Err(BM25Error)` if any segment failed to add.
     /// The vector is in the same order as the input `docs` vector.
     pub fn insert_batch(
         &self,
@@ -781,7 +780,7 @@ where
 
         let existing_ids: Vec<u64> = docs
             .iter()
-            .filter(|(id, _)| self.data.doc_tokens.contains_key(id))
+            .filter(|(id, _)| self.seg_tokens.contains_key(id))
             .map(|(id, _)| *id)
             .collect();
 
@@ -791,7 +790,14 @@ where
             .par_iter()
             .map(|(id, text)| {
                 if existing_ids.contains(id) {
-                    return (*id, HashMap::new(), Err(BM25Error::AlreadyExists(*id)));
+                    return (
+                        *id,
+                        HashMap::new(),
+                        Err(BM25Error::AlreadyExists {
+                            name: self.name.clone(),
+                            id: *id,
+                        }),
+                    );
                 }
 
                 let mut tokenizer = self.tokenizer.clone();
@@ -802,6 +808,7 @@ where
                         *id,
                         HashMap::new(),
                         Err(BM25Error::TokenizeFailed {
+                            name: self.name.clone(),
                             id: *id,
                             text: text.clone(),
                         }),
@@ -820,40 +827,47 @@ where
                 .collect::<Vec<_>>();
         }
 
-        // Check for existing document IDs again
+        // Check for existing segment IDs again
         for (id, token_freqs, result) in processed_docs.iter_mut() {
-            if result.is_ok() && self.data.doc_tokens.contains_key(id) {
+            if result.is_ok() && self.seg_tokens.contains_key(id) {
                 token_freqs.clear();
-                *result = Err(BM25Error::AlreadyExists(*id));
+                *result = Err(BM25Error::AlreadyExists {
+                    name: self.name.clone(),
+                    id: *id,
+                });
             }
         }
 
-        let results: Vec<Result<(), BM25Error>> = processed_docs
-            .iter()
-            .map(|(_, _, result)| result.clone())
+        // split into valid docs and results
+        let (docs, results): (
+            Vec<(u64, HashMap<String, usize>, bool)>,
+            Vec<Result<(), BM25Error>>,
+        ) = processed_docs
+            .into_iter()
+            .map(|(id, token_freqs, result)| ((id, token_freqs, result.is_ok()), result))
             .collect();
 
         let mut insert_count = 0u64;
-        for (id, token_freqs, result) in processed_docs {
-            if result.is_ok() {
+        for (id, token_freqs, ok) in docs {
+            if ok {
                 insert_count += 1;
                 let tokens_len = token_freqs.values().sum();
-                self.data.doc_tokens.insert(id, tokens_len);
+                self.seg_tokens.insert(id, tokens_len);
                 for (token, freq) in token_freqs {
-                    let mut entry = self.data.postings.entry(token).or_default();
+                    let mut entry = self.postings.entry(token).or_default();
                     entry.0 += 1; // increment update version
                     entry.1.push((id, freq));
                 }
             }
         }
 
-        let total_tokens: usize = self.data.doc_tokens.iter().map(|r| *r.value()).sum();
-        let avg_doc_tokens = total_tokens as f32 / self.data.doc_tokens.len() as f32;
-        *self.data.avg_doc_tokens.write() = avg_doc_tokens;
+        let total_tokens: usize = self.seg_tokens.iter().map(|r| *r.value()).sum();
+        let avg_seg_tokens = total_tokens as f32 / self.seg_tokens.len() as f32;
+        *self.avg_seg_tokens.write() = avg_seg_tokens;
 
         self.update_metadata(|m| {
-            m.version += 1;
-            m.last_inserted = now_ms;
+            m.stats.version += 1;
+            m.stats.last_inserted = now_ms;
             m.stats.insert_count += insert_count;
         });
 
@@ -867,7 +881,7 @@ mod tests {
 
     // 创建一个简单的测试索引
     fn create_test_index() -> BM25Index<TokenizerChain> {
-        let index = BM25Index::new(default_tokenizer(), None);
+        let index = BM25Index::new("anda_db_tfs_bm25".to_string(), default_tokenizer(), None);
 
         // 添加一些测试文档
         index
@@ -891,13 +905,16 @@ mod tests {
 
         // 测试添加新文档
         index
-            .insert(5, "A new document about cats and dogs", 0)
+            .insert(5, "A new segment about cats and dogs", 0)
             .unwrap();
         assert_eq!(index.len(), 5);
 
         // 测试添加已存在的文档ID
         let result = index.insert(3, "This should fail", 0);
-        assert!(matches!(result, Err(BM25Error::AlreadyExists(3))));
+        assert!(matches!(
+            result,
+            Err(BM25Error::AlreadyExists { id: 3, .. })
+        ));
 
         // 测试添加空文档
         let result = index.insert(6, "", 0);
@@ -918,7 +935,7 @@ mod tests {
         assert_eq!(index.len(), 3);
 
         // 测试移除不存在的文档
-        let removed = index.remove(99, "This document doesn't exist", 0);
+        let removed = index.remove(99, "This segment doesn't exist", 0);
         assert!(!removed);
         assert_eq!(index.len(), 3);
     }
@@ -956,7 +973,7 @@ mod tests {
     #[test]
     fn test_empty_index() {
         let tokenizer = default_tokenizer();
-        let index = BM25Index::new(tokenizer, None);
+        let index = BM25Index::new("anda_db_tfs_bm25".to_string(), tokenizer, None);
 
         assert_eq!(index.len(), 0);
         assert!(index.is_empty());
@@ -1000,7 +1017,7 @@ mod tests {
     #[test]
     fn test_insert_batch_parallel() {
         let tokenizer = default_tokenizer();
-        let index = BM25Index::new(tokenizer, None);
+        let index = BM25Index::new("anda_db_tfs_bm25".to_string(), tokenizer, None);
 
         // 准备多个文档
         let docs = vec![
@@ -1033,7 +1050,10 @@ mod tests {
 
         let results = index.insert_batch(duplicate_docs, 0);
         assert_eq!(results.len(), 2);
-        assert!(matches!(results[0], Err(BM25Error::AlreadyExists(3))));
+        assert!(matches!(
+            results[0],
+            Err(BM25Error::AlreadyExists { id: 3, .. })
+        ));
         assert!(results[1].is_ok());
 
         // 验证索引状态
@@ -1048,7 +1068,11 @@ mod tests {
         let default_index = create_test_index();
 
         // 使用自定义参数
-        let custom_index = BM25Index::new(tokenizer, Some(BM25Params { k1: 1.5, b: 0.75 }));
+        let custom_index = BM25Index::new(
+            "anda_db_tfs_bm25".to_string(),
+            tokenizer,
+            Some(BM25Config { k1: 1.5, b: 0.75 }),
+        );
 
         // 添加相同的文档
         custom_index

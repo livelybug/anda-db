@@ -1,6 +1,7 @@
 use anda_db_hnsw::{HnswConfig, HnswIndex};
 use rand::Rng;
 use tokio::time;
+use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 pub fn unix_ms() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -20,8 +21,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     const DIM: usize = 384;
 
     // 创建索引 (384维向量，如BERT嵌入)
-    let mut config = HnswConfig::default();
-    config.max_elements = Some(1_000_000);
+    let config = HnswConfig {
+        dimension: DIM,
+        max_nodes: Some(1_000_000),
+        ..Default::default()
+    };
     // 39900 inserted 100 vectors in 2.482874333s
     // 39900 Search returned 10 results in 4.483417ms
     // 40000 inserted 100 vectors in 2.736496208s
@@ -33,7 +37,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 40000 inserted 100 vectors in 637.636791ms
     // 40000 Search returned 10 results in 2.136208ms
     // 40000 Removed vector 13432 in 12.864834ms
-    let index = HnswIndex::new(DIM, Some(config));
+    let index = HnswIndex::new("anda_db_hnsw".to_string(), Some(config));
 
     // 模拟数据流
     let mut rng = rand::rng();
@@ -77,7 +81,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 打印统计信息
     let stats = index.stats();
     println!("Index statistics:");
-    println!("- Total vectors: {}", stats.num_elements);
+    println!("- Total vectors: {}", stats.num_nodes);
     println!("- Max layer: {}", stats.max_layer);
     println!("- Avg connections: {:.2}", stats.avg_connections);
     println!("- Search operations: {}", stats.search_count);
@@ -86,13 +90,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 最终保存
     {
-        let file = tokio::fs::File::create("hnsw_demo.cbor").await?;
+        let file = tokio::fs::File::create("hnsw_demo.cbor")
+            .await?
+            .compat_write();
         let store_start = time::Instant::now();
         index.store_all(file, unix_ms()).await?;
         println!("Stored index with nodes in {:?}", store_start.elapsed());
     }
 
-    let file = tokio::fs::File::open("hnsw_demo.cbor").await?;
+    let file = tokio::fs::File::open("hnsw_demo.cbor").await?.compat();
     let load_start = time::Instant::now();
     let index = HnswIndex::load(file).await?;
     println!("Load index in {:?}", load_start.elapsed());

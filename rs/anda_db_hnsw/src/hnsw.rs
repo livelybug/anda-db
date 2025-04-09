@@ -1,6 +1,7 @@
 //! # Anda-DB HNSW Vector Search Library
 
 use dashmap::DashMap;
+use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use half::bf16;
 use ordered_float::OrderedFloat;
 use parking_lot::RwLock;
@@ -11,52 +12,41 @@ use std::{
     collections::{BTreeSet, BinaryHeap, HashMap, HashSet},
     sync::atomic::{self, AtomicU64},
 };
-use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 pub use half;
 
-use crate::{DistanceMetric, LayerGen};
+use crate::{DistanceMetric, LayerGen, error::HnswError};
 
-/// Errors that can occur when working with HNSW index.
-#[derive(Error, Debug, Clone)]
-pub enum HnswError {
-    /// Database-related errors.
-    #[error("DB error: {0}")]
-    Db(String),
+/// HNSW index for approximate nearest neighbor search.
+pub struct HnswIndex {
+    /// Index name
+    name: String,
 
-    /// CBOR serialization/deserialization errors.
-    #[error("CBOR serialization error: {0}")]
-    Cbor(String),
+    /// Index configuration.
+    config: HnswConfig,
 
-    /// Error when vector dimensions don't match the index dimension.
-    #[error("Vector dimension mismatch")]
-    DimensionMismatch,
+    /// Layer generator for assigning layers to new nodes.
+    layer_gen: LayerGen,
 
-    /// Error when trying to search an empty index.
-    #[error("Index is empty")]
-    EmptyIndex,
+    /// Map of node IDs to nodes.
+    nodes: DashMap<u64, HnswNode>,
 
-    /// Error when index has reached its maximum capacity.
-    #[error("Index is full")]
-    IndexFull,
+    /// Entry point for search (node_id, layer)
+    entry_point: RwLock<(u64, u8)>,
 
-    /// Error when a vector with the specified ID is not found.
-    #[error("Not found {0}")]
-    NotFound(u64),
+    /// Index metadata.
+    metadata: RwLock<HnswIndexMetadata>,
 
-    /// Error when trying to add a vector with an ID that already exists.
-    #[error("Vector {0} already exists")]
-    AlreadyExists(u64),
-
-    /// Error related to distance metric calculations.
-    #[error("Distance metric error: {0}")]
-    DistanceMetric(String),
+    /// Number of search operations performed.
+    search_count: AtomicU64,
 }
 
 /// HNSW configuration parameters.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HnswConfig {
+    /// Dimensionality of vectors in the index.
+    pub dimension: usize,
+
     /// Maximum number of layers in the graph. Default is 16.
     pub max_layers: u8,
 
@@ -73,7 +63,7 @@ pub struct HnswConfig {
     pub distance_metric: DistanceMetric,
 
     /// Maximum number of elements in the index (None for unlimited). Default is None.
-    pub max_elements: Option<u64>,
+    pub max_nodes: Option<u64>,
 
     /// Scale factor for adjusting layer distribution. Default is 1.0.
     pub scale_factor: Option<f64>,
@@ -100,12 +90,13 @@ impl HnswConfig {
 impl Default for HnswConfig {
     fn default() -> Self {
         Self {
+            dimension: 512,
             max_layers: 16,
             max_connections: 32,
             ef_construction: 200,
             ef_search: 50,
             distance_metric: DistanceMetric::Euclidean,
-            max_elements: None,
+            max_nodes: None,
             scale_factor: None,
             select_neighbors_strategy: SelectNeighborsStrategy::Heuristic,
         }
@@ -165,10 +156,20 @@ pub const NODE_VERSION_FN: NodeMapFn<u64> = |node: &HnswNode| Some(node.version)
 
 /// Index metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IndexMetadata {
-    /// Dimension of vectors in the index.
-    pub dimension: u8,
+pub struct HnswIndexMetadata {
+    /// Index name
+    pub name: String,
 
+    /// Index configuration.
+    pub config: HnswConfig,
+
+    /// Index statistics.
+    pub stats: HnswIndexStats,
+}
+
+/// Index statistics.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct HnswIndexStats {
     /// Last insertion timestamp (unix ms).
     pub last_inserted: u64,
 
@@ -181,18 +182,11 @@ pub struct IndexMetadata {
     /// Updated version for the index. It will be incremented when the index is updated.
     pub version: u64,
 
-    /// Index statistics.
-    pub stats: IndexStats,
-}
-
-/// Index statistics.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct IndexStats {
     /// Maximum layer in the index.
     pub max_layer: u8,
 
-    /// Number of elements in the index.
-    pub num_elements: u64,
+    /// Number of nodes in the index.
+    pub num_nodes: u64,
 
     /// Average number of connections per node.
     pub avg_connections: f32,
@@ -209,74 +203,18 @@ pub struct IndexStats {
 
 /// Serializable HNSW index structure (owned version).
 #[derive(Clone, Serialize, Deserialize)]
-pub struct HnswIndexSerdeOwn {
-    pub config: HnswConfig,
+struct HnswIndexOwned {
     pub nodes: DashMap<u64, HnswNode>,
     pub entry_point: (u64, u8),
-    pub dimension: usize,
-    pub metadata: IndexMetadata,
+    pub metadata: HnswIndexMetadata,
 }
 
 /// Serializable HNSW index structure (reference version).
 #[derive(Clone, Serialize)]
-struct HnswIndexSerdeRef<'a> {
-    config: &'a HnswConfig,
+struct HnswIndexRef<'a> {
     nodes: &'a DashMap<u64, HnswNode>,
     entry_point: (u64, u8),
-    dimension: usize,
-    metadata: &'a IndexMetadata,
-}
-
-impl From<HnswIndexSerdeOwn> for HnswIndex {
-    fn from(val: HnswIndexSerdeOwn) -> Self {
-        let layer_gen = val.config.layer_gen();
-        let search_count = AtomicU64::new(val.metadata.stats.search_count);
-        HnswIndex {
-            dimension: val.dimension,
-            config: val.config,
-            layer_gen,
-            nodes: val.nodes,
-            entry_point: RwLock::new(val.entry_point),
-            metadata: RwLock::new(val.metadata),
-            search_count,
-        }
-    }
-}
-
-impl From<HnswIndex> for HnswIndexSerdeOwn {
-    fn from(val: HnswIndex) -> Self {
-        HnswIndexSerdeOwn {
-            config: val.config,
-            nodes: val.nodes,
-            entry_point: *val.entry_point.read(),
-            dimension: val.dimension,
-            metadata: val.metadata.read().clone(),
-        }
-    }
-}
-
-/// HNSW index for approximate nearest neighbor search.
-pub struct HnswIndex {
-    /// Dimensionality of vectors in the index.
-    dimension: usize,
-
-    /// Index configuration.
-    config: HnswConfig,
-
-    /// Layer generator for assigning layers to new nodes.
-    layer_gen: LayerGen,
-
-    /// Map of node IDs to nodes.
-    nodes: DashMap<u64, HnswNode>,
-
-    /// Entry point for search (node_id, layer)
-    entry_point: RwLock<(u64, u8)>,
-
-    /// Index metadata.
-    metadata: RwLock<IndexMetadata>,
-
-    /// Number of search operations performed.
-    search_count: AtomicU64,
+    metadata: &'a HnswIndexMetadata,
 }
 
 impl HnswIndex {
@@ -284,33 +222,71 @@ impl HnswIndex {
     ///
     /// # Arguments
     ///
-    /// * `dimension` - Dimensionality of vectors to be indexed.
-    /// * `config` - Index configuration.
-    /// * `now_ms` - Current timestamp in milliseconds.
+    /// * `name` - Name of the index
+    /// * `config` - Optional HNSW configuration parameters
     ///
     /// # Returns
     ///
-    /// * `HnswIndex` - A new HNSW index.
-    pub fn new(dimension: usize, config: Option<HnswConfig>) -> Self {
+    /// * `HnswIndex` - New HNSW index instance
+    pub fn new(name: String, config: Option<HnswConfig>) -> Self {
         let config = config.unwrap_or_default();
         let layer_gen = config.layer_gen();
 
         Self {
-            dimension,
-            config,
+            name: name.clone(),
+            config: config.clone(),
             layer_gen,
             nodes: DashMap::new(),
             entry_point: RwLock::new((0, 0)),
-            metadata: RwLock::new(IndexMetadata {
-                dimension: dimension as u8,
-                last_inserted: 0,
-                last_deleted: 0,
-                last_saved: 0,
-                stats: IndexStats::default(),
-                version: 0,
+            metadata: RwLock::new(HnswIndexMetadata {
+                name,
+                config,
+                stats: HnswIndexStats::default(),
             }),
             search_count: AtomicU64::new(0),
         }
+    }
+
+    /// Loads an index from a reader.
+    ///
+    /// Deserializes the index from CBOR format.
+    ///
+    /// # Arguments
+    ///
+    /// * `r` - Any type implementing the [`futures::io::AsyncRead`] trait
+    ///
+    /// # Returns
+    ///
+    /// * `Result<Self, HnswError>` - Loaded index or error.
+    pub async fn load<R: AsyncRead + Unpin>(mut r: R) -> Result<Self, HnswError> {
+        let data = {
+            let mut buf = Vec::new();
+            AsyncReadExt::read_to_end(&mut r, &mut buf)
+                .await
+                .map_err(|err| HnswError::Generic {
+                    name: "unknown".to_string(),
+                    source: err.into(),
+                })?;
+            buf
+        };
+
+        let index: HnswIndexOwned =
+            ciborium::from_reader(&data[..]).map_err(|err| HnswError::Serialization {
+                name: "unknown".to_string(),
+                source: err.into(),
+            })?;
+        let layer_gen = index.metadata.config.layer_gen();
+        let search_count = AtomicU64::new(index.metadata.stats.search_count);
+
+        Ok(HnswIndex {
+            name: index.metadata.name.clone(),
+            config: index.metadata.config.clone(),
+            layer_gen,
+            nodes: index.nodes,
+            entry_point: RwLock::new(index.entry_point),
+            metadata: RwLock::new(index.metadata),
+            search_count,
+        })
     }
 
     /// Returns the number of vectors in the index.
@@ -331,24 +307,24 @@ impl HnswIndex {
         self.nodes.is_empty()
     }
 
+    /// Returns the index name
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
     /// Returns the dimensionality of vectors in the index
     ///
     /// # Returns
     ///
     /// * `usize` - Vector dimension
     pub fn dimension(&self) -> usize {
-        self.dimension
-    }
-
-    /// Returns the index update version
-    pub fn version(&self) -> u64 {
-        self.metadata.read().version
+        self.config.dimension
     }
 
     /// Returns the index metadata
-    pub fn metadata(&self) -> IndexMetadata {
+    pub fn metadata(&self) -> HnswIndexMetadata {
         let mut metadata = { self.metadata.read().clone() };
-        metadata.stats.num_elements = self.nodes.len() as u64;
+        metadata.stats.num_nodes = self.nodes.len() as u64;
         metadata.stats.search_count = self.search_count.load(atomic::Ordering::Relaxed);
 
         let total_connections: u64 = self
@@ -357,8 +333,8 @@ impl HnswIndex {
             .map(|n| n.neighbors.iter().map(|v| v.len() as u64).sum::<u64>())
             .sum();
 
-        metadata.stats.avg_connections = if metadata.stats.num_elements > 0 {
-            total_connections as f32 / metadata.stats.num_elements as f32
+        metadata.stats.avg_connections = if metadata.stats.num_nodes > 0 {
+            total_connections as f32 / metadata.stats.num_nodes as f32
         } else {
             0.0
         };
@@ -370,9 +346,9 @@ impl HnswIndex {
     /// # Returns
     ///
     /// * `IndexStats` - Current statistics
-    pub fn stats(&self) -> IndexStats {
+    pub fn stats(&self) -> HnswIndexStats {
         let mut stats = { self.metadata.read().stats.clone() };
-        stats.num_elements = self.nodes.len() as u64;
+        stats.num_nodes = self.nodes.len() as u64;
         stats.search_count = self.search_count.load(atomic::Ordering::Relaxed);
 
         let total_connections: u64 = self
@@ -381,8 +357,8 @@ impl HnswIndex {
             .map(|n| n.neighbors.iter().map(|v| v.len() as u64).sum::<u64>())
             .sum();
 
-        stats.avg_connections = if stats.num_elements > 0 {
-            total_connections as f32 / stats.num_elements as f32
+        stats.avg_connections = if stats.num_nodes > 0 {
+            total_connections as f32 / stats.num_nodes as f32
         } else {
             0.0
         };
@@ -403,7 +379,10 @@ impl HnswIndex {
         self.nodes
             .get(&id)
             .map(|node| f(&node))
-            .ok_or(HnswError::NotFound(id))
+            .ok_or_else(|| HnswError::NotFound {
+                name: self.name.clone(),
+                id,
+            })
     }
 
     /// Sets the node if it is not already present or if the version is newer.
@@ -447,7 +426,7 @@ impl HnswIndex {
             .map(|_| ())
     }
 
-    /// Inserts a vector into the index
+    /// Inserts a vector into the index with hook function.
     ///
     /// This is the core insertion method that implements the HNSW algorithm:
     /// 1. Randomly assigns a layer to the new node
@@ -475,19 +454,28 @@ impl HnswIndex {
     where
         F: Fn(&HnswNode) -> Option<R>,
     {
-        if vector.len() != self.dimension {
-            return Err(HnswError::DimensionMismatch);
+        if vector.len() != self.config.dimension {
+            return Err(HnswError::DimensionMismatch {
+                name: self.name.clone(),
+                expected: self.config.dimension,
+                got: vector.len(),
+            });
         }
 
         // Check if ID already exists.
         if self.nodes.contains_key(&id) {
-            return Err(HnswError::AlreadyExists(id));
+            return Err(HnswError::AlreadyExists {
+                name: self.name.clone(),
+                id,
+            });
         }
 
         // Check capacity
-        if let Some(max) = self.config.max_elements {
+        if let Some(max) = self.config.max_nodes {
             if self.nodes.len() as u64 >= max {
-                return Err(HnswError::IndexFull);
+                return Err(HnswError::IndexFull {
+                    name: self.name.clone(),
+                });
             }
         }
 
@@ -521,8 +509,8 @@ impl HnswIndex {
 
             self.nodes.insert(id, node);
             self.update_metadata(|m| {
-                m.version = 1;
-                m.last_inserted = now_ms;
+                m.stats.version = 1;
+                m.stats.last_inserted = now_ms;
                 m.stats.max_layer = layer;
                 m.stats.insert_count += 1;
             });
@@ -611,7 +599,10 @@ impl HnswIndex {
         // Add the new node to the index
         match self.nodes.entry(id) {
             dashmap::Entry::Occupied(_) => {
-                return Err(HnswError::AlreadyExists(id));
+                return Err(HnswError::AlreadyExists {
+                    name: self.name.clone(),
+                    id,
+                });
             }
             dashmap::Entry::Vacant(v) => {
                 if let Some(rt) = hook(&node) {
@@ -624,8 +615,8 @@ impl HnswIndex {
                 }
 
                 self.update_metadata(|m| {
-                    m.version += 1;
-                    m.last_inserted = now_ms;
+                    m.stats.version += 1;
+                    m.stats.last_inserted = now_ms;
                     if layer > m.stats.max_layer {
                         m.stats.max_layer = layer;
                     }
@@ -699,7 +690,7 @@ impl HnswIndex {
         .map(|_| ())
     }
 
-    /// Inserts a vector into the index
+    /// Inserts a vector into the index with hook function.
     ///
     /// Automatically converts f32 values to bf16 for storage efficiency
     ///
@@ -746,7 +737,7 @@ impl HnswIndex {
         deleted
     }
 
-    /// Removes a vector from the index
+    /// Removes a vector from the index with hook function.
     ///
     /// # Arguments
     ///
@@ -768,8 +759,8 @@ impl HnswIndex {
             deleted = true;
             self.try_update_entry_point(&node);
             self.update_metadata(|m| {
-                m.version += 1;
-                m.last_deleted = now_ms;
+                m.stats.version += 1;
+                m.stats.last_deleted = now_ms;
                 m.stats.delete_count += 1;
             });
 
@@ -807,12 +798,18 @@ impl HnswIndex {
     ///
     /// * `Result<Vec<(u64, f32)>, HnswError>` - Vector of (id, distance) pairs
     pub fn search(&self, query: &[bf16], top_k: usize) -> Result<Vec<(u64, f32)>, HnswError> {
-        if query.len() != self.dimension {
-            return Err(HnswError::DimensionMismatch);
+        if query.len() != self.config.dimension {
+            return Err(HnswError::DimensionMismatch {
+                name: self.name.clone(),
+                expected: self.config.dimension,
+                got: query.len(),
+            });
         }
 
         if self.nodes.is_empty() {
-            return Err(HnswError::EmptyIndex);
+            return Err(HnswError::EmptyIndex {
+                name: self.name.clone(),
+            });
         }
 
         let mut distance_cache = HashMap::new();
@@ -891,7 +888,12 @@ impl HnswIndex {
         // Calculate distance to entry point
         let entry_dist = match self.nodes.get(&entry_point) {
             Some(node) => self.get_distance_with_cache(distance_cache, query, &node)?,
-            None => return Err(HnswError::NotFound(entry_point)),
+            None => {
+                return Err(HnswError::NotFound {
+                    name: self.name.clone(),
+                    id: entry_point,
+                });
+            }
         };
 
         // Initialize candidate list
@@ -1092,7 +1094,7 @@ impl HnswIndex {
     ///
     /// # Arguments
     ///
-    /// * `w` - Writer to store the index to.
+    /// * `w` - Any type implementing the [`futures::io::AsyncWrite`] trait
     /// * `now_ms` - Current timestamp in milliseconds.
     ///
     /// # Returns
@@ -1103,26 +1105,33 @@ impl HnswIndex {
         mut w: W,
         now_ms: u64,
     ) -> Result<(), HnswError> {
-        let mut buf = Vec::new();
-        ciborium::into_writer(
-            &HnswIndexSerdeRef {
-                config: &self.config,
-                nodes: &DashMap::new(),
-                entry_point: *self.entry_point.read(),
-                dimension: self.dimension,
-                metadata: &self.metadata.read(),
-            },
-            &mut buf,
-        )
-        .map_err(|e| HnswError::Cbor(e.to_string()))?;
+        let mut buf = Vec::with_capacity(8192);
+        // avoid holding the lock for a long time
+        {
+            self.update_metadata(|m| {
+                m.stats.last_saved = now_ms.max(m.stats.last_saved);
+            });
+
+            ciborium::into_writer(
+                &HnswIndexRef {
+                    nodes: &DashMap::new(),
+                    entry_point: *self.entry_point.read(),
+                    metadata: &self.metadata.read(),
+                },
+                &mut buf,
+            )
+            .map_err(|err| HnswError::Serialization {
+                name: self.name.clone(),
+                source: err.into(),
+            })?;
+        }
 
         AsyncWriteExt::write_all(&mut w, &buf)
             .await
-            .map_err(|e| HnswError::Db(e.to_string()))?;
-
-        self.update_metadata(|m| {
-            m.last_saved = now_ms.max(m.last_saved);
-        });
+            .map_err(|err| HnswError::Generic {
+                name: self.name.clone(),
+                source: err.into(),
+            })?;
 
         Ok(())
     }
@@ -1133,7 +1142,7 @@ impl HnswIndex {
     ///
     /// # Arguments
     ///
-    /// * `w` - Writer to store the index to.
+    /// * `w` - Any type implementing the [`futures::io::AsyncWrite`] trait
     /// * `now_ms` - Current timestamp in milliseconds.
     ///
     /// # Returns
@@ -1144,54 +1153,35 @@ impl HnswIndex {
         mut w: W,
         now_ms: u64,
     ) -> Result<(), HnswError> {
-        let mut buf = Vec::new();
-        ciborium::into_writer(
-            &HnswIndexSerdeRef {
-                config: &self.config,
-                nodes: &self.nodes,
-                entry_point: *self.entry_point.read(),
-                dimension: self.dimension,
-                metadata: &self.metadata.read(),
-            },
-            &mut buf,
-        )
-        .map_err(|e| HnswError::Cbor(e.to_string()))?;
+        let mut buf = Vec::with_capacity(8192);
+        // avoid holding the lock for a long time
+        {
+            self.update_metadata(|m| {
+                m.stats.last_saved = now_ms.max(m.stats.last_saved);
+            });
+
+            ciborium::into_writer(
+                &HnswIndexRef {
+                    nodes: &self.nodes,
+                    entry_point: *self.entry_point.read(),
+                    metadata: &self.metadata.read(),
+                },
+                &mut buf,
+            )
+            .map_err(|err| HnswError::Serialization {
+                name: self.name.clone(),
+                source: err.into(),
+            })?;
+        }
 
         AsyncWriteExt::write_all(&mut w, &buf)
             .await
-            .map_err(|e| HnswError::Db(e.to_string()))?;
-
-        self.update_metadata(|m| {
-            m.last_saved = now_ms.max(m.last_saved);
-        });
+            .map_err(|err| HnswError::Generic {
+                name: self.name.clone(),
+                source: err.into(),
+            })?;
 
         Ok(())
-    }
-
-    /// Loads an index from a reader.
-    ///
-    /// Deserializes the index from CBOR format.
-    ///
-    /// # Arguments
-    ///
-    /// * `r` - Reader to load the index from.
-    ///
-    /// # Returns
-    ///
-    /// * `Result<Self, HnswError>` - Loaded index or error.
-    pub async fn load<R: AsyncRead + Unpin>(mut r: R) -> Result<Self, HnswError> {
-        let data = {
-            let mut buf = Vec::new();
-            AsyncReadExt::read_to_end(&mut r, &mut buf)
-                .await
-                .map_err(|e| HnswError::Db(e.to_string()))?;
-            buf
-        };
-
-        let index: HnswIndexSerdeOwn =
-            ciborium::from_reader(&data[..]).map_err(|e| HnswError::Cbor(e.to_string()))?;
-        let index: HnswIndex = index.into();
-        Ok(index)
     }
 
     /// Updates the entry point after a node deletion
@@ -1251,7 +1241,7 @@ impl HnswIndex {
     /// * `f` - Function that modifies the metadata
     fn update_metadata<F>(&self, f: F)
     where
-        F: FnOnce(&mut IndexMetadata),
+        F: FnOnce(&mut HnswIndexMetadata),
     {
         let mut metadata = self.metadata.write();
         f(&mut metadata);
@@ -1264,7 +1254,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_hnsw_basic() {
-        let index = HnswIndex::new(2, None);
+        let config = HnswConfig {
+            dimension: 2,
+            ..Default::default()
+        };
+        let index = HnswIndex::new("anda_db_hnsw".to_string(), Some(config));
 
         // 添加一些二维向量
         index.insert_f32(1, vec![1.0, 1.0], 0).unwrap();
@@ -1309,30 +1303,33 @@ mod tests {
 
         // 欧氏距离
         let config = HnswConfig {
+            dimension: 2,
             distance_metric: DistanceMetric::Euclidean,
             ..Default::default()
         };
-        let index = HnswIndex::new(2, Some(config));
+        let index = HnswIndex::new("anda_db_hnsw".to_string(), Some(config));
         index.insert_f32(1, v1.clone(), 0).unwrap();
         let results = index.search_f32(&v2, 1).unwrap();
         assert!((results[0].1 - 1.4142135).abs() < 1e-6);
 
         // 余弦距离
         let config = HnswConfig {
+            dimension: 2,
             distance_metric: DistanceMetric::Cosine,
             ..Default::default()
         };
-        let index = HnswIndex::new(2, Some(config));
+        let index = HnswIndex::new("anda_db_hnsw".to_string(), Some(config));
         index.insert_f32(1, v1.clone(), 0).unwrap();
         let results = index.search_f32(&v2, 1).unwrap();
         assert!((results[0].1 - 1.0).abs() < 1e-6);
 
         // 内积
         let config = HnswConfig {
+            dimension: 2,
             distance_metric: DistanceMetric::InnerProduct,
             ..Default::default()
         };
-        let index = HnswIndex::new(2, Some(config));
+        let index = HnswIndex::new("anda_db_hnsw".to_string(), Some(config));
         index.insert_f32(1, v1.clone(), 0).unwrap();
         let results = index.search_f32(&v2, 1).unwrap();
         assert!((results[0].1 - 0.0).abs() < 1e-6);
@@ -1345,10 +1342,11 @@ mod tests {
 
         // 曼哈顿距离
         let config = HnswConfig {
+            dimension: 2,
             distance_metric: DistanceMetric::Manhattan,
             ..Default::default()
         };
-        let index = HnswIndex::new(2, Some(config));
+        let index = HnswIndex::new("anda_db_hnsw".to_string(), Some(config));
         index.insert_f32(1, v1.clone(), 0).unwrap();
         let results = index.search_f32(&v2, 1).unwrap();
         assert!((results[0].1 - 2.0).abs() < 1e-6);
@@ -1356,44 +1354,77 @@ mod tests {
 
     #[test]
     fn test_empty_index() {
-        let index = HnswIndex::new(3, None);
+        let config = HnswConfig {
+            dimension: 3,
+            ..Default::default()
+        };
+        let index = HnswIndex::new("anda_db_hnsw".to_string(), Some(config));
 
         // 空索引搜索应该返回错误
         let result = index.search_f32(&[1.0, 2.0, 3.0], 5);
-        assert!(matches!(result, Err(HnswError::EmptyIndex)));
+        assert!(matches!(result, Err(HnswError::EmptyIndex { .. })));
     }
 
     #[test]
     fn test_dimension_mismatch() {
-        let index = HnswIndex::new(3, None);
+        let config = HnswConfig {
+            dimension: 3,
+            ..Default::default()
+        };
+        let index = HnswIndex::new("anda_db_hnsw".to_string(), Some(config));
 
         // 插入维度不匹配的向量
         let result = index.insert_f32(1, vec![1.0, 2.0], 0);
-        assert!(matches!(result, Err(HnswError::DimensionMismatch)));
+        assert!(matches!(
+            result,
+            Err(HnswError::DimensionMismatch {
+                expected: 3,
+                got: 2,
+                ..
+            })
+        ));
 
         // 插入正确维度的向量
         index.insert_f32(1, vec![1.0, 2.0, 3.0], 0).unwrap();
 
         // 搜索维度不匹配的向量
         let result = index.search_f32(&[1.0, 2.0], 5);
-        assert!(matches!(result, Err(HnswError::DimensionMismatch)));
+        assert!(matches!(
+            result,
+            Err(HnswError::DimensionMismatch {
+                expected: 3,
+                got: 2,
+                ..
+            })
+        ));
     }
 
     #[test]
     fn test_duplicate_insert() {
-        let index = HnswIndex::new(2, None);
+        let config = HnswConfig {
+            dimension: 2,
+            ..Default::default()
+        };
+        let index = HnswIndex::new("anda_db_hnsw".to_string(), Some(config));
 
         // 首次插入成功
         index.insert_f32(1, vec![1.0, 2.0], 0).unwrap();
 
         // 重复插入同一ID应该失败
         let result = index.insert_f32(1, vec![3.0, 4.0], 0);
-        assert!(matches!(result, Err(HnswError::AlreadyExists(1))));
+        assert!(matches!(
+            result,
+            Err(HnswError::AlreadyExists { id: 1, .. })
+        ));
     }
 
     #[test]
     fn test_remove() {
-        let index = HnswIndex::new(2, None);
+        let config = HnswConfig {
+            dimension: 2,
+            ..Default::default()
+        };
+        let index = HnswIndex::new("anda_db_hnsw".to_string(), Some(config));
 
         // 添加向量
         index.insert_f32(1, vec![1.0, 1.0], 0).unwrap();
@@ -1418,12 +1449,13 @@ mod tests {
     }
 
     #[test]
-    fn test_max_elements() {
+    fn test_max_nodes() {
         let config = HnswConfig {
-            max_elements: Some(3),
+            dimension: 2,
+            max_nodes: Some(3),
             ..Default::default()
         };
-        let index = HnswIndex::new(2, Some(config));
+        let index = HnswIndex::new("anda_db_hnsw".to_string(), Some(config));
 
         // 添加向量直到达到最大容量
         index.insert_f32(1, vec![1.0, 1.0], 0).unwrap();
@@ -1432,24 +1464,26 @@ mod tests {
 
         // 超出容量限制应该失败
         let result = index.insert_f32(4, vec![4.0, 4.0], 0);
-        assert!(matches!(result, Err(HnswError::IndexFull)));
+        assert!(matches!(result, Err(HnswError::IndexFull { .. })));
     }
 
     #[test]
     fn test_select_neighbors_strategies() {
         // 测试简单策略
         let config = HnswConfig {
+            dimension: 2,
             select_neighbors_strategy: SelectNeighborsStrategy::Simple,
             ..Default::default()
         };
-        let simple_index = HnswIndex::new(2, Some(config));
+        let simple_index = HnswIndex::new("anda_db_hnsw".to_string(), Some(config));
 
         // 测试启发式策略
         let config = HnswConfig {
+            dimension: 2,
             select_neighbors_strategy: SelectNeighborsStrategy::Heuristic,
             ..Default::default()
         };
-        let heuristic_index = HnswIndex::new(2, Some(config));
+        let heuristic_index = HnswIndex::new("anda_db_hnsw".to_string(), Some(config));
 
         // 添加相同的向量到两个索引
         for i in 0..20 {
@@ -1475,7 +1509,11 @@ mod tests {
 
         // 创建并填充索引
         {
-            let index = HnswIndex::new(3, None);
+            let config = HnswConfig {
+                dimension: 3,
+                ..Default::default()
+            };
+            let index = HnswIndex::new("anda_db_hnsw".to_string(), Some(config));
 
             for i in 0..100 {
                 let x = (i % 10) as f32;
@@ -1502,11 +1540,15 @@ mod tests {
 
     #[test]
     fn test_stats() {
-        let index = HnswIndex::new(2, None);
+        let config = HnswConfig {
+            dimension: 2,
+            ..Default::default()
+        };
+        let index = HnswIndex::new("anda_db_hnsw".to_string(), Some(config));
 
         // 初始状态
         let stats = index.stats();
-        assert_eq!(stats.num_elements, 0);
+        assert_eq!(stats.num_nodes, 0);
         assert_eq!(stats.insert_count, 0);
         assert_eq!(stats.search_count, 0);
         assert_eq!(stats.delete_count, 0);
@@ -1517,7 +1559,7 @@ mod tests {
         }
 
         let stats = index.stats();
-        assert_eq!(stats.num_elements, 10);
+        assert_eq!(stats.num_nodes, 10);
         assert_eq!(stats.insert_count, 10);
 
         // 执行搜索
@@ -1533,7 +1575,7 @@ mod tests {
         index.remove(6, 0);
 
         let stats = index.stats();
-        assert_eq!(stats.num_elements, 8);
+        assert_eq!(stats.num_nodes, 8);
         assert_eq!(stats.delete_count, 2);
     }
 
@@ -1565,7 +1607,11 @@ mod tests {
     fn test_large_dimension() {
         // 测试高维向量
         let dim = 128;
-        let index = HnswIndex::new(dim, None);
+        let config = HnswConfig {
+            dimension: dim,
+            ..Default::default()
+        };
+        let index = HnswIndex::new("anda_db_hnsw".to_string(), Some(config));
 
         // 创建一些高维向量
         for i in 0..10 {
@@ -1584,7 +1630,11 @@ mod tests {
 
     #[test]
     fn test_entry_point_update() {
-        let index = HnswIndex::new(2, None);
+        let config = HnswConfig {
+            dimension: 2,
+            ..Default::default()
+        };
+        let index = HnswIndex::new("anda_db_hnsw".to_string(), Some(config));
 
         // 添加向量
         index.insert_f32(1, vec![1.0, 1.0], 0).unwrap();
@@ -1608,7 +1658,12 @@ mod tests {
         use std::sync::Arc;
         use tokio::sync::Barrier;
 
-        let index = Arc::new(HnswIndex::new(3, None));
+        let config = HnswConfig {
+            dimension: 3,
+            ..Default::default()
+        };
+        let index = HnswIndex::new("anda_db_hnsw".to_string(), Some(config));
+        let index = Arc::new(index);
         let mut handles: Vec<tokio::task::JoinHandle<Result<(), HnswError>>> =
             Vec::with_capacity(10);
         let barrier = Arc::new(Barrier::new(10));
