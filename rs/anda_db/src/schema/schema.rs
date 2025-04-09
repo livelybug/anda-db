@@ -60,9 +60,9 @@ impl Schema {
     /// # Returns
     /// Ok(&FieldEntry) if the field exists, Err(SchemaError) otherwise.
     pub fn get_field_or_err(&self, name: &str) -> Result<&FieldEntry, SchemaError> {
-        self.fields.get(name).ok_or_else(|| {
-            SchemaError::ValidationError(format!("field {:?} not found in schema", name))
-        })
+        self.fields
+            .get(name)
+            .ok_or_else(|| SchemaError::Validation(format!("field {:?} not found in schema", name)))
     }
 
     /// Returns an iterator over all fields in the schema.
@@ -90,7 +90,7 @@ impl Schema {
         // Validate that all field indexes in values exist in the schema
         for idx in values.keys() {
             if !self.idx.contains(idx) {
-                return Err(SchemaError::ValidationError(format!(
+                return Err(SchemaError::Validation(format!(
                     "field index {:?} not found in schema",
                     idx
                 )));
@@ -102,7 +102,7 @@ impl Schema {
             if let Some(value) = values.get(&field.idx()) {
                 field.validate(value)?;
             } else if field.required() {
-                return Err(SchemaError::ValidationError(format!(
+                return Err(SchemaError::Validation(format!(
                     "field {:?} is required",
                     field.name()
                 )));
@@ -148,7 +148,7 @@ impl SchemaBuilder {
     /// - The maximum number of fields has been reached
     pub fn add_field(&mut self, entry: FieldEntry) -> Result<(), SchemaError> {
         if self.fields.contains_key(entry.name()) {
-            return Err(SchemaError::InvalidSchema(format!(
+            return Err(SchemaError::Schema(format!(
                 "Field {:?} already exists in schema",
                 entry.name()
             )));
@@ -165,7 +165,7 @@ impl SchemaBuilder {
 
         self.idx += 1;
         if self.idx > u16::MAX as usize {
-            return Err(SchemaError::InvalidSchema(
+            return Err(SchemaError::Schema(
                 "Schema has reached the maximum number of fields".to_string(),
             ));
         }
@@ -186,13 +186,13 @@ impl SchemaBuilder {
     /// - The schema has too many fields (more than u8::MAX)
     pub fn build(self) -> Result<Schema, SchemaError> {
         if self.fields.is_empty() {
-            return Err(SchemaError::InvalidSchema(
+            return Err(SchemaError::Schema(
                 "Schema must have at least one field".to_string(),
             ));
         }
 
         if self.fields.len() > u8::MAX as usize {
-            return Err(SchemaError::InvalidSchema(
+            return Err(SchemaError::Schema(
                 "Schema has reached the maximum number of fields".to_string(),
             ));
         }

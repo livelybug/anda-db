@@ -11,8 +11,12 @@ license.workspace = true
 
 [dependencies]
 anda_db_derive = { path = "../anda_db_derive" }
+anda_db_hnsw = { path = "../anda_db_hnsw" }
+anda_db_tfs = { path = "../anda_db_tfs" }
+bytes = { workspace = true }
 ciborium = { workspace = true }
 dashmap = { workspace = true, features = ["serde"] }
+futures = { workspace = true }
 half = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -25,6 +29,9 @@ thiserror = { workspace = true }
 parking_lot = { workspace = true }
 tokio = { workspace = true, features = ["sync", "parking_lot", "io-util"] }
 ic_auth_types = { workspace = true }
+object_store = { workspace = true }
+moka = { workspace = true }
+zstd-safe = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }

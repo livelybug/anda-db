@@ -1,2 +1,2 @@
 # anda-db
-An database for AI Agents built with Object Store
+A database for AI Agents built with Object Store.

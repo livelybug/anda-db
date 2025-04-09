@@ -839,6 +839,7 @@ where
         }
 
         // split into valid docs and results
+        #[allow(clippy::type_complexity)]
         let (docs, results): (
             Vec<(u64, HashMap<String, usize>, bool)>,
             Vec<Result<(), BM25Error>>,

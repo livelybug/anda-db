@@ -5,28 +5,24 @@ use thiserror::Error;
 #[derive(Error, Debug)]
 pub enum SchemaError {
     #[error("Invalid schema: {0}")]
-    InvalidSchema(String),
+    Schema(String),
     /// Invalid field type error
     #[error("Invalid field type: {0}")]
-    InvalidFieldType(String),
+    FieldType(String),
 
     /// Invalid field value error
     #[error("Invalid field value: {0}")]
-    InvalidFieldValue(String),
+    FieldValue(String),
 
     /// Invalid field name error
     #[error("Invalid field name: {0}")]
-    InvalidFieldName(String),
+    FieldName(String),
 
     /// Field validation error
     #[error("Field validation failed: {0}")]
-    ValidationError(String),
+    Validation(String),
 
     /// Serialization error
     #[error("Serialization error: {0}")]
-    SerializationError(String),
-
-    /// Deserialization error
-    #[error("Deserialization error: {0}")]
-    DeserializationError(String),
+    Serialization(String),
 }

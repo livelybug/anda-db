@@ -144,7 +144,7 @@ impl FieldType {
                 }
                 _ => {
                     if values.len() != types.len() {
-                        return Err(SchemaError::InvalidFieldValue(format!(
+                        return Err(SchemaError::FieldValue(format!(
                             "invalid array length, expected {:?}, got {:?}",
                             types.len(),
                             values.len()
@@ -155,7 +155,7 @@ impl FieldType {
                         if let Some(fv) = values.get(i) {
                             ft.validate(fv)?;
                         } else {
-                            return Err(SchemaError::InvalidFieldValue(format!(
+                            return Err(SchemaError::FieldValue(format!(
                                 "no value at array[{}], expected type {:?}",
                                 i, ft,
                             )));
@@ -166,18 +166,15 @@ impl FieldType {
             },
             (FieldType::Map(types), FieldValue::Map(values)) => {
                 if let Some(k) = values.keys().find(|k| !types.contains_key(*k)) {
-                    return Err(SchemaError::InvalidFieldValue(format!(
-                        "invalid map key {:?}",
-                        k
-                    )));
+                    return Err(SchemaError::FieldValue(format!("invalid map key {:?}", k)));
                 }
 
                 for (k, ft) in types.iter() {
                     ft.validate(values.get(k).unwrap_or(&FieldValue::Null))
-                        .map_err(|e| {
-                            SchemaError::InvalidFieldValue(format!(
+                        .map_err(|err| {
+                            SchemaError::FieldValue(format!(
                                 "invalid map value at key {:?}, error: {}",
-                                k, e
+                                k, err
                             ))
                         })?;
                 }
@@ -190,7 +187,7 @@ impl FieldType {
                 }
                 ft.validate(val)
             }
-            _ => Err(SchemaError::InvalidFieldValue(format!(
+            _ => Err(SchemaError::FieldValue(format!(
                 "expected type {:?}, got value {:?}",
                 self, value
             ))),
@@ -295,12 +292,12 @@ impl FieldValue {
     /// * `Result<Self, SchemaError>` - The converted FieldValue or an error message
     pub fn u64_from(value: Cbor) -> Result<Self, SchemaError> {
         match value {
-            Cbor::Integer(i) => Ok(FieldValue::U64(i.try_into().map_err(|v| {
-                SchemaError::InvalidFieldValue(format!("expected U64, got {v:?}"))
-            })?)),
-            v => Err(SchemaError::InvalidFieldValue(format!(
-                "expected U64, got {v:?}"
-            ))),
+            Cbor::Integer(i) => {
+                Ok(FieldValue::U64(i.try_into().map_err(|v| {
+                    SchemaError::FieldValue(format!("expected U64, got {v:?}"))
+                })?))
+            }
+            v => Err(SchemaError::FieldValue(format!("expected U64, got {v:?}"))),
         }
     }
 
@@ -313,12 +310,12 @@ impl FieldValue {
     /// * `Result<Self, SchemaError>` - The converted FieldValue or an error message
     pub fn i64_from(value: Cbor) -> Result<Self, SchemaError> {
         match value {
-            Cbor::Integer(i) => Ok(FieldValue::I64(i.try_into().map_err(|v| {
-                SchemaError::InvalidFieldValue(format!("expected I64, got {v:?}"))
-            })?)),
-            v => Err(SchemaError::InvalidFieldValue(format!(
-                "expected I64, got {v:?}"
-            ))),
+            Cbor::Integer(i) => {
+                Ok(FieldValue::I64(i.try_into().map_err(|v| {
+                    SchemaError::FieldValue(format!("expected I64, got {v:?}"))
+                })?))
+            }
+            v => Err(SchemaError::FieldValue(format!("expected I64, got {v:?}"))),
         }
     }
 
@@ -332,9 +329,7 @@ impl FieldValue {
     pub fn f64_from(value: Cbor) -> Result<Self, SchemaError> {
         match value {
             Cbor::Float(f) if !f.is_nan() => Ok(FieldValue::F64(f)),
-            v => Err(SchemaError::InvalidFieldValue(format!(
-                "expected F64, got {v:?}"
-            ))),
+            v => Err(SchemaError::FieldValue(format!("expected F64, got {v:?}"))),
         }
     }
 
@@ -348,9 +343,7 @@ impl FieldValue {
     pub fn f32_from(value: Cbor) -> Result<Self, SchemaError> {
         match value {
             Cbor::Float(f) if !f.is_nan() => Ok(FieldValue::F32(f as f32)),
-            v => Err(SchemaError::InvalidFieldValue(format!(
-                "expected F32, got {v:?}"
-            ))),
+            v => Err(SchemaError::FieldValue(format!("expected F32, got {v:?}"))),
         }
     }
 
@@ -363,12 +356,11 @@ impl FieldValue {
     /// * `Result<Self, SchemaError>` - The converted FieldValue or an error message
     pub fn bf16_from(value: Cbor) -> Result<Self, SchemaError> {
         match value {
-            Cbor::Integer(i) => Ok(FieldValue::Bf16(bf16::from_bits(i.try_into().map_err(
-                |v| SchemaError::InvalidFieldValue(format!("expected I64, got {v:?}")),
-            )?))),
-            v => Err(SchemaError::InvalidFieldValue(format!(
-                "expected Bf64, got {v:?}"
+            Cbor::Integer(i) => Ok(FieldValue::Bf16(bf16::from_bits(
+                i.try_into()
+                    .map_err(|v| SchemaError::FieldValue(format!("expected I64, got {v:?}")))?,
             ))),
+            v => Err(SchemaError::FieldValue(format!("expected Bf64, got {v:?}"))),
         }
     }
 
@@ -382,7 +374,7 @@ impl FieldValue {
     pub fn bytes_from(value: Cbor) -> Result<Self, SchemaError> {
         match value {
             Cbor::Bytes(b) => Ok(FieldValue::Bytes(b)),
-            v => Err(SchemaError::InvalidFieldValue(format!(
+            v => Err(SchemaError::FieldValue(format!(
                 "expected Bytes, got {v:?}"
             ))),
         }
@@ -398,9 +390,7 @@ impl FieldValue {
     pub fn text_from(value: Cbor) -> Result<Self, SchemaError> {
         match value {
             Cbor::Text(t) => Ok(FieldValue::Text(t)),
-            v => Err(SchemaError::InvalidFieldValue(format!(
-                "expected Text, got {v:?}"
-            ))),
+            v => Err(SchemaError::FieldValue(format!("expected Text, got {v:?}"))),
         }
     }
 
@@ -414,9 +404,7 @@ impl FieldValue {
     pub fn bool_from(value: Cbor) -> Result<Self, SchemaError> {
         match value {
             Cbor::Bool(b) => Ok(FieldValue::Bool(b)),
-            v => Err(SchemaError::InvalidFieldValue(format!(
-                "expected Bool, got {v:?}"
-            ))),
+            v => Err(SchemaError::FieldValue(format!("expected Bool, got {v:?}"))),
         }
     }
 
@@ -448,7 +436,7 @@ impl FieldValue {
                 }
                 _ => {
                     if types.len() != values.len() {
-                        return Err(SchemaError::InvalidFieldValue(format!(
+                        return Err(SchemaError::FieldValue(format!(
                             "Invalid array length, expected {:?}, got {:?}",
                             types.len(),
                             values.len()
@@ -464,7 +452,7 @@ impl FieldValue {
                     Ok(FieldValue::Array(rt))
                 }
             },
-            v => Err(SchemaError::InvalidFieldValue(format!(
+            v => Err(SchemaError::FieldValue(format!(
                 "expected Array, got {v:?}"
             ))),
         }
@@ -487,10 +475,7 @@ impl FieldValue {
                             .into_iter()
                             .map(|(k, v)| {
                                 let k = k.into_text().map_err(|v| {
-                                    SchemaError::InvalidFieldValue(format!(
-                                        "invalid map key: {:?}",
-                                        v
-                                    ))
+                                    SchemaError::FieldValue(format!("invalid map key: {:?}", v))
                                 })?;
                                 Ok::<_, SchemaError>((k, FieldValue::try_from(v)?))
                             })
@@ -501,16 +486,13 @@ impl FieldValue {
                 let mut vals: BTreeMap<String, Cbor> = BTreeMap::new();
                 for (k, v) in values {
                     let k = k.into_text().map_err(|v| {
-                        SchemaError::InvalidFieldValue(format!("invalid map key: {:?}", v))
+                        SchemaError::FieldValue(format!("invalid map key: {:?}", v))
                     })?;
                     if !types.contains_key(&k) {
-                        return Err(SchemaError::InvalidFieldValue(format!(
-                            "invalid map key {:?}",
-                            k
-                        )));
+                        return Err(SchemaError::FieldValue(format!("invalid map key {:?}", k)));
                     }
                     if vals.contains_key(&k) {
-                        return Err(SchemaError::InvalidFieldValue(format!(
+                        return Err(SchemaError::FieldValue(format!(
                             "duplicate map key {:?}",
                             k
                         )));
@@ -529,9 +511,7 @@ impl FieldValue {
 
                 Ok(FieldValue::Map(rt))
             }
-            v => Err(SchemaError::InvalidFieldValue(format!(
-                "expected Map, got {v:?}"
-            ))),
+            v => Err(SchemaError::FieldValue(format!("expected Map, got {v:?}"))),
         }
     }
 
@@ -545,7 +525,7 @@ impl FieldValue {
     pub fn json_from(value: Cbor) -> Result<Self, SchemaError> {
         let val: Json = value
             .deserialized()
-            .map_err(|v| SchemaError::InvalidFieldValue(format!("expected Json, got {v:?}")))?;
+            .map_err(|v| SchemaError::FieldValue(format!("expected Json, got {v:?}")))?;
         Ok(FieldValue::Json(val))
     }
 
@@ -574,7 +554,7 @@ impl FieldValue {
             Cbor::Map(_) => Self::map_from(value, &BTreeMap::new()),
             Cbor::Null => Ok(FieldValue::Null),
             Cbor::Tag(_, val) => Self::try_from(*val),
-            v => Err(SchemaError::InvalidFieldValue(format!(
+            v => Err(SchemaError::FieldValue(format!(
                 "invalid CBOR value: {v:?}"
             ))),
         }
@@ -593,7 +573,7 @@ impl FieldValue {
         ft: Option<&FieldType>,
     ) -> Result<Self, SchemaError> {
         let rt = Cbor::serialized(value)
-            .map_err(|v| SchemaError::InvalidFieldValue(format!("failed to serialize: {v:?}")))?;
+            .map_err(|v| SchemaError::FieldValue(format!("failed to serialize: {v:?}")))?;
         match ft {
             Some(ft) => ft.extract(rt),
             None => FieldValue::try_from(rt),
@@ -607,7 +587,7 @@ impl FieldValue {
     pub fn deserialized<T: DeserializeOwned>(self) -> Result<T, SchemaError> {
         let val: Cbor = self.into();
         val.deserialized()
-            .map_err(|v| SchemaError::InvalidFieldValue(format!("Failed to deserialize: {v:?}")))
+            .map_err(|v| SchemaError::FieldValue(format!("Failed to deserialize: {v:?}")))
     }
 }
 
@@ -749,7 +729,7 @@ impl FieldEntry {
                 }
                 Ok(v)
             }
-            Err(e) => Err(SchemaError::InvalidFieldValue(format!(
+            Err(e) => Err(SchemaError::FieldValue(format!(
                 "field {} is invalid, error: {}",
                 self.name, e
             ))),
@@ -766,7 +746,7 @@ impl FieldEntry {
     pub fn validate(&self, value: &FieldValue) -> Result<(), SchemaError> {
         if value == &FieldValue::Null {
             if self.required {
-                return Err(SchemaError::InvalidFieldValue(format!(
+                return Err(SchemaError::FieldValue(format!(
                     "field {} is required, expected type {:?}",
                     self.name, self.r#type
                 )));
@@ -775,8 +755,8 @@ impl FieldEntry {
             return Ok(());
         }
 
-        self.r#type.validate(value).map_err(|e| {
-            SchemaError::InvalidFieldValue(format!("field {} is invalid, error: {}", self.name, e))
+        self.r#type.validate(value).map_err(|err| {
+            SchemaError::FieldValue(format!("field {} is invalid, error: {}", self.name, err))
         })
     }
 }
@@ -795,11 +775,11 @@ impl FieldEntry {
 /// * `Result<(), SchemaError>` - Ok if valid, or an error message if invalid
 pub fn validate_field_name(s: &str) -> Result<(), SchemaError> {
     if s.is_empty() {
-        return Err(SchemaError::InvalidFieldName("empty string".to_string()));
+        return Err(SchemaError::FieldName("empty string".to_string()));
     }
 
     if s.len() > 64 {
-        return Err(SchemaError::InvalidFieldName(format!(
+        return Err(SchemaError::FieldName(format!(
             "string length {} exceeds the limit 64",
             s.len()
         )));
@@ -807,7 +787,7 @@ pub fn validate_field_name(s: &str) -> Result<(), SchemaError> {
 
     for c in s.chars() {
         if !matches!(c, 'a'..='z' | '0'..='9' | '_' ) {
-            return Err(SchemaError::InvalidFieldName(format!(
+            return Err(SchemaError::FieldName(format!(
                 "Invalid character {:?} in {:?}",
                 c, s
             )));

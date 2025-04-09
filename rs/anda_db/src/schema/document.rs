@@ -28,6 +28,12 @@ pub struct DocumentOwned {
     pub fields: IndexedFieldValues,
 }
 
+#[derive(Clone, Debug, Serialize)]
+struct DocumentRef<'a> {
+    #[serde(rename = "f")]
+    pub fields: &'a IndexedFieldValues,
+}
+
 impl Default for DocumentOwned {
     fn default() -> Self {
         Self::new()
@@ -67,7 +73,7 @@ impl DocumentOwned {
     /// * `Result<&Fv, SchemaError>` - The field value or an error if not found
     pub fn get_field_or_err(&self, idx: usize) -> Result<&Fv, SchemaError> {
         self.fields.get(&idx).ok_or_else(|| {
-            SchemaError::ValidationError(format!("field at {:?} not found in document", idx))
+            SchemaError::Validation(format!("field at {:?} not found in document", idx))
         })
     }
 
@@ -173,7 +179,7 @@ impl Document {
     /// * `doc` - The value to serialize into a document
     ///
     /// # Returns
-    /// * `Result<Self, SchemaError>` - The validated Document or an error
+    /// * `Result<Self, SchemaError>` - The validated document or an error
     ///
     /// # Type Parameters
     /// * `T` - The type of the value to serialize
@@ -181,20 +187,20 @@ impl Document {
     where
         T: Serialize,
     {
-        let doc = Value::serialized(doc).map_err(|e| {
-            SchemaError::SerializationError(format!("failed to serialize document: {}", e))
+        let doc = Value::serialized(doc).map_err(|err| {
+            SchemaError::Serialization(format!("failed to serialize document: {err:?}"))
         })?;
-        let doc = doc.into_map().map_err(|e| {
-            SchemaError::ValidationError(format!(
-                "invalid document, expected CBOR map value, got {e:?}"
+        let doc = doc.into_map().map_err(|err| {
+            SchemaError::Validation(format!(
+                "invalid document, expected CBOR map value, got {err:?}"
             ))
         })?;
 
         let mut doc_owned = DocumentOwned::new();
         for (k, v) in doc {
-            let k = k.into_text().map_err(|e| {
-                SchemaError::ValidationError(format!(
-                    "invalid document field key, expected CBOR text value, got {e:?}"
+            let k = k.into_text().map_err(|err| {
+                SchemaError::Validation(format!(
+                    "invalid document field key, expected CBOR text value, got {err:?}"
                 ))
             })?;
 
@@ -227,7 +233,7 @@ impl Document {
             if let Some(value) = self.fields.get(&field.idx()) {
                 doc.push((field.name().into(), value.clone().into()));
             } else if field.required() {
-                return Err(SchemaError::ValidationError(format!(
+                return Err(SchemaError::Validation(format!(
                     "field {:?} is required",
                     field.name()
                 )));
@@ -243,7 +249,7 @@ impl Document {
 
         Cbor::Map(doc)
             .deserialized()
-            .map_err(|e| SchemaError::DeserializationError(format!("Failed to deserialize: {}", e)))
+            .map_err(|err| SchemaError::Serialization(format!("Failed to deserialize: {}", err)))
     }
 
     /// Gets the document's unique identifier.
@@ -287,14 +293,14 @@ impl Document {
     pub fn get_field_or_err(&self, name: &str) -> Result<&Fv, SchemaError> {
         if let Some(field) = self.schema.get_field(name) {
             self.fields.get(&field.idx()).ok_or_else(|| {
-                SchemaError::ValidationError(format!(
+                SchemaError::Validation(format!(
                     "field {:?} at {} not found in document",
                     name,
                     field.idx()
                 ))
             })
         } else {
-            Err(SchemaError::ValidationError(format!(
+            Err(SchemaError::Validation(format!(
                 "field {:?} not found in schema",
                 name
             )))
@@ -309,14 +315,14 @@ impl Document {
     ///
     /// # Returns
     /// * `Result<(), SchemaError>` - Success or an error
-    pub fn set_field(&mut self, name: &str, value: Fv) -> Result<(), SchemaError> {
+    pub fn set_field(&mut self, name: &str, value: Fv) -> Result<&mut Self, SchemaError> {
         if let Some(field) = self.schema.get_field(name) {
             field.validate(&value)?;
             self.fields.insert(field.idx(), value);
-            return Ok(());
+            return Ok(self);
         }
 
-        Err(SchemaError::ValidationError(format!(
+        Err(SchemaError::Validation(format!(
             "field {:?} not found in schema",
             name
         )))
@@ -355,13 +361,13 @@ impl Document {
             if let Some(value) = self.fields.get(&field.idx()) {
                 return value.to_owned().deserialized();
             } else {
-                return Err(SchemaError::ValidationError(format!(
+                return Err(SchemaError::Validation(format!(
                     "field {:?} not found in document",
                     name
                 )));
             }
         }
-        Err(SchemaError::ValidationError(format!(
+        Err(SchemaError::Validation(format!(
             "field {:?} not found in schema",
             name
         )))
@@ -378,7 +384,7 @@ impl Document {
     ///
     /// # Type Parameters
     /// * `T` - The type of the value to serialize
-    pub fn set_field_as<T>(&mut self, name: &str, value: &T) -> Result<(), SchemaError>
+    pub fn set_field_as<T>(&mut self, name: &str, value: &T) -> Result<&mut Self, SchemaError>
     where
         T: Serialize,
     {
@@ -386,7 +392,7 @@ impl Document {
         let value = Fv::serialized(&value, Some(field.r#type()))?;
         field.validate(&value)?;
         self.fields.insert(field.idx(), value);
-        Ok(())
+        Ok(self)
     }
 
     /// Updates the document with values from a DocumentOwned.
@@ -404,6 +410,33 @@ impl Document {
         Ok(())
     }
 }
+
+impl Serialize for Document {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let doc = DocumentRef {
+            fields: &self.fields,
+        };
+        doc.serialize(serializer)
+    }
+}
+
+// impl<'de> Deserialize<'de> for Document {
+//     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+//     where
+//         D: serde::Deserializer<'de>,
+//     {
+//         // 首先反序列化为 DocumentOwned
+//         let doc_owned = DocumentOwned::deserialize(deserializer)?;
+
+//         // 由于反序列化的 Document 需要 schema 引用，但这不在序列化数据中
+//         // 我们无法直接构造完整的 Document
+//         // 可以通过一个错误表示需要稍后附加 schema
+//         Err(serde::de::Error::custom("Cannot fully deserialize Document without a Schema reference. Use DocumentOwned instead and provide a Schema later."))
+//     }
+// }
 
 #[cfg(test)]
 mod tests {
@@ -569,8 +602,9 @@ mod tests {
 
         // 测试设置字段
         doc.set_field("name", Fv::Text("John Doe".to_string()))
+            .unwrap()
+            .set_field("age", Fv::U64(30))
             .unwrap();
-        doc.set_field("age", Fv::U64(30)).unwrap();
 
         // 测试获取字段
         assert_eq!(
