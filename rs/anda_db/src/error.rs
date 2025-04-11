@@ -25,14 +25,14 @@ pub enum DbError {
     #[error("Index error: {source:?}")]
     Index { name: String, source: BoxError },
 
-    #[error("Object at location {path} not found: {source:?}")]
+    #[error("Object {name} at location {path} not found: {source:?}")]
     NotFound {
         name: String,
         path: String,
         source: BoxError,
     },
 
-    #[error("Object at location {path} already exists: {source:?}")]
+    #[error("Object {name} at location {path} already exists: {source:?}")]
     AlreadyExists {
         name: String,
         path: String,

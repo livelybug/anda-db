@@ -13,8 +13,9 @@ A high-performance implementation of Hierarchical Navigable Small World (HNSW) a
 - Multiple distance metrics (Euclidean, Cosine, Inner Product, Manhattan)
 - Configurable index parameters
 - Thread-safe implementation with concurrent read/write operations
-- Serialization and deserialization support
+- Serialization and deserialization in CBOR format
 - Support for bf16 (brain floating point) vector storage for memory efficiency
+- Support incremental index updates persistent (insertions and deletions)
 
 ## Installation
 

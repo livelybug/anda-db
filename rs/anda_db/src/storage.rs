@@ -3,8 +3,7 @@ use ciborium::{from_reader, into_writer};
 use futures::{StreamExt, TryStreamExt, stream::BoxStream};
 use moka::future::Cache;
 use object_store::{
-    GetOptions, ObjectMeta, ObjectStore, PutMode, PutOptions, PutResult, UpdateVersion,
-    memory::InMemory, path::Path,
+    GetOptions, ObjectMeta, ObjectStore, PutMode, PutOptions, PutResult, UpdateVersion, path::Path,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::sync::{
@@ -13,7 +12,120 @@ use std::sync::{
 };
 use zstd_safe::{compress, decompress};
 
-use crate::error::DbError;
+use crate::{error::DbError, schema::validate_field_name};
+
+/// 基于 object_store 实现的 Anda DB 存储层
+#[derive(Clone)]
+pub struct Storage {
+    inner: Arc<InnerStorage>,
+}
+
+struct InnerStorage {
+    /// Object store reference
+    object_store: Arc<dyn ObjectStore>,
+    /// Base path for all documents
+    base_path: Path,
+    compress_level: i32,
+    object_chunk_size: usize,
+    // max object size that can be stored in a single put operation
+    // oherwise, it will be split into multiple parts by fixed object_chunk_size size
+    max_small_object_size: usize,
+    // max_large_object_size = object_chunk_size * max_object_parts
+    max_object_parts: usize,
+    // object cache
+    stats: StorageStatsAtomic,
+    metadata: StorageMetadata,
+    cache: Option<Cache<Path, Arc<(Bytes, ObjectVersion)>>>,
+}
+
+/// Configuration for object store storage
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct StorageConfig {
+    /// Cache max capacity in items, 0 表示不启用缓存
+    pub cache_max_capacity: u64,
+    /// Compression level, 0 表示不压缩，1-22 表示压缩级别，默认为 3，22 表示最高压缩率
+    pub compress_level: i32,
+    pub object_chunk_size: usize,
+    pub max_small_object_size: usize,
+    pub max_object_parts: usize,
+}
+
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            cache_max_capacity: 10000,
+            compress_level: 3,
+            object_chunk_size: 256 * 1024,
+            max_small_object_size: 2000 * 1024,
+            max_object_parts: 1024,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StorageMetadata {
+    pub name: String,
+
+    /// Storage configuration.
+    pub config: StorageConfig,
+
+    /// Storage statistics.
+    pub stats: StorageStats,
+}
+
+struct StorageStatsAtomic {
+    version: AtomicU64,
+    last_saved: AtomicU64,
+    total_get_count: AtomicU64,
+    total_fetch_count: AtomicU64,
+    total_fetch_bytes: AtomicU64,
+    total_put_count: AtomicU64,
+    total_put_bytes: AtomicU64,
+    total_delete_count: AtomicU64,
+}
+
+/// Storage statistics
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct StorageStats {
+    pub version: u64,
+    pub last_saved: u64,
+    pub total_get_count: u64,
+    pub total_fetch_count: u64,
+    pub total_fetch_bytes: u64,
+    pub total_put_count: u64,
+    pub total_put_bytes: u64,
+    pub total_delete_count: u64,
+}
+
+impl From<&StorageStatsAtomic> for StorageStats {
+    fn from(stats: &StorageStatsAtomic) -> Self {
+        StorageStats {
+            version: stats.version.load(Ordering::Relaxed),
+            last_saved: stats.last_saved.load(Ordering::Relaxed),
+            total_get_count: stats.total_get_count.load(Ordering::Relaxed),
+            total_fetch_count: stats.total_fetch_count.load(Ordering::Relaxed),
+            total_fetch_bytes: stats.total_fetch_bytes.load(Ordering::Relaxed),
+            total_put_count: stats.total_put_count.load(Ordering::Relaxed),
+            total_put_bytes: stats.total_put_bytes.load(Ordering::Relaxed),
+            total_delete_count: stats.total_delete_count.load(Ordering::Relaxed),
+        }
+    }
+}
+
+impl From<&StorageStats> for StorageStatsAtomic {
+    fn from(stats: &StorageStats) -> Self {
+        StorageStatsAtomic {
+            version: AtomicU64::new(stats.version),
+            last_saved: AtomicU64::new(stats.last_saved),
+            total_get_count: AtomicU64::new(stats.total_get_count),
+            total_fetch_count: AtomicU64::new(stats.total_fetch_count),
+            total_fetch_bytes: AtomicU64::new(stats.total_fetch_bytes),
+            total_put_count: AtomicU64::new(stats.total_put_count),
+            total_put_bytes: AtomicU64::new(stats.total_put_bytes),
+            total_delete_count: AtomicU64::new(stats.total_delete_count),
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct ObjectVersion {
@@ -52,125 +164,112 @@ impl From<&ObjectMeta> for ObjectVersion {
     }
 }
 
-/// Storage statistics
-#[derive(Debug, Clone, Default)]
-pub struct StorageStatsOwned {
-    pub total_get_count: u64,
-    pub total_fetch_count: u64,
-    pub total_fetch_bytes: u64,
-    pub total_put_count: u64,
-    pub total_put_bytes: u64,
-    pub total_delete_count: u64,
-}
+impl Storage {
+    const METADATA_PATH: &'static str = "storage_metadata.cbor";
 
-/// Configuration for object store storage
-#[derive(Debug, Clone)]
-pub struct StorageBuilder {
-    /// The object store instance
-    object_store: Arc<dyn ObjectStore>,
-    /// Base path within the object store
-    base_path: Path,
-    /// Cache max capacity in items, 0 表示不启用缓存
-    cache_max_capacity: u64,
-    /// Compression level, 0 表示不压缩，1-22 表示压缩级别，默认为 3，22 表示最高压缩率
-    compress_level: i32,
-}
+    pub async fn connect(
+        name: String,
+        object_store: Arc<dyn ObjectStore>,
+        config: StorageConfig,
+    ) -> Result<Storage, DbError> {
+        validate_field_name(name.as_str())?;
 
-impl Default for StorageBuilder {
-    fn default() -> Self {
-        Self {
-            object_store: Arc::new(InMemory::new()),
-            base_path: Path::from("_sys"),
-            cache_max_capacity: 10000,
-            compress_level: 3,
+        let stats = StorageStats::default();
+        let metadata = StorageMetadata {
+            name,
+            config,
+            stats,
+        };
+
+        let storage = Storage::new(object_store.clone(), metadata)?;
+        match storage.fetch(Storage::METADATA_PATH).await {
+            Ok((metadata, _)) => Storage::new(object_store, metadata),
+            Err(DbError::NotFound { .. }) => Ok(storage),
+            Err(err) => Err(err),
         }
     }
-}
 
-impl StorageBuilder {
-    pub fn with_object_store(mut self, object_store: Arc<dyn ObjectStore>) -> Self {
-        self.object_store = object_store;
-        self
+    pub async fn store(&self, now_ms: u64) -> Result<(), DbError> {
+        let prev = self.inner.stats.last_saved.load(Ordering::Acquire);
+        if prev >= now_ms {
+            // Don't save if the last saved time is greater than now
+            return Ok(());
+        }
+
+        let mut metadata = self.metadata();
+        metadata.stats.last_saved = now_ms;
+
+        let mut buf: Vec<u8> = Vec::new();
+
+        into_writer(&metadata, &mut buf).map_err(|err| DbError::Serialization {
+            name: self.inner.base_path.to_string(),
+            source: err.into(),
+        })?;
+
+        self.put(Storage::METADATA_PATH, &metadata, None)
+            .await?;
+
+        self.inner.stats.version.fetch_add(1, Ordering::Relaxed);
+        self.inner
+            .stats
+            .last_saved
+            .fetch_max(now_ms, Ordering::Relaxed);
+
+        Ok(())
     }
 
-    pub fn with_base_path<P: Into<Path>>(mut self, base_path: P) -> Self {
-        self.base_path = base_path.into();
-        self
-    }
-
-    pub fn with_cache_max_capacity(mut self, cache_max_capacity: u64) -> Self {
-        self.cache_max_capacity = cache_max_capacity;
-        self
-    }
-
-    pub fn with_compress_level(mut self, compress_level: i32) -> Self {
-        self.compress_level = compress_level;
-        self
-    }
-
-    pub fn build(self) -> Result<Storage, DbError> {
+    fn new(
+        object_store: Arc<dyn ObjectStore>,
+        metadata: StorageMetadata,
+    ) -> Result<Storage, DbError> {
+        validate_field_name(metadata.name.as_str())?;
         // Create a cache with a size limit
-        let cache = if self.cache_max_capacity > 0 {
-            Some(Arc::new(
+        let cache = if metadata.config.cache_max_capacity > 0 {
+            Some(
                 Cache::builder()
-                    .max_capacity(self.cache_max_capacity)
+                    .max_capacity(metadata.config.cache_max_capacity)
                     .build(),
-            ))
+            )
         } else {
             None
         };
 
         Ok(Storage {
-            object_store: self.object_store,
-            base_path: self.base_path,
-            compress_level: self.compress_level,
-            chunk_size: 256 * 1024,
-            max_payload_size: 2000 * 1024,
-            max_parts: 1024,
-            cache,
-            stats: Arc::new(StorageStats {
-                total_get_count: AtomicU64::new(0),
-                total_fetch_count: AtomicU64::new(0),
-                total_fetch_bytes: AtomicU64::new(0),
-                total_put_count: AtomicU64::new(0),
-                total_put_bytes: AtomicU64::new(0),
-                total_delete_count: AtomicU64::new(0),
+            inner: Arc::new(InnerStorage {
+                object_store,
+                base_path: Path::from(metadata.name.as_str()),
+                compress_level: metadata.config.compress_level,
+                object_chunk_size: metadata.config.object_chunk_size,
+                max_small_object_size: metadata.config.max_small_object_size,
+                max_object_parts: metadata.config.max_object_parts,
+                stats: (&metadata.stats).into(),
+                metadata,
+                cache,
             }),
         })
     }
-}
 
-/// 基于 object_store 实现的 Anda DB 存储层
-#[derive(Clone)]
-pub struct Storage {
-    /// Object store reference
-    object_store: Arc<dyn ObjectStore>,
-    /// Base path for all documents
-    base_path: Path,
-    compress_level: i32,
-    chunk_size: usize,
-    max_payload_size: usize,
-    max_parts: usize,
-    /// Document cache
-    cache: Option<Arc<Cache<Path, Arc<(Bytes, ObjectVersion)>>>>,
-    stats: Arc<StorageStats>,
-}
+    pub fn metadata(&self) -> StorageMetadata {
+        StorageMetadata {
+            name: self.inner.metadata.name.clone(),
+            config: self.inner.metadata.config.clone(),
+            stats: self.stats(),
+        }
+    }
 
-struct StorageStats {
-    total_get_count: AtomicU64,
-    total_fetch_count: AtomicU64,
-    total_fetch_bytes: AtomicU64,
-    total_put_count: AtomicU64,
-    total_put_bytes: AtomicU64,
-    total_delete_count: AtomicU64,
-}
+    pub fn base_path(&self) -> &Path {
+        &self.inner.base_path
+    }
 
-impl Storage {
+    pub fn stats(&self) -> StorageStats {
+        (&self.inner.stats).into()
+    }
+
     pub async fn fetch<T>(&self, doc_path: &str) -> Result<(T, ObjectVersion), DbError>
     where
         T: DeserializeOwned,
     {
-        let path = self.base_path.child(doc_path);
+        let path = self.inner.base_path.child(doc_path);
         // Try to get the document
         self.inner_fetch(&path).await
     }
@@ -181,6 +280,7 @@ impl Storage {
     {
         // Try to get the document
         let result = self
+            .inner
             .object_store
             .get_opts(path, GetOptions::default())
             .await
@@ -193,23 +293,27 @@ impl Storage {
             // TODO: get_range
         }
 
-        let bytes = if self.compress_level > 0 {
+        let bytes = if self.inner.compress_level > 0 {
             try_decompress(bytes)
         } else {
             bytes
         };
 
-        self.stats.total_fetch_count.fetch_add(1, Ordering::Relaxed);
-        self.stats
+        self.inner
+            .stats
+            .total_fetch_count
+            .fetch_add(1, Ordering::Relaxed);
+        self.inner
+            .stats
             .total_fetch_bytes
             .fetch_add(size, Ordering::Relaxed);
 
         let doc: T = from_reader(&bytes[..]).map_err(|err| DbError::Serialization {
-            name: self.base_path.to_string(),
+            name: self.inner.base_path.to_string(),
             source: err.into(),
         })?;
 
-        if let Some(cache) = &self.cache {
+        if let Some(cache) = &self.inner.cache {
             cache
                 .insert(path.clone(), Arc::new((bytes, version.clone())))
                 .await;
@@ -222,7 +326,7 @@ impl Storage {
     where
         T: DeserializeOwned,
     {
-        let path = self.base_path.child(doc_path);
+        let path = self.inner.base_path.child(doc_path);
 
         self.inner_get(&path).await
     }
@@ -231,13 +335,16 @@ impl Storage {
     where
         T: DeserializeOwned,
     {
-        if let Some(cache) = &self.cache {
+        if let Some(cache) = &self.inner.cache {
             if let Some(arc) = cache.get(path).await {
                 let doc: T = from_reader(&arc.0[..]).map_err(|err| DbError::Serialization {
-                    name: self.base_path.to_string(),
+                    name: self.inner.base_path.to_string(),
                     source: err.into(),
                 })?;
-                self.stats.total_get_count.fetch_add(1, Ordering::Relaxed);
+                self.inner
+                    .stats
+                    .total_get_count
+                    .fetch_add(1, Ordering::Relaxed);
                 return Ok((doc, arc.1.clone()));
             }
         }
@@ -249,25 +356,25 @@ impl Storage {
     where
         T: Serialize,
     {
-        let path = self.base_path.child(doc_path);
+        let path = self.inner.base_path.child(doc_path);
         let mut buf: Vec<u8> = Vec::new();
 
         into_writer(doc, &mut buf).map_err(|err| DbError::Serialization {
-            name: self.base_path.to_string(),
+            name: self.inner.base_path.to_string(),
             source: err.into(),
         })?;
 
         let buf_len = buf.len();
-        if buf_len > self.max_payload_size {
+        if buf_len > self.inner.max_small_object_size {
             // TODO: multipart upload
             return Err(DbError::Generic {
-                name: self.base_path.to_string(),
+                name: self.inner.base_path.to_string(),
                 source: "Payload size exceeds limit".into(),
             });
         }
 
-        let buf = if self.compress_level > 0 {
-            try_compress(buf, self.compress_level)
+        let buf = if self.inner.compress_level > 0 {
+            try_compress(buf, self.inner.compress_level)
         } else {
             buf
         };
@@ -278,13 +385,18 @@ impl Storage {
             ..Default::default()
         };
         let result = self
+            .inner
             .object_store
             .put_opts(&path, buf.into(), opts)
             .await
             .map_err(DbError::from)?;
 
-        self.stats.total_put_count.fetch_add(1, Ordering::Relaxed);
-        self.stats
+        self.inner
+            .stats
+            .total_put_count
+            .fetch_add(1, Ordering::Relaxed);
+        self.inner
+            .stats
             .total_put_bytes
             .fetch_add(buf_len as u64, Ordering::Relaxed);
 
@@ -300,30 +412,37 @@ impl Storage {
     where
         T: Serialize,
     {
-        let path = self.base_path.child(doc_path);
         let mut buf: Vec<u8> = Vec::new();
 
         into_writer(doc, &mut buf).map_err(|err| DbError::Serialization {
-            name: self.base_path.to_string(),
+            name: self.inner.base_path.to_string(),
             source: err.into(),
         })?;
+        self.put_bytes(doc_path, buf, version).await
+    }
 
-        let buf_len = buf.len();
-        if buf_len > self.max_payload_size {
+    pub async fn put_bytes(
+        &self,
+        doc_path: &str,
+        data: Vec<u8>,
+        version: Option<ObjectVersion>,
+    ) -> Result<ObjectVersion, DbError> {
+        let data_len = data.len();
+        if data_len > self.inner.max_small_object_size {
             // TODO: multipart upload
             return Err(DbError::Generic {
-                name: self.base_path.to_string(),
+                name: self.inner.base_path.to_string(),
                 source: "Payload size exceeds limit".into(),
             });
         }
-
-        let buf = if self.compress_level > 0 {
-            try_compress(buf, self.compress_level)
+        let path = self.inner.base_path.child(doc_path);
+        let data = if self.inner.compress_level > 0 {
+            try_compress(data, self.inner.compress_level)
         } else {
-            buf
+            data
         };
 
-        let buf_len = buf.len();
+        let data_len = data.len();
         let opts = PutOptions {
             mode: if let Some(v) = version {
                 PutMode::Update(UpdateVersion {
@@ -337,36 +456,43 @@ impl Storage {
         };
 
         let result = self
+            .inner
             .object_store
-            .put_opts(&path, buf.into(), opts)
+            .put_opts(&path, data.into(), opts)
             .await
             .map_err(DbError::from)?;
 
-        if let Some(cache) = &self.cache {
+        if let Some(cache) = &self.inner.cache {
             cache.remove(&path).await;
         }
 
-        self.stats.total_put_count.fetch_add(1, Ordering::Relaxed);
-        self.stats
+        self.inner
+            .stats
+            .total_put_count
+            .fetch_add(1, Ordering::Relaxed);
+        self.inner
+            .stats
             .total_put_bytes
-            .fetch_add(buf_len as u64, Ordering::Relaxed);
+            .fetch_add(data_len as u64, Ordering::Relaxed);
 
         Ok(result.into())
     }
 
     async fn delete(&self, doc_path: &str) -> Result<(), DbError> {
-        let path = self.base_path.child(doc_path);
+        let path = self.inner.base_path.child(doc_path);
 
-        self.object_store
+        self.inner
+            .object_store
             .delete(&path)
             .await
             .map_err(DbError::from)?;
 
-        if let Some(cache) = &self.cache {
+        if let Some(cache) = &self.inner.cache {
             cache.remove(&path).await;
         }
 
-        self.stats
+        self.inner
+            .stats
             .total_delete_count
             .fetch_add(1, Ordering::Relaxed);
         Ok(())
@@ -381,18 +507,19 @@ impl Storage {
         T: DeserializeOwned + Send,
     {
         let path_prefix = if let Some(p) = prefix {
-            self.base_path.child(p)
+            self.inner.base_path.child(p)
         } else {
-            self.base_path.clone()
+            self.inner.base_path.clone()
         };
 
-        let offset = offset.map(|o| self.base_path.child(o));
+        let offset = offset.map(|o| self.inner.base_path.child(o));
 
         let stream = if let Some(offset) = offset {
-            self.object_store
+            self.inner
+                .object_store
                 .list_with_offset(Some(&path_prefix), &offset)
         } else {
-            self.object_store.list(Some(&path_prefix))
+            self.inner.object_store.list(Some(&path_prefix))
         };
         let stream = stream
             .map_err(DbError::from)
@@ -405,17 +532,6 @@ impl Storage {
             })
             .boxed();
         stream
-    }
-
-    pub fn stats(&self) -> StorageStatsOwned {
-        StorageStatsOwned {
-            total_get_count: self.stats.total_get_count.load(Ordering::Relaxed),
-            total_fetch_count: self.stats.total_fetch_count.load(Ordering::Relaxed),
-            total_fetch_bytes: self.stats.total_fetch_bytes.load(Ordering::Relaxed),
-            total_put_count: self.stats.total_put_count.load(Ordering::Relaxed),
-            total_put_bytes: self.stats.total_put_bytes.load(Ordering::Relaxed),
-            total_delete_count: self.stats.total_delete_count.load(Ordering::Relaxed),
-        }
     }
 }
 

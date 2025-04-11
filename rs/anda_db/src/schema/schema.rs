@@ -112,16 +112,51 @@ impl Schema {
     }
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct SchemaRef<'a> {
+    fields: Vec<&'a FieldEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SchemaOwned {
+    fields: Vec<FieldEntry>,
+}
+
+impl Serialize for Schema {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let val = SchemaRef {
+            fields: self.fields.values().collect(),
+        };
+        val.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Schema {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let val = SchemaOwned::deserialize(deserializer)?;
+
+        Ok(Schema {
+            idx: val.fields.iter().map(|f| f.idx()).collect(),
+            fields: val
+                .fields
+                .into_iter()
+                .map(|f| (f.name().to_string(), f))
+                .collect(),
+        })
+    }
+}
+
 /// SchemaBuilder is used to construct a Schema instance.
 /// It provides methods to add fields and build the final schema.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default)]
 pub struct SchemaBuilder {
-    /// Current field index counter, incremented for each field added
-    #[serde(rename = "i")]
     idx: usize,
-
-    /// Map of field names to field entries
-    #[serde(rename = "f")]
     fields: BTreeMap<String, FieldEntry>,
 }
 

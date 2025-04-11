@@ -12,10 +12,9 @@
 - **High Performance**: Optimized for speed with parallel processing using Rayon.
 - **Customizable Tokenization**: Support for various tokenizers including Chinese text via jieba.
 - **BM25 Ranking**: Industry-standard relevance scoring algorithm.
-- **Segment Management**: Add, remove, and search segments with ease.
 - **Serialization**: Save and load indices in CBOR format with optional compression.
-- **Thread-Safe**: Designed for concurrent access with read-write locks.
-- **Memory Efficient**: Optimized data structures for reduced memory footprint.
+- **Incremental Persistent**: Support incremental index updates persistent (insertions and deletions)
+- **Thread-safe concurrent access**: Safely use the index from multiple threads
 
 ## Installation
 

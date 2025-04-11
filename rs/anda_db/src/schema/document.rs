@@ -423,21 +423,6 @@ impl Serialize for Document {
     }
 }
 
-// impl<'de> Deserialize<'de> for Document {
-//     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-//     where
-//         D: serde::Deserializer<'de>,
-//     {
-//         // 首先反序列化为 DocumentOwned
-//         let doc_owned = DocumentOwned::deserialize(deserializer)?;
-
-//         // 由于反序列化的 Document 需要 schema 引用，但这不在序列化数据中
-//         // 我们无法直接构造完整的 Document
-//         // 可以通过一个错误表示需要稍后附加 schema
-//         Err(serde::de::Error::custom("Cannot fully deserialize Document without a Schema reference. Use DocumentOwned instead and provide a Schema later."))
-//     }
-// }
-
 #[cfg(test)]
 mod tests {
     use super::*;
