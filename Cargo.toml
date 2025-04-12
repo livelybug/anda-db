@@ -17,6 +17,7 @@ edition = "2024"
 license = "MIT"
 
 [workspace.dependencies]
+async-trait = "0.1"
 bytes = "1"
 const-hex = "1.14"
 futures = { version = "0.3" }
@@ -43,4 +44,7 @@ criterion = "0.5"
 ic_auth_types = { version = "0.2" }
 object_store = { version = "0.12" }
 moka = { version = "0.12", features = ["future"] }
+pin-project-lite = "0.2"
 zstd-safe = "7"
+async-compression = { version = "0.4", features = ["tokio", "zstd"] }
+unicode-segmentation = "1"

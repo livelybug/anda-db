@@ -54,9 +54,12 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 name = "anda_db"
 version = "0.1.0"
 dependencies = [
+ "anda_db_btree",
  "anda_db_derive",
  "anda_db_hnsw",
  "anda_db_tfs",
+ "async-compression",
+ "async-trait",
  "bytes",
  "ciborium",
  "criterion",
@@ -67,6 +70,7 @@ dependencies = [
  "moka",
  "object_store",
  "parking_lot",
+ "pin-project-lite",
  "rayon",
  "serde",
  "serde_bytes",
@@ -77,6 +81,8 @@ dependencies = [
  "tantivy-tokenizer-api",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-util",
+ "unicode-segmentation",
  "zstd-safe",
 ]
 
@@ -192,6 +198,20 @@ name = "arrayvec"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "23b62fc65de8e4e7f52534fb52b0f3ed04746ae267519eef2a83941e8085068b"
+
+[[package]]
+name = "async-compression"
+version = "0.4.22"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "59a194f9d963d8099596278594b3107448656ba73831c9d8c783e613ce86da64"
+dependencies = [
+ "futures-core",
+ "memchr",
+ "pin-project-lite",
+ "tokio",
+ "zstd",
+ "zstd-safe",
+]
 
 [[package]]
 name = "async-lock"
@@ -2762,6 +2782,12 @@ name = "unicode-ident"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5a5f39404a5da50712a4c1eecf25e90dd62b613502b7e925fd4e4d19b5c96512"
+
+[[package]]
+name = "unicode-segmentation"
+version = "1.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f6ccf251212114b54433ec949fd6a7841275f9ada20dddd2f29e9ceea4501493"
 
 [[package]]
 name = "unicode-width"

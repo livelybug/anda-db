@@ -1,14 +1,28 @@
+use async_compression::tokio::{bufread::ZstdDecoder, write::ZstdEncoder};
+use async_trait::async_trait;
 use bytes::Bytes;
 use ciborium::{from_reader, into_writer};
-use futures::{StreamExt, TryStreamExt, stream::BoxStream};
+use futures::{
+    StreamExt, TryStreamExt,
+    future::{BoxFuture, FutureExt},
+    stream::BoxStream,
+};
 use moka::future::Cache;
 use object_store::{
-    GetOptions, ObjectMeta, ObjectStore, PutMode, PutOptions, PutResult, UpdateVersion, path::Path,
+    GetOptions, ObjectMeta, ObjectStore, PutMode, PutOptions, PutResult, UpdateVersion,
+    buffered::{BufReader, BufWriter},
+    path::Path,
 };
+use pin_project_lite::pin_project;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
+};
+use std::{
+    io,
+    pin::Pin,
+    task::{Context, Poll},
 };
 use zstd_safe::{compress, decompress};
 
@@ -30,8 +44,6 @@ struct InnerStorage {
     // max object size that can be stored in a single put operation
     // oherwise, it will be split into multiple parts by fixed object_chunk_size size
     max_small_object_size: usize,
-    // max_large_object_size = object_chunk_size * max_object_parts
-    max_object_parts: usize,
     // object cache
     stats: StorageStatsAtomic,
     metadata: StorageMetadata,
@@ -47,7 +59,6 @@ pub struct StorageConfig {
     pub compress_level: i32,
     pub object_chunk_size: usize,
     pub max_small_object_size: usize,
-    pub max_object_parts: usize,
 }
 
 impl Default for StorageConfig {
@@ -57,7 +68,6 @@ impl Default for StorageConfig {
             compress_level: 3,
             object_chunk_size: 256 * 1024,
             max_small_object_size: 2000 * 1024,
-            max_object_parts: 1024,
         }
     }
 }
@@ -206,8 +216,7 @@ impl Storage {
             source: err.into(),
         })?;
 
-        self.put(Storage::METADATA_PATH, &metadata, None)
-            .await?;
+        self.put(Storage::METADATA_PATH, &metadata, None).await?;
 
         self.inner.stats.version.fetch_add(1, Ordering::Relaxed);
         self.inner
@@ -241,7 +250,6 @@ impl Storage {
                 compress_level: metadata.config.compress_level,
                 object_chunk_size: metadata.config.object_chunk_size,
                 max_small_object_size: metadata.config.max_small_object_size,
-                max_object_parts: metadata.config.max_object_parts,
                 stats: (&metadata.stats).into(),
                 metadata,
                 cache,
@@ -314,9 +322,12 @@ impl Storage {
         })?;
 
         if let Some(cache) = &self.inner.cache {
-            cache
-                .insert(path.clone(), Arc::new((bytes, version.clone())))
-                .await;
+            if bytes.len() < self.inner.max_small_object_size {
+                // Cache the document if it is small enough
+                cache
+                    .insert(path.clone(), Arc::new((bytes, version.clone())))
+                    .await;
+            }
         }
 
         Ok((doc, version))
@@ -350,6 +361,35 @@ impl Storage {
         }
 
         self.inner_fetch(path).await
+    }
+
+    pub async fn stream_reader(&self, doc_path: &str) -> Result<StreamReader, DbError> {
+        let path = self.inner.base_path.child(doc_path);
+        let meta = self
+            .inner
+            .object_store
+            .head(&path)
+            .await
+            .map_err(DbError::from)?;
+        let reader = BufReader::new(self.inner.object_store.clone(), &meta);
+        let empty = BufReader::new(Arc::new(NotImplementedObjectStore), &meta);
+        if self.inner.compress_level > 0 {
+            Ok(StreamReader {
+                inner: self.inner.clone(),
+                reader: empty,
+                compression: ZstdDecoder::new(reader),
+                with_compression: true,
+                path,
+            })
+        } else {
+            Ok(StreamReader {
+                inner: self.inner.clone(),
+                reader,
+                compression: ZstdDecoder::new(empty),
+                with_compression: false,
+                path,
+            })
+        }
     }
 
     pub async fn create<T>(&self, doc_path: &str, doc: &T) -> Result<ObjectVersion, DbError>
@@ -418,7 +458,8 @@ impl Storage {
             name: self.inner.base_path.to_string(),
             source: err.into(),
         })?;
-        self.put_bytes(doc_path, buf, version).await
+        let path = self.inner.base_path.child(doc_path);
+        self.inner.put_bytes(path, buf, version).await
     }
 
     pub async fn put_bytes(
@@ -427,55 +468,49 @@ impl Storage {
         data: Vec<u8>,
         version: Option<ObjectVersion>,
     ) -> Result<ObjectVersion, DbError> {
-        let data_len = data.len();
-        if data_len > self.inner.max_small_object_size {
-            // TODO: multipart upload
-            return Err(DbError::Generic {
-                name: self.inner.base_path.to_string(),
-                source: "Payload size exceeds limit".into(),
-            });
-        }
         let path = self.inner.base_path.child(doc_path);
-        let data = if self.inner.compress_level > 0 {
-            try_compress(data, self.inner.compress_level)
-        } else {
-            data
-        };
+        self.inner.put_bytes(path, data, version).await
+    }
 
-        let data_len = data.len();
-        let opts = PutOptions {
-            mode: if let Some(v) = version {
-                PutMode::Update(UpdateVersion {
-                    e_tag: v.e_tag,
-                    version: v.version,
-                })
-            } else {
-                PutMode::Overwrite
-            },
-            ..Default::default()
-        };
-
-        let result = self
-            .inner
-            .object_store
-            .put_opts(&path, data.into(), opts)
-            .await
-            .map_err(DbError::from)?;
-
-        if let Some(cache) = &self.inner.cache {
-            cache.remove(&path).await;
+    pub fn to_writer(&self, doc_path: &str) -> SingleWriter {
+        let path = self.inner.base_path.child(doc_path);
+        SingleWriter {
+            inner: self.inner.clone(),
+            path,
+            buf: Vec::new(),
+            flushing: None,
         }
+    }
 
-        self.inner
-            .stats
-            .total_put_count
-            .fetch_add(1, Ordering::Relaxed);
-        self.inner
-            .stats
-            .total_put_bytes
-            .fetch_add(data_len as u64, Ordering::Relaxed);
+    pub fn stream_writer(&self, doc_path: &str) -> StreamWriter {
+        let path = self.inner.base_path.child(doc_path);
+        let writer = BufWriter::with_capacity(
+            self.inner.object_store.clone(),
+            path.clone(),
+            self.inner.object_chunk_size,
+        );
 
-        Ok(result.into())
+        let empty: BufWriter = BufWriter::new(Arc::new(NotImplementedObjectStore), path.clone());
+        let level = async_compression::Level::Precise(self.inner.compress_level);
+        if self.inner.compress_level > 0 {
+            StreamWriter {
+                inner: self.inner.clone(),
+                writer: empty,
+                compression: ZstdEncoder::with_quality(writer, level),
+                with_compression: true,
+                path,
+                bytes_written_total: 0,
+            }
+        } else {
+            StreamWriter {
+                inner: self.inner.clone(),
+                writer,
+                compression: ZstdEncoder::new(empty),
+                with_compression: false,
+                path,
+                bytes_written_total: 0,
+            }
+        }
     }
 
     async fn delete(&self, doc_path: &str) -> Result<(), DbError> {
@@ -535,6 +570,235 @@ impl Storage {
     }
 }
 
+impl InnerStorage {
+    async fn put_bytes(
+        &self,
+        path: Path,
+        data: Vec<u8>,
+        version: Option<ObjectVersion>,
+    ) -> Result<ObjectVersion, DbError> {
+        let data = if self.compress_level > 0 {
+            try_compress(data, self.compress_level)
+        } else {
+            data
+        };
+
+        let data_len = data.len();
+        if data_len > self.max_small_object_size {
+            // TODO: multipart upload
+            return Err(DbError::Generic {
+                name: self.base_path.to_string(),
+                source: "Payload size exceeds limit".into(),
+            });
+        }
+
+        let opts = PutOptions {
+            mode: if let Some(v) = version {
+                PutMode::Update(UpdateVersion {
+                    e_tag: v.e_tag,
+                    version: v.version,
+                })
+            } else {
+                PutMode::Overwrite
+            },
+            ..Default::default()
+        };
+
+        let result = self
+            .object_store
+            .put_opts(&path, data.into(), opts)
+            .await
+            .map_err(DbError::from)?;
+
+        if let Some(cache) = &self.cache {
+            cache.remove(&path).await;
+        }
+
+        self.stats.total_put_count.fetch_add(1, Ordering::Relaxed);
+        self.stats
+            .total_put_bytes
+            .fetch_add(data_len as u64, Ordering::Relaxed);
+
+        Ok(result.into())
+    }
+}
+
+// SingleWriter 仅支持将 max_small_object_size 以下的对象写入到 object_store 中。
+// 如果对象超过了这个大小，应该使用 StreamWriter 来写入。
+pub struct SingleWriter {
+    inner: Arc<InnerStorage>,
+    path: Path,
+    buf: Vec<u8>,
+    flushing: Option<BoxFuture<'static, Result<ObjectVersion, DbError>>>,
+}
+
+impl futures::io::AsyncWrite for SingleWriter {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        self.buf.extend_from_slice(buf);
+        Poll::Ready(Ok(buf.len()))
+    }
+
+    fn poll_write_vectored(
+        mut self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        Poll::Ready(io::Write::write_vectored(&mut self.buf, bufs))
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        // 获取 self 的可变引用
+        let this = self.as_mut().get_mut();
+
+        // 如果没有正在进行的 flush 操作且 buffer 不为空，则创建一个
+        if this.flushing.is_none() && !this.buf.is_empty() {
+            let buf = std::mem::take(&mut this.buf);
+            let inner = this.inner.clone();
+            let path = this.path.clone();
+
+            this.flushing = Some(Box::pin(
+                async move { inner.put_bytes(path, buf, None).await },
+            ));
+        }
+
+        // 如果有正在进行的 flush 操作，轮询它
+        if let Some(fut) = &mut this.flushing {
+            match fut.poll_unpin(cx) {
+                Poll::Ready(Ok(_)) => {
+                    this.flushing = None;
+                    Poll::Ready(Ok(()))
+                }
+                Poll::Ready(Err(e)) => {
+                    this.flushing = None;
+                    Poll::Ready(Err(io::Error::new(io::ErrorKind::Other, e)))
+                }
+                Poll::Pending => Poll::Pending,
+            }
+        } else {
+            // 没有需要 flush 的数据
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.poll_flush(cx)
+    }
+}
+
+pin_project! {
+    pub struct StreamReader {
+        #[pin]
+        reader: BufReader,
+        #[pin]
+        compression: ZstdDecoder<BufReader>,
+        with_compression: bool,
+        path: Path,
+        inner: Arc<InnerStorage>,
+    }
+}
+
+impl futures::io::AsyncRead for StreamReader {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        slice: &mut [u8],
+    ) -> Poll<io::Result<usize>> {
+        let inner = self.inner.clone();
+
+        let mut buf = tokio::io::ReadBuf::new(slice);
+        if self.with_compression {
+            core::task::ready!(tokio::io::AsyncRead::poll_read(
+                self.project().compression,
+                cx,
+                &mut buf
+            ))?;
+        } else {
+            core::task::ready!(tokio::io::AsyncRead::poll_read(
+                self.project().reader,
+                cx,
+                &mut buf
+            ))?;
+        }
+
+        let filled = buf.filled().len();
+        inner
+            .stats
+            .total_fetch_count
+            .fetch_add(1, Ordering::Relaxed);
+        inner
+            .stats
+            .total_fetch_bytes
+            .fetch_add(filled as u64, Ordering::Relaxed);
+        Poll::Ready(Ok(filled))
+    }
+}
+
+pin_project! {
+    pub struct StreamWriter {
+        #[pin]
+        writer: BufWriter,
+        #[pin]
+        compression: ZstdEncoder<BufWriter>,
+        with_compression: bool,
+        bytes_written_total: usize,
+        path: Path,
+        inner: Arc<InnerStorage>,
+    }
+}
+
+impl futures::io::AsyncWrite for StreamWriter {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.as_mut().get_mut();
+        this.bytes_written_total += buf.len();
+
+        if self.with_compression {
+            tokio::io::AsyncWrite::poll_write(self.project().compression, cx, buf)
+        } else {
+            tokio::io::AsyncWrite::poll_write(self.project().writer, cx, buf)
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if self.with_compression {
+            tokio::io::AsyncWrite::poll_flush(self.project().compression, cx)
+        } else {
+            tokio::io::AsyncWrite::poll_flush(self.project().writer, cx)
+        }
+    }
+
+    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let inner = self.inner.clone();
+        let bytes_written = self.bytes_written_total;
+        let rt = if self.with_compression {
+            tokio::io::AsyncWrite::poll_shutdown(self.project().compression, cx)
+        } else {
+            tokio::io::AsyncWrite::poll_shutdown(self.project().writer, cx)
+        };
+
+        match rt {
+            Poll::Ready(Ok(_)) => {
+                inner.stats.total_put_count.fetch_add(1, Ordering::Relaxed);
+                // If the writer is closed successfully, we can return the total bytes written
+                inner
+                    .stats
+                    .total_put_bytes
+                    .fetch_add(bytes_written as u64, Ordering::Relaxed);
+                Poll::Ready(Ok(()))
+            }
+            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
 fn try_decompress(data: Bytes) -> Bytes {
     let mut buf = Vec::with_capacity(data.len() * 2);
     match decompress(&mut buf, &data[..]) {
@@ -548,5 +812,75 @@ fn try_compress(data: Vec<u8>, compress_level: i32) -> Vec<u8> {
     match compress(&mut buf, &data[..], compress_level) {
         Ok(_) => buf,
         Err(_) => data,
+    }
+}
+
+#[derive(Debug, Clone)]
+struct NotImplementedObjectStore;
+
+impl std::fmt::Display for NotImplementedObjectStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "NotImplementedObjectStore")
+    }
+}
+
+#[async_trait]
+impl ObjectStore for NotImplementedObjectStore {
+    async fn put_opts(
+        &self,
+        _location: &Path,
+        _payload: object_store::PutPayload,
+        _opts: object_store::PutOptions,
+    ) -> object_store::Result<object_store::PutResult> {
+        Err(object_store::Error::NotImplemented)
+    }
+
+    async fn put_multipart_opts(
+        &self,
+        _location: &Path,
+        _opts: object_store::PutMultipartOpts,
+    ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+        Err(object_store::Error::NotImplemented)
+    }
+
+    async fn get_opts(
+        &self,
+        _location: &Path,
+        _options: object_store::GetOptions,
+    ) -> object_store::Result<object_store::GetResult> {
+        Err(object_store::Error::NotImplemented)
+    }
+
+    async fn get_ranges(
+        &self,
+        _location: &Path,
+        _ranges: &[std::ops::Range<u64>],
+    ) -> object_store::Result<Vec<Bytes>> {
+        Err(object_store::Error::NotImplemented)
+    }
+
+    /// Delete the object at the specified location.
+    async fn delete(&self, _location: &Path) -> object_store::Result<()> {
+        Err(object_store::Error::NotImplemented)
+    }
+
+    fn list(&self, _prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+        let stream = futures::stream::iter(vec![]);
+        stream.boxed()
+    }
+
+    async fn list_with_delimiter(
+        &self,
+        _prefix: Option<&Path>,
+    ) -> object_store::Result<object_store::ListResult> {
+        Err(object_store::Error::NotImplemented)
+    }
+
+    async fn copy(&self, _from: &Path, _to: &Path) -> object_store::Result<()> {
+        Err(object_store::Error::NotImplemented)
+    }
+
+    async fn copy_if_not_exists(&self, _from: &Path, _to: &Path) -> object_store::Result<()> {
+        Err(object_store::Error::NotImplemented)
     }
 }

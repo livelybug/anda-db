@@ -605,6 +605,12 @@ pub struct FieldEntry {
     #[serde(rename = "n")]
     name: String,
 
+    /// Field description
+    /// This can be used by clients to improve the LLM's understanding of available fields
+    /// and their expected values.
+    #[serde(rename = "d")]
+    description: String,
+
     /// Field type
     #[serde(rename = "t")]
     r#type: FieldType,
@@ -637,10 +643,23 @@ impl FieldEntry {
         Ok(Self {
             name,
             r#type,
+            description: String::new(),
             required: false,
             unique: false,
             idx: 0,
         })
+    }
+
+    /// Set the field description
+    ///
+    /// # Arguments
+    /// * `description` - Field description
+    ///
+    /// # Returns
+    /// * `Self` - The modified field entry
+    pub fn with_description(mut self, description: String) -> Self {
+        self.description = description;
+        self
     }
 
     /// Mark the field as required
