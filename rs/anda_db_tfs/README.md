@@ -144,10 +144,10 @@ pub fn is_empty(&self) -> bool;
 pub fn name(&self) -> &str;
 
 // Returns the index metadata
-pub fn metadata(&self) -> BM25IndexMetadata;
+pub fn metadata(&self) -> BM25Metadata;
 
 // Gets current statistics about the index
-pub fn stats(&self) -> BM25IndexStats;
+pub fn stats(&self) -> BM25Stats;
 
 // Gets all tokens in the index.
 pub fn tokens(&self) -> BTreeSet<String>;

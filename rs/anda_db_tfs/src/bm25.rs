@@ -32,7 +32,7 @@ pub struct BM25Index<T: Tokenizer + Clone> {
     postings: DashMap<String, PostingValue>,
 
     /// Index metadata.
-    metadata: RwLock<BM25IndexMetadata>,
+    metadata: RwLock<BM25Metadata>,
 
     /// Average number of tokens per segment
     avg_seg_tokens: RwLock<f32>,
@@ -79,18 +79,18 @@ pub const NODE_VERSION_FN: PostingMapFn<u64> = |_: &str, val: &PostingValue| Som
 
 /// Index metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BM25IndexMetadata {
+pub struct BM25Metadata {
     /// Index name.
     pub name: String,
     /// BM25 algorithm parameters
     pub config: BM25Config,
     /// Index statistics.
-    pub stats: BM25IndexStats,
+    pub stats: BM25Stats,
 }
 
 /// Index statistics.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
-pub struct BM25IndexStats {
+pub struct BM25Stats {
     /// Last insertion timestamp (unix ms).
     pub last_inserted: u64,
 
@@ -124,14 +124,14 @@ pub struct BM25IndexStats {
 struct BM25IndexOwned {
     seg_tokens: DashMap<u64, usize>,
     postings: DashMap<String, PostingValue>,
-    metadata: BM25IndexMetadata,
+    metadata: BM25Metadata,
 }
 
 #[derive(Clone, Serialize)]
 struct BM25IndexRef<'a> {
     seg_tokens: &'a DashMap<u64, usize>,
     postings: &'a DashMap<String, PostingValue>,
-    metadata: &'a BM25IndexMetadata,
+    metadata: &'a BM25Metadata,
 }
 
 impl<T> BM25Index<T>
@@ -157,10 +157,10 @@ where
             config: config.clone(),
             seg_tokens: DashMap::new(),
             postings: DashMap::new(),
-            metadata: RwLock::new(BM25IndexMetadata {
+            metadata: RwLock::new(BM25Metadata {
                 name,
                 config,
-                stats: BM25IndexStats::default(),
+                stats: BM25Stats::default(),
             }),
             avg_seg_tokens: RwLock::new(0.0),
             search_count: AtomicU64::new(0),
@@ -225,7 +225,7 @@ where
     }
 
     /// Returns the index metadata
-    pub fn metadata(&self) -> BM25IndexMetadata {
+    pub fn metadata(&self) -> BM25Metadata {
         let mut metadata = self.metadata.read().clone();
         metadata.stats.search_count = self.search_count.load(Ordering::Relaxed);
         metadata.stats.num_elements = self.seg_tokens.len() as u64;
@@ -238,7 +238,7 @@ where
     /// # Returns
     ///
     /// * `IndexStats` - Current statistics
-    pub fn stats(&self) -> BM25IndexStats {
+    pub fn stats(&self) -> BM25Stats {
         let mut stats = { self.metadata.read().stats.clone() };
         stats.search_count = self.search_count.load(Ordering::Relaxed);
         stats.num_elements = self.seg_tokens.len() as u64;
@@ -747,7 +747,7 @@ where
     /// * `f` - Function that modifies the metadata
     fn update_metadata<F>(&self, f: F)
     where
-        F: FnOnce(&mut BM25IndexMetadata),
+        F: FnOnce(&mut BM25Metadata),
     {
         let mut metadata = self.metadata.write();
         f(&mut metadata);

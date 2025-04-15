@@ -9,7 +9,7 @@ use futures::{
 };
 use moka::future::Cache;
 use object_store::{
-    GetOptions, ObjectMeta, ObjectStore, PutMode, PutOptions, PutResult, UpdateVersion,
+    GetOptions, ObjectMeta, ObjectStore, PutOptions, PutResult, UpdateVersion,
     buffered::{BufReader, BufWriter},
     path::Path,
 };
@@ -26,7 +26,9 @@ use std::{
 };
 use zstd_safe::{compress, decompress};
 
-use crate::{error::DbError, schema::validate_field_name};
+pub use object_store::PutMode;
+
+use crate::{error::DBError, schema::validate_field_name};
 
 /// 基于 object_store 实现的 Anda DB 存储层
 #[derive(Clone)]
@@ -175,13 +177,13 @@ impl From<&ObjectMeta> for ObjectVersion {
 }
 
 impl Storage {
-    const METADATA_PATH: &'static str = "storage_metadata.cbor";
+    const METADATA_PATH: &'static str = "storage_meta.cbor";
 
     pub async fn connect(
         name: String,
         object_store: Arc<dyn ObjectStore>,
         config: StorageConfig,
-    ) -> Result<Storage, DbError> {
+    ) -> Result<Storage, DBError> {
         validate_field_name(name.as_str())?;
 
         let stats = StorageStats::default();
@@ -194,12 +196,12 @@ impl Storage {
         let storage = Storage::new(object_store.clone(), metadata)?;
         match storage.fetch(Storage::METADATA_PATH).await {
             Ok((metadata, _)) => Storage::new(object_store, metadata),
-            Err(DbError::NotFound { .. }) => Ok(storage),
+            Err(DBError::NotFound { .. }) => Ok(storage),
             Err(err) => Err(err),
         }
     }
 
-    pub async fn store(&self, now_ms: u64) -> Result<(), DbError> {
+    pub async fn store(&self, now_ms: u64) -> Result<(), DBError> {
         let prev = self.inner.stats.last_saved.load(Ordering::Acquire);
         if prev >= now_ms {
             // Don't save if the last saved time is greater than now
@@ -211,7 +213,7 @@ impl Storage {
 
         let mut buf: Vec<u8> = Vec::new();
 
-        into_writer(&metadata, &mut buf).map_err(|err| DbError::Serialization {
+        into_writer(&metadata, &mut buf).map_err(|err| DBError::Serialization {
             name: self.inner.base_path.to_string(),
             source: err.into(),
         })?;
@@ -230,7 +232,7 @@ impl Storage {
     fn new(
         object_store: Arc<dyn ObjectStore>,
         metadata: StorageMetadata,
-    ) -> Result<Storage, DbError> {
+    ) -> Result<Storage, DBError> {
         validate_field_name(metadata.name.as_str())?;
         // Create a cache with a size limit
         let cache = if metadata.config.cache_max_capacity > 0 {
@@ -269,34 +271,56 @@ impl Storage {
         &self.inner.base_path
     }
 
+    pub fn object_chunk_size(&self) -> usize {
+        self.inner.object_chunk_size
+    }
+
     pub fn stats(&self) -> StorageStats {
         (&self.inner.stats).into()
     }
 
-    pub async fn fetch<T>(&self, doc_path: &str) -> Result<(T, ObjectVersion), DbError>
+    pub async fn fetch<T>(&self, doc_path: &str) -> Result<(T, ObjectVersion), DBError>
     where
         T: DeserializeOwned,
     {
         let path = self.inner.base_path.child(doc_path);
         // Try to get the document
+        let (bytes, version) = self.inner_fetch(&path).await?;
+        let doc: T = from_reader(&bytes[..]).map_err(|err| DBError::Serialization {
+            name: self.inner.base_path.to_string(),
+            source: err.into(),
+        })?;
+
+        if let Some(cache) = &self.inner.cache {
+            if bytes.len() < self.inner.max_small_object_size {
+                // Cache the document if it is small enough
+                cache
+                    .insert(path.clone(), Arc::new((bytes, version.clone())))
+                    .await;
+            }
+        }
+
+        Ok((doc, version))
+    }
+
+    pub async fn fetch_raw(&self, doc_path: &str) -> Result<(Bytes, ObjectVersion), DBError> {
+        let path = self.inner.base_path.child(doc_path);
+        // Try to get the document
         self.inner_fetch(&path).await
     }
 
-    async fn inner_fetch<T>(&self, path: &Path) -> Result<(T, ObjectVersion), DbError>
-    where
-        T: DeserializeOwned,
-    {
+    async fn inner_fetch(&self, path: &Path) -> Result<(Bytes, ObjectVersion), DBError> {
         // Try to get the document
         let result = self
             .inner
             .object_store
             .get_opts(path, GetOptions::default())
             .await
-            .map_err(DbError::from)?;
+            .map_err(DBError::from)?;
 
         let size = result.meta.size;
         let version: ObjectVersion = (&result.meta).into();
-        let bytes = result.bytes().await.map_err(DbError::from)?;
+        let bytes = result.bytes().await.map_err(DBError::from)?;
         if (bytes.len() as u64) < size {
             // TODO: get_range
         }
@@ -316,7 +340,38 @@ impl Storage {
             .total_fetch_bytes
             .fetch_add(size, Ordering::Relaxed);
 
-        let doc: T = from_reader(&bytes[..]).map_err(|err| DbError::Serialization {
+        Ok((bytes, version))
+    }
+
+    pub async fn get<T>(&self, doc_path: &str) -> Result<(T, ObjectVersion), DBError>
+    where
+        T: DeserializeOwned,
+    {
+        let path = self.inner.base_path.child(doc_path);
+
+        self.inner_get(&path).await
+    }
+
+    async fn inner_get<T>(&self, path: &Path) -> Result<(T, ObjectVersion), DBError>
+    where
+        T: DeserializeOwned,
+    {
+        if let Some(cache) = &self.inner.cache {
+            if let Some(arc) = cache.get(path).await {
+                let doc: T = from_reader(&arc.0[..]).map_err(|err| DBError::Serialization {
+                    name: self.inner.base_path.to_string(),
+                    source: err.into(),
+                })?;
+                self.inner
+                    .stats
+                    .total_get_count
+                    .fetch_add(1, Ordering::Relaxed);
+                return Ok((doc, arc.1.clone()));
+            }
+        }
+
+        let (bytes, version) = self.inner_fetch(path).await?;
+        let doc: T = from_reader(&bytes[..]).map_err(|err| DBError::Serialization {
             name: self.inner.base_path.to_string(),
             source: err.into(),
         })?;
@@ -333,45 +388,19 @@ impl Storage {
         Ok((doc, version))
     }
 
-    pub async fn get<T>(&self, doc_path: &str) -> Result<(T, ObjectVersion), DbError>
-    where
-        T: DeserializeOwned,
-    {
-        let path = self.inner.base_path.child(doc_path);
-
-        self.inner_get(&path).await
-    }
-
-    async fn inner_get<T>(&self, path: &Path) -> Result<(T, ObjectVersion), DbError>
-    where
-        T: DeserializeOwned,
-    {
-        if let Some(cache) = &self.inner.cache {
-            if let Some(arc) = cache.get(path).await {
-                let doc: T = from_reader(&arc.0[..]).map_err(|err| DbError::Serialization {
-                    name: self.inner.base_path.to_string(),
-                    source: err.into(),
-                })?;
-                self.inner
-                    .stats
-                    .total_get_count
-                    .fetch_add(1, Ordering::Relaxed);
-                return Ok((doc, arc.1.clone()));
-            }
-        }
-
-        self.inner_fetch(path).await
-    }
-
-    pub async fn stream_reader(&self, doc_path: &str) -> Result<StreamReader, DbError> {
+    pub async fn stream_reader(&self, doc_path: &str) -> Result<StreamReader, DBError> {
         let path = self.inner.base_path.child(doc_path);
         let meta = self
             .inner
             .object_store
             .head(&path)
             .await
-            .map_err(DbError::from)?;
-        let reader = BufReader::new(self.inner.object_store.clone(), &meta);
+            .map_err(DBError::from)?;
+        let reader = BufReader::with_capacity(
+            self.inner.object_store.clone(),
+            &meta,
+            self.inner.object_chunk_size,
+        );
         let empty = BufReader::new(Arc::new(NotImplementedObjectStore), &meta);
         if self.inner.compress_level > 0 {
             Ok(StreamReader {
@@ -392,55 +421,19 @@ impl Storage {
         }
     }
 
-    pub async fn create<T>(&self, doc_path: &str, doc: &T) -> Result<ObjectVersion, DbError>
+    pub async fn create<T>(&self, doc_path: &str, doc: &T) -> Result<ObjectVersion, DBError>
     where
         T: Serialize,
     {
         let path = self.inner.base_path.child(doc_path);
         let mut buf: Vec<u8> = Vec::new();
 
-        into_writer(doc, &mut buf).map_err(|err| DbError::Serialization {
+        into_writer(doc, &mut buf).map_err(|err| DBError::Serialization {
             name: self.inner.base_path.to_string(),
             source: err.into(),
         })?;
 
-        let buf_len = buf.len();
-        if buf_len > self.inner.max_small_object_size {
-            // TODO: multipart upload
-            return Err(DbError::Generic {
-                name: self.inner.base_path.to_string(),
-                source: "Payload size exceeds limit".into(),
-            });
-        }
-
-        let buf = if self.inner.compress_level > 0 {
-            try_compress(buf, self.inner.compress_level)
-        } else {
-            buf
-        };
-
-        let buf_len = buf.len();
-        let opts = PutOptions {
-            mode: PutMode::Create,
-            ..Default::default()
-        };
-        let result = self
-            .inner
-            .object_store
-            .put_opts(&path, buf.into(), opts)
-            .await
-            .map_err(DbError::from)?;
-
-        self.inner
-            .stats
-            .total_put_count
-            .fetch_add(1, Ordering::Relaxed);
-        self.inner
-            .stats
-            .total_put_bytes
-            .fetch_add(buf_len as u64, Ordering::Relaxed);
-
-        Ok(result.into())
+        self.inner.put(path, buf.into(), PutMode::Create).await
     }
 
     pub async fn put<T>(
@@ -448,36 +441,47 @@ impl Storage {
         doc_path: &str,
         doc: &T,
         version: Option<ObjectVersion>,
-    ) -> Result<ObjectVersion, DbError>
+    ) -> Result<ObjectVersion, DBError>
     where
         T: Serialize,
     {
         let mut buf: Vec<u8> = Vec::new();
 
-        into_writer(doc, &mut buf).map_err(|err| DbError::Serialization {
+        into_writer(doc, &mut buf).map_err(|err| DBError::Serialization {
             name: self.inner.base_path.to_string(),
             source: err.into(),
         })?;
         let path = self.inner.base_path.child(doc_path);
-        self.inner.put_bytes(path, buf, version).await
+        let mode = if let Some(version) = version {
+            PutMode::Update(version.into())
+        } else {
+            PutMode::Overwrite
+        };
+        self.inner.put(path, buf.into(), mode).await
     }
 
     pub async fn put_bytes(
         &self,
         doc_path: &str,
-        data: Vec<u8>,
+        data: Bytes,
         version: Option<ObjectVersion>,
-    ) -> Result<ObjectVersion, DbError> {
+    ) -> Result<ObjectVersion, DBError> {
         let path = self.inner.base_path.child(doc_path);
-        self.inner.put_bytes(path, data, version).await
+        let mode = if let Some(version) = version {
+            PutMode::Update(version.into())
+        } else {
+            PutMode::Overwrite
+        };
+        self.inner.put(path, data, mode).await
     }
 
-    pub fn to_writer(&self, doc_path: &str) -> SingleWriter {
+    pub fn to_writer(&self, doc_path: &str, mode: PutMode) -> SingleWriter {
         let path = self.inner.base_path.child(doc_path);
         SingleWriter {
             inner: self.inner.clone(),
             path,
             buf: Vec::new(),
+            mode,
             flushing: None,
         }
     }
@@ -513,14 +517,14 @@ impl Storage {
         }
     }
 
-    async fn delete(&self, doc_path: &str) -> Result<(), DbError> {
+    async fn delete(&self, doc_path: &str) -> Result<(), DBError> {
         let path = self.inner.base_path.child(doc_path);
 
         self.inner
             .object_store
             .delete(&path)
             .await
-            .map_err(DbError::from)?;
+            .map_err(DBError::from)?;
 
         if let Some(cache) = &self.inner.cache {
             cache.remove(&path).await;
@@ -537,7 +541,7 @@ impl Storage {
         &self,
         prefix: Option<&str>,
         offset: Option<&str>,
-    ) -> BoxStream<Result<(T, ObjectVersion), DbError>>
+    ) -> BoxStream<Result<(T, ObjectVersion), DBError>>
     where
         T: DeserializeOwned + Send,
     {
@@ -557,7 +561,7 @@ impl Storage {
             self.inner.object_store.list(Some(&path_prefix))
         };
         let stream = stream
-            .map_err(DbError::from)
+            .map_err(DBError::from)
             .try_filter_map(|meta| {
                 let this = self.clone();
                 async move {
@@ -571,12 +575,7 @@ impl Storage {
 }
 
 impl InnerStorage {
-    async fn put_bytes(
-        &self,
-        path: Path,
-        data: Vec<u8>,
-        version: Option<ObjectVersion>,
-    ) -> Result<ObjectVersion, DbError> {
+    async fn put(&self, path: Path, data: Bytes, mode: PutMode) -> Result<ObjectVersion, DBError> {
         let data = if self.compress_level > 0 {
             try_compress(data, self.compress_level)
         } else {
@@ -585,30 +584,24 @@ impl InnerStorage {
 
         let data_len = data.len();
         if data_len > self.max_small_object_size {
-            // TODO: multipart upload
-            return Err(DbError::Generic {
+            return Err(DBError::Generic {
                 name: self.base_path.to_string(),
-                source: "Payload size exceeds limit".into(),
+                source: "Payload size exceeds limit, please use `stream_writer`".into(),
             });
         }
 
-        let opts = PutOptions {
-            mode: if let Some(v) = version {
-                PutMode::Update(UpdateVersion {
-                    e_tag: v.e_tag,
-                    version: v.version,
-                })
-            } else {
-                PutMode::Overwrite
-            },
-            ..Default::default()
-        };
-
         let result = self
             .object_store
-            .put_opts(&path, data.into(), opts)
+            .put_opts(
+                &path,
+                data.into(),
+                PutOptions {
+                    mode,
+                    ..Default::default()
+                },
+            )
             .await
-            .map_err(DbError::from)?;
+            .map_err(DBError::from)?;
 
         if let Some(cache) = &self.cache {
             cache.remove(&path).await;
@@ -629,7 +622,8 @@ pub struct SingleWriter {
     inner: Arc<InnerStorage>,
     path: Path,
     buf: Vec<u8>,
-    flushing: Option<BoxFuture<'static, Result<ObjectVersion, DbError>>>,
+    mode: PutMode,
+    flushing: Option<BoxFuture<'static, Result<ObjectVersion, DBError>>>,
 }
 
 impl futures::io::AsyncWrite for SingleWriter {
@@ -659,9 +653,10 @@ impl futures::io::AsyncWrite for SingleWriter {
             let buf = std::mem::take(&mut this.buf);
             let inner = this.inner.clone();
             let path = this.path.clone();
+            let mode = this.mode.clone();
 
             this.flushing = Some(Box::pin(
-                async move { inner.put_bytes(path, buf, None).await },
+                async move { inner.put(path, buf.into(), mode).await },
             ));
         }
 
@@ -807,10 +802,10 @@ fn try_decompress(data: Bytes) -> Bytes {
     }
 }
 
-fn try_compress(data: Vec<u8>, compress_level: i32) -> Vec<u8> {
+fn try_compress(data: Bytes, compress_level: i32) -> Bytes {
     let mut buf = Vec::with_capacity(data.len() / 3);
     match compress(&mut buf, &data[..], compress_level) {
-        Ok(_) => buf,
+        Ok(_) => buf.into(),
         Err(_) => data,
     }
 }

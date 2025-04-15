@@ -10,7 +10,7 @@
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{collections::BTreeMap, fmt};
 
-use super::SchemaError;
+use super::{BoxError, SchemaError};
 
 /// Re-export bf16 from half crate
 pub use half::bf16;
@@ -258,6 +258,200 @@ impl From<FieldValue> for Cbor {
                 Cbor::serialized(&obj).expect("Failed to serialize JSON to CBOR")
             }
             FieldValue::Null => Cbor::Null,
+        }
+    }
+}
+
+impl TryFrom<FieldValue> for u64 {
+    type Error = BoxError;
+
+    fn try_from(value: FieldValue) -> Result<Self, Self::Error> {
+        match value {
+            FieldValue::U64(v) => Ok(v),
+            _ => Err(SchemaError::FieldValue(format!("expected U64, got {value:?}")).into()),
+        }
+    }
+}
+
+impl<'a> TryFrom<&'a FieldValue> for &'a u64 {
+    type Error = BoxError;
+
+    fn try_from(value: &'a FieldValue) -> Result<Self, Self::Error> {
+        match value {
+            FieldValue::U64(v) => Ok(v),
+            _ => Err(SchemaError::FieldValue(format!("expected U64, got {value:?}")).into()),
+        }
+    }
+}
+
+impl TryFrom<FieldValue> for i64 {
+    type Error = BoxError;
+
+    fn try_from(value: FieldValue) -> Result<Self, Self::Error> {
+        match value {
+            FieldValue::I64(v) => Ok(v),
+            _ => Err(SchemaError::FieldValue(format!("expected I64, got {value:?}")).into()),
+        }
+    }
+}
+
+impl<'a> TryFrom<&'a FieldValue> for &'a i64 {
+    type Error = BoxError;
+
+    fn try_from(value: &'a FieldValue) -> Result<Self, Self::Error> {
+        match value {
+            FieldValue::I64(v) => Ok(v),
+            _ => Err(SchemaError::FieldValue(format!("expected I64, got {value:?}")).into()),
+        }
+    }
+}
+
+impl TryFrom<FieldValue> for f64 {
+    type Error = BoxError;
+
+    fn try_from(value: FieldValue) -> Result<Self, Self::Error> {
+        match value {
+            FieldValue::F64(v) => Ok(v),
+            _ => Err(SchemaError::FieldValue(format!("expected F64, got {value:?}")).into()),
+        }
+    }
+}
+
+impl TryFrom<FieldValue> for f32 {
+    type Error = BoxError;
+
+    fn try_from(value: FieldValue) -> Result<Self, Self::Error> {
+        match value {
+            FieldValue::F32(v) => Ok(v),
+            _ => Err(SchemaError::FieldValue(format!("expected F32, got {value:?}")).into()),
+        }
+    }
+}
+
+impl TryFrom<FieldValue> for bf16 {
+    type Error = BoxError;
+
+    fn try_from(value: FieldValue) -> Result<Self, Self::Error> {
+        match value {
+            FieldValue::Bf16(v) => Ok(v),
+            _ => Err(SchemaError::FieldValue(format!("expected Bf16, got {value:?}")).into()),
+        }
+    }
+}
+
+impl TryFrom<FieldValue> for Vec<u8> {
+    type Error = BoxError;
+
+    fn try_from(value: FieldValue) -> Result<Self, Self::Error> {
+        match value {
+            FieldValue::Bytes(v) => Ok(v),
+            _ => Err(SchemaError::FieldValue(format!("expected Bytes, got {value:?}")).into()),
+        }
+    }
+}
+
+impl<'a> TryFrom<&'a FieldValue> for &'a Vec<u8> {
+    type Error = BoxError;
+
+    fn try_from(value: &'a FieldValue) -> Result<Self, Self::Error> {
+        match value {
+            FieldValue::Bytes(v) => Ok(v),
+            _ => Err(SchemaError::FieldValue(format!("expected Bytes, got {value:?}")).into()),
+        }
+    }
+}
+
+impl TryFrom<FieldValue> for String {
+    type Error = BoxError;
+
+    fn try_from(value: FieldValue) -> Result<Self, Self::Error> {
+        match value {
+            FieldValue::Text(v) => Ok(v),
+            _ => Err(SchemaError::FieldValue(format!("expected Text, got {value:?}")).into()),
+        }
+    }
+}
+
+impl<'a> TryFrom<&'a FieldValue> for &'a String {
+    type Error = BoxError;
+
+    fn try_from(value: &'a FieldValue) -> Result<Self, Self::Error> {
+        match value {
+            FieldValue::Text(v) => Ok(v),
+            _ => Err(SchemaError::FieldValue(format!("expected Text, got {value:?}")).into()),
+        }
+    }
+}
+
+impl TryFrom<FieldValue> for bool {
+    type Error = BoxError;
+
+    fn try_from(value: FieldValue) -> Result<Self, Self::Error> {
+        match value {
+            FieldValue::Bool(v) => Ok(v),
+            _ => Err(SchemaError::FieldValue(format!("expected Bool, got {value:?}")).into()),
+        }
+    }
+}
+
+impl TryFrom<FieldValue> for Json {
+    type Error = BoxError;
+
+    fn try_from(value: FieldValue) -> Result<Self, Self::Error> {
+        match value {
+            FieldValue::Json(v) => Ok(v),
+            _ => Err(SchemaError::FieldValue(format!("expected Json, got {value:?}")).into()),
+        }
+    }
+}
+
+impl<'a> TryFrom<&'a FieldValue> for &'a Json {
+    type Error = BoxError;
+
+    fn try_from(value: &'a FieldValue) -> Result<Self, Self::Error> {
+        match value {
+            FieldValue::Json(v) => Ok(v),
+            _ => Err(SchemaError::FieldValue(format!("expected Json, got {value:?}")).into()),
+        }
+    }
+}
+
+impl<T> TryFrom<FieldValue> for Vec<T>
+where
+    T: TryFrom<FieldValue, Error = BoxError>,
+{
+    type Error = BoxError;
+
+    fn try_from(value: FieldValue) -> Result<Self, Self::Error> {
+        match value {
+            FieldValue::Array(arr) => {
+                let mut rt = Vec::with_capacity(arr.len());
+                for v in arr {
+                    rt.push(v.try_into()?);
+                }
+                Ok(rt)
+            }
+            _ => Err(SchemaError::FieldValue(format!("expected Array, got {value:?}")).into()),
+        }
+    }
+}
+
+impl<T> TryFrom<FieldValue> for BTreeMap<String, T>
+where
+    T: TryFrom<FieldValue, Error = BoxError>,
+{
+    type Error = BoxError;
+
+    fn try_from(value: FieldValue) -> Result<Self, Self::Error> {
+        match value {
+            FieldValue::Map(map) => {
+                let mut rt = BTreeMap::new();
+                for (k, v) in map {
+                    rt.insert(k, v.try_into()?);
+                }
+                Ok(rt)
+            }
+            _ => Err(SchemaError::FieldValue(format!("expected Map, got {value:?}")).into()),
         }
     }
 }

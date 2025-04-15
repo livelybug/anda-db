@@ -1,15 +1,12 @@
 //! Error types for schema module
+use anda_db_btree::BTreeError;
 use thiserror::Error;
 
-use crate::schema::SchemaError;
-
-/// A type alias for a boxed error that is thread-safe and sendable across threads.
-/// This is commonly used as a return type for functions that can return various error types.
-pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
+use crate::schema::{BoxError, SchemaError};
 
 /// Anda DB related errors
 #[derive(Error, Debug)]
-pub enum DbError {
+pub enum DBError {
     #[error("Anda DB {name:?} error: {source:?}")]
     Generic { name: String, source: BoxError },
 
@@ -43,20 +40,20 @@ pub enum DbError {
     Serialization { name: String, source: BoxError },
 }
 
-impl From<object_store::Error> for DbError {
+impl From<object_store::Error> for DBError {
     fn from(err: object_store::Error) -> Self {
         match err {
-            object_store::Error::NotFound { path, source } => DbError::NotFound {
+            object_store::Error::NotFound { path, source } => DBError::NotFound {
                 name: "unknown".to_string(),
                 path,
                 source,
             },
-            object_store::Error::AlreadyExists { path, source } => DbError::AlreadyExists {
+            object_store::Error::AlreadyExists { path, source } => DBError::AlreadyExists {
                 name: "unknown".to_string(),
                 path,
                 source,
             },
-            err => DbError::Storage {
+            err => DBError::Storage {
                 name: "unknown".to_string(),
                 source: err.into(),
             },
@@ -64,11 +61,34 @@ impl From<object_store::Error> for DbError {
     }
 }
 
-impl From<SchemaError> for DbError {
+impl From<SchemaError> for DBError {
     fn from(err: SchemaError) -> Self {
-        DbError::Schema {
+        DBError::Schema {
             name: "unknown".to_string(),
             source: err.into(),
+        }
+    }
+}
+
+impl From<BTreeError> for DBError {
+    fn from(err: BTreeError) -> Self {
+        match &err {
+            BTreeError::Generic { name, .. } => DBError::Index {
+                name: name.clone(),
+                source: err.into(),
+            },
+            BTreeError::Serialization { name, .. } => DBError::Index {
+                name: name.clone(),
+                source: err.into(),
+            },
+            BTreeError::NotFound { name, .. } => DBError::Index {
+                name: name.clone(),
+                source: err.into(),
+            },
+            BTreeError::AlreadyExists { name, .. } => DBError::Index {
+                name: name.clone(),
+                source: err.into(),
+            },
         }
     }
 }

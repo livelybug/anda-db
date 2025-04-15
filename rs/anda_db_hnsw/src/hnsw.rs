@@ -35,7 +35,7 @@ pub struct HnswIndex {
     entry_point: RwLock<(u64, u8)>,
 
     /// Index metadata.
-    metadata: RwLock<HnswIndexMetadata>,
+    metadata: RwLock<HnswMetadata>,
 
     /// Number of search operations performed.
     search_count: AtomicU64,
@@ -156,7 +156,7 @@ pub const NODE_VERSION_FN: NodeMapFn<u64> = |node: &HnswNode| Some(node.version)
 
 /// Index metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HnswIndexMetadata {
+pub struct HnswMetadata {
     /// Index name
     pub name: String,
 
@@ -164,12 +164,12 @@ pub struct HnswIndexMetadata {
     pub config: HnswConfig,
 
     /// Index statistics.
-    pub stats: HnswIndexStats,
+    pub stats: HnswStats,
 }
 
 /// Index statistics.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct HnswIndexStats {
+pub struct HnswStats {
     /// Last insertion timestamp (unix ms).
     pub last_inserted: u64,
 
@@ -206,7 +206,7 @@ pub struct HnswIndexStats {
 struct HnswIndexOwned {
     pub nodes: DashMap<u64, HnswNode>,
     pub entry_point: (u64, u8),
-    pub metadata: HnswIndexMetadata,
+    pub metadata: HnswMetadata,
 }
 
 /// Serializable HNSW index structure (reference version).
@@ -214,7 +214,7 @@ struct HnswIndexOwned {
 struct HnswIndexRef<'a> {
     nodes: &'a DashMap<u64, HnswNode>,
     entry_point: (u64, u8),
-    metadata: &'a HnswIndexMetadata,
+    metadata: &'a HnswMetadata,
 }
 
 impl HnswIndex {
@@ -238,10 +238,10 @@ impl HnswIndex {
             layer_gen,
             nodes: DashMap::new(),
             entry_point: RwLock::new((0, 0)),
-            metadata: RwLock::new(HnswIndexMetadata {
+            metadata: RwLock::new(HnswMetadata {
                 name,
                 config,
-                stats: HnswIndexStats::default(),
+                stats: HnswStats::default(),
             }),
             search_count: AtomicU64::new(0),
         }
@@ -322,7 +322,7 @@ impl HnswIndex {
     }
 
     /// Returns the index metadata
-    pub fn metadata(&self) -> HnswIndexMetadata {
+    pub fn metadata(&self) -> HnswMetadata {
         let mut metadata = { self.metadata.read().clone() };
         metadata.stats.num_nodes = self.nodes.len() as u64;
         metadata.stats.search_count = self.search_count.load(atomic::Ordering::Relaxed);
@@ -346,7 +346,7 @@ impl HnswIndex {
     /// # Returns
     ///
     /// * `IndexStats` - Current statistics
-    pub fn stats(&self) -> HnswIndexStats {
+    pub fn stats(&self) -> HnswStats {
         let mut stats = { self.metadata.read().stats.clone() };
         stats.num_nodes = self.nodes.len() as u64;
         stats.search_count = self.search_count.load(atomic::Ordering::Relaxed);
@@ -1241,7 +1241,7 @@ impl HnswIndex {
     /// * `f` - Function that modifies the metadata
     fn update_metadata<F>(&self, f: F)
     where
-        F: FnOnce(&mut HnswIndexMetadata),
+        F: FnOnce(&mut HnswMetadata),
     {
         let mut metadata = self.metadata.write();
         f(&mut metadata);

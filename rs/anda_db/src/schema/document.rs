@@ -4,16 +4,16 @@ use std::sync::Arc;
 
 pub use ic_auth_types::Xid;
 
-use super::{Cbor, Fe, Ft, Fv, IndexedFieldValues, Schema, SchemaError};
+use super::{Cbor, Fe, Ft, Fv, IndexedFieldValues, Schema, SchemaError, Segment};
 
 /// Document represents a single document in the Anda DB.
 /// It contains an ID, a set of fields, and a reference to its schema.
 #[derive(Clone, Debug)]
 pub struct Document {
     /// Unique identifier for the document
-    id: Xid,
+    pub id: Xid,
     /// Collection of field values indexed by their position in the schema
-    fields: IndexedFieldValues,
+    pub fields: IndexedFieldValues,
     /// Reference to the schema that defines the document structure
     schema: Arc<Schema>,
 }
@@ -260,12 +260,9 @@ impl Document {
         &self.id
     }
 
-    /// Gets an iterator over all field entries in the schema.
-    ///
-    /// # Returns
-    /// An iterator yielding references to field entries
-    pub fn fields(&self) -> impl Iterator<Item = &Fe> {
-        self.schema.iter()
+    /// Gets the fields of the document.
+    pub fn fields(&self) -> &IndexedFieldValues {
+        &self.fields
     }
 
     /// Gets a field value by name.

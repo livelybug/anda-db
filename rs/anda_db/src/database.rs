@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use crate::{
     collection::{Collection, CollectionConfig},
-    error::DbError,
+    error::DBError,
     schema::*,
     storage::{Storage, StorageConfig},
     unix_ms,
@@ -57,12 +57,12 @@ pub struct DBMetadata {
 }
 
 impl AndaDB {
-    const METADATA_PATH: &'static str = "db_metadata.cbor";
+    const METADATA_PATH: &'static str = "db_meta.cbor";
 
     pub async fn create(
         object_store: Arc<dyn ObjectStore>,
         config: DBConfig,
-    ) -> Result<Self, DbError> {
+    ) -> Result<Self, DBError> {
         validate_field_name(config.name.as_str())?;
 
         let storage = Storage::connect(
@@ -97,7 +97,7 @@ impl AndaDB {
     pub async fn connect(
         object_store: Arc<dyn ObjectStore>,
         config: DBConfig,
-    ) -> Result<Self, DbError> {
+    ) -> Result<Self, DBError> {
         validate_field_name(config.name.as_str())?;
 
         let storage = Storage::connect(
@@ -115,7 +115,7 @@ impl AndaDB {
                 metadata: RwLock::new(metadata),
                 collections: RwLock::new(BTreeMap::new()),
             }),
-            Err(DbError::NotFound { .. }) => {
+            Err(DBError::NotFound { .. }) => {
                 let metadata = DBMetadata {
                     config,
                     collections: BTreeSet::new(),
@@ -149,14 +149,18 @@ impl AndaDB {
         self.metadata.read().clone()
     }
 
-    pub async fn create_collection(
+    pub async fn create_collection<F>(
         &self,
         schema: Schema,
         config: CollectionConfig,
-    ) -> Result<Arc<Collection>, DbError> {
+        f: F,
+    ) -> Result<Arc<Collection>, DBError>
+    where
+        F: AsyncFn(&mut Collection) -> Result<(), BoxError>,
+    {
         let mut collections = self.collections.write();
         if collections.contains_key(&config.name) {
-            return Err(DbError::AlreadyExists {
+            return Err(DBError::AlreadyExists {
                 name: config.name,
                 path: self.name.clone(),
                 source: "collection already exists".into(),
@@ -164,7 +168,13 @@ impl AndaDB {
         }
 
         // self.metadata.collections will check it exists again in Collection::create
-        let collection = Collection::create(self, schema, config).await?;
+        let mut collection = Collection::create(self, schema, config).await?;
+        f(&mut collection)
+            .await
+            .map_err(|err| DBError::Collection {
+                name: collection.name().to_string(),
+                source: err,
+            })?;
         let collection = Arc::new(collection);
         collections.insert(collection.name().to_string(), collection.clone());
         {
@@ -177,11 +187,15 @@ impl AndaDB {
         Ok(collection)
     }
 
-    pub async fn open_or_create_collection(
+    pub async fn open_or_create_collection<F>(
         &self,
         schema: Schema,
         config: CollectionConfig,
-    ) -> Result<Arc<Collection>, DbError> {
+        f: F,
+    ) -> Result<Arc<Collection>, DBError>
+    where
+        F: AsyncFn(&mut Collection) -> Result<(), BoxError>,
+    {
         {
             if let Some(collection) = self.collections.read().get(&config.name) {
                 return Ok(collection.clone());
@@ -189,18 +203,27 @@ impl AndaDB {
         }
         {
             if !self.metadata.read().collections.contains(&config.name) {
-                return self.create_collection(schema, config).await;
+                return self.create_collection(schema, config, f).await;
             }
         }
 
         let mut collections = self.collections.write();
-        let collection = Collection::open(self, config.name).await?;
+        let mut collection = Collection::open(self, config.name).await?;
+        f(&mut collection)
+            .await
+            .map_err(|err| DBError::Collection {
+                name: collection.name().to_string(),
+                source: err,
+            })?;
         let collection = Arc::new(collection);
         collections.insert(collection.name().to_string(), collection.clone());
         Ok(collection)
     }
 
-    pub async fn open_collection(&self, name: String) -> Result<Arc<Collection>, DbError> {
+    pub async fn open_collection<F>(&self, name: String, f: F) -> Result<Arc<Collection>, DBError>
+    where
+        F: AsyncFn(&mut Collection) -> Result<(), BoxError>,
+    {
         {
             if let Some(collection) = self.collections.read().get(&name) {
                 return Ok(collection.clone());
@@ -208,7 +231,7 @@ impl AndaDB {
         }
         {
             if !self.metadata.read().collections.contains(&name) {
-                return Err(DbError::NotFound {
+                return Err(DBError::NotFound {
                     name,
                     path: self.name.clone(),
                     source: "collection not found".into(),
@@ -217,13 +240,19 @@ impl AndaDB {
         }
 
         let mut collections = self.collections.write();
-        let collection = Collection::open(self, name).await?;
+        let mut collection = Collection::open(self, name).await?;
+        f(&mut collection)
+            .await
+            .map_err(|err| DBError::Collection {
+                name: collection.name().to_string(),
+                source: err,
+            })?;
         let collection = Arc::new(collection);
         collections.insert(collection.name().to_string(), collection.clone());
         Ok(collection)
     }
 
-    async fn store(&self) -> Result<(), DbError> {
+    async fn store(&self) -> Result<(), DBError> {
         let metadata = self.metadata();
 
         try_join!(

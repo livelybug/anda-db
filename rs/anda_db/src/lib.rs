@@ -2,6 +2,7 @@ pub mod collection;
 pub mod database;
 pub mod error;
 pub mod index;
+pub mod query;
 pub mod schema;
 pub mod storage;
 

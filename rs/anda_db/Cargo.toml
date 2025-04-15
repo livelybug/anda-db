@@ -32,7 +32,7 @@ parking_lot = { workspace = true }
 pin-project-lite = { workspace = true }
 tokio = { workspace = true, features = ["sync", "parking_lot", "io-util"] }
 tokio-util = { workspace = true, features = ["compat"] }
-ic_auth_types = { workspace = true }
+ic_auth_types = { workspace = true, features = ["xid"] }
 object_store = { workspace = true }
 moka = { workspace = true }
 unicode-segmentation = { workspace = true }

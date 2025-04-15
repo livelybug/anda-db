@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{FieldEntry, IndexedFieldValues, SchemaError};
+use super::{FieldEntry, FieldType, IndexedFieldValues, Resource, SchemaError, Segment};
 
 /// Schema represents Anda DB document schema definition.
 /// It contains a collection of fields and their indexes.
@@ -15,7 +15,9 @@ pub struct Schema {
 
 impl Schema {
     /// The key name for the ID field
-    const ID_KEY: &str = "id";
+    const ID_KEY: &str = "id"; // with idx 0
+    const SEGMENTS_KEY: &str = "segments";
+    const RESOURCE_KEY: &str = "resource";
 
     /// Creates a new SchemaBuilder instance.
     ///
@@ -167,6 +169,39 @@ impl SchemaBuilder {
     /// A new SchemaBuilder with default settings.
     pub fn new() -> SchemaBuilder {
         SchemaBuilder::default()
+    }
+
+    pub fn with_segments(mut self, required: bool) -> Self {
+        if self.fields.contains_key(Schema::SEGMENTS_KEY) {
+            panic!("Field \"segments\" already exists in schema");
+        }
+
+        self.idx += 1;
+        let ft = Segment::field_type();
+        let mut entry =
+            FieldEntry::new(Schema::SEGMENTS_KEY.to_string(), FieldType::Array(vec![ft])).unwrap();
+        if required {
+            entry = entry.with_required();
+        }
+        self.fields
+            .insert(entry.name().to_string(), entry.with_idx(self.idx));
+        self
+    }
+
+    pub fn with_resource(mut self, required: bool) -> Self {
+        if self.fields.contains_key(Schema::RESOURCE_KEY) {
+            panic!("Field \"resource\" already exists in schema");
+        }
+
+        self.idx += 1;
+        let ft = Resource::field_type();
+        let mut entry = FieldEntry::new(Schema::RESOURCE_KEY.to_string(), ft).unwrap();
+        if required {
+            entry = entry.with_required();
+        }
+        self.fields
+            .insert(entry.name().to_string(), entry.with_idx(self.idx));
+        self
     }
 
     /// Adds a field to the schema.

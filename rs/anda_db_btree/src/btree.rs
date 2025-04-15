@@ -22,22 +22,22 @@ use std::{
     sync::atomic::{AtomicU32, AtomicU64, Ordering as AtomicOrdering},
 };
 
-use crate::BtreeError;
+use crate::{BTreeError, BoxError};
 
 /// B-tree index for efficient key-value lookups
 ///
 /// This structure provides a thread-safe B-tree index implementation
 /// that supports concurrent reads and writes, as well as efficient range queries.
-pub struct BtreeIndex<FV, PK>
+pub struct BTreeIndex<PK, FV>
 where
-    FV: Eq + Ord + Hash + Debug + Clone + Serialize + DeserializeOwned,
     PK: Ord + Debug + Clone + Serialize + DeserializeOwned,
+    FV: Eq + Ord + Hash + Debug + Clone + Serialize + DeserializeOwned,
 {
     /// Index name
     name: String,
 
     /// Index configuration
-    config: BtreeConfig,
+    config: BTreeConfig,
 
     /// Buckets store information about where posting entries are stored and their current state
     /// The mapping is: bucket_id -> (bucket_size, is_dirty, vec<field_values>)
@@ -53,7 +53,7 @@ where
     btree: RwLock<BTreeSet<FV>>,
 
     /// Index metadata
-    metadata: RwLock<BtreeIndexMetadata>,
+    metadata: RwLock<BTreeMetadata>,
 
     /// Maximum bucket ID currently in use
     max_bucket_id: AtomicU32,
@@ -75,7 +75,7 @@ type PostingValue<PK> = (u32, u64, Vec<PK>);
 
 /// Configuration parameters for the B-tree index
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BtreeConfig {
+pub struct BTreeConfig {
     /// Maximum size of a bucket before creating a new one (in bytes)
     pub bucket_overload_size: u32,
 
@@ -84,9 +84,9 @@ pub struct BtreeConfig {
     pub allow_duplicates: bool,
 }
 
-impl Default for BtreeConfig {
+impl Default for BTreeConfig {
     fn default() -> Self {
-        BtreeConfig {
+        BTreeConfig {
             bucket_overload_size: 1024 * 512,
             allow_duplicates: true,
         }
@@ -95,20 +95,20 @@ impl Default for BtreeConfig {
 
 /// Index metadata containing configuration and statistics
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BtreeIndexMetadata {
+pub struct BTreeMetadata {
     /// Index name
     pub name: String,
 
     /// Index configuration
-    pub config: BtreeConfig,
+    pub config: BTreeConfig,
 
     /// Index statistics
-    pub stats: BtreeIndexStats,
+    pub stats: BTreeStats,
 }
 
 /// Index statistics for monitoring and diagnostics
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
-pub struct BtreeIndexStats {
+pub struct BTreeStats {
     /// Last insertion timestamp (unix ms)
     pub last_inserted: u64,
 
@@ -139,66 +139,94 @@ pub struct BtreeIndexStats {
 
 /// Serializable B-tree index structure (owned version)
 // #[derive(Debug, Clone, Serialize, Deserialize)]
-// struct BtreeIndexOwned<FV, PK>
+// struct BTreeIndexOwned<PK, FV>
 // where
 //     FV: Eq + Ord + Hash + Debug + Clone + Serialize + DeserializeOwned,
 //     PK: Ord + Debug + Clone + Serialize + DeserializeOwned,
 // {
 //     // #[serde(skip)]
 //     postings: DashMap<String, PostingValue<PK>>,
-//     metadata: BtreeIndexMetadata,
+//     metadata: BTreeMetadata,
 // }
 
 // Helper structure for serialization and deserialization of index metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct BtreeIndexOwnedHelper {
+struct BTreeIndexOwnedHelper {
     // Serialized postings map (not used for actual data, just for structure)
     postings: HashMap<String, String>,
 
     // Index metadata
-    metadata: BtreeIndexMetadata,
+    metadata: BTreeMetadata,
 }
 
 // Reference structure for serializing the index
 #[derive(Serialize)]
-struct BtreeIndexRef<'a, FV, PK>
+struct BTreeIndexRef<'a, PK, FV>
 where
-    FV: Eq + Hash + Debug + Clone + Serialize,
     PK: Ord + Debug + Clone + Serialize,
+    FV: Eq + Hash + Debug + Clone + Serialize,
 {
     postings: &'a DashMap<FV, PostingValue<PK>>,
-    metadata: &'a BtreeIndexMetadata,
+    metadata: &'a BTreeMetadata,
 }
 
 /// Range query specification for flexible querying
 #[derive(Debug, Clone)]
-pub enum RangeQuery<FV> {
+pub enum RangeQuery<'a, FV> {
     /// Equal to a specific key
-    Eq(FV),
+    Eq(&'a FV),
 
     /// Greater than a specific key
-    Gt(FV),
+    Gt(&'a FV),
 
     /// Greater than or equal to a specific key
-    Ge(FV),
+    Ge(&'a FV),
 
     /// Less than a specific key
-    Lt(FV),
+    Lt(&'a FV),
 
     /// Less than or equal to a specific key
-    Le(FV),
+    Le(&'a FV),
 
     /// Between two keys (inclusive)
-    Between(FV, FV),
+    Between(&'a FV, &'a FV),
 
     /// Include specific keys
-    Include(BTreeSet<FV>),
+    Include(BTreeSet<&'a FV>),
 }
 
-impl<FV, PK> BtreeIndex<FV, PK>
+impl<'a, FV: 'a> RangeQuery<'a, FV> {
+    pub fn try_convert_from<FV1>(value: RangeQuery<'a, FV1>) -> Result<Self, BoxError>
+    where
+        FV: Ord, // Keep the necessary bounds here
+        FV1: 'a,
+        &'a FV: TryFrom<&'a FV1, Error = BoxError>,
+    {
+        match value {
+            RangeQuery::Eq(key) => Ok(RangeQuery::Eq(key.try_into()?)),
+            RangeQuery::Gt(key) => Ok(RangeQuery::Gt(key.try_into()?)),
+            RangeQuery::Ge(key) => Ok(RangeQuery::Ge(key.try_into()?)),
+            RangeQuery::Lt(key) => Ok(RangeQuery::Lt(key.try_into()?)),
+            RangeQuery::Le(key) => Ok(RangeQuery::Le(key.try_into()?)),
+            RangeQuery::Between(start_key, end_key) => Ok(RangeQuery::Between(
+                start_key.try_into()?,
+                end_key.try_into()?,
+            )),
+            RangeQuery::Include(keys) => {
+                let converted_keys = keys
+                    .into_iter()
+                    .map(|key| key.try_into())
+                    .collect::<Result<BTreeSet<&'a FV>, _>>()?;
+                Ok(RangeQuery::Include(converted_keys))
+            }
+        }
+    }
+}
+
+impl<PK, FV> BTreeIndex<PK, FV>
 where
-    FV: Eq + Ord + Hash + Debug + Clone + Serialize + DeserializeOwned,
     PK: Ord + Debug + Clone + Serialize + DeserializeOwned,
+    FV: Eq + Ord + Hash + Debug + Clone + Serialize + DeserializeOwned,
 {
     /// Creates a new empty B-tree index with the given configuration
     ///
@@ -209,20 +237,20 @@ where
     ///
     /// # Returns
     ///
-    /// * `BtreeIndex` - A new instance of the B-tree index
-    pub fn new(name: String, config: Option<BtreeConfig>) -> Self {
+    /// * `BTreeIndex` - A new instance of the B-tree index
+    pub fn new(name: String, config: Option<BTreeConfig>) -> Self {
         let config = config.unwrap_or_default();
         let bucket_overload_size = config.bucket_overload_size;
-        BtreeIndex {
+        BTreeIndex {
             name: name.clone(),
             config: config.clone(),
             postings: DashMap::new(),
             buckets: DashMap::from_iter(vec![(0, (0, true, Vec::new()))]),
             btree: RwLock::new(BTreeSet::new()),
-            metadata: RwLock::new(BtreeIndexMetadata {
+            metadata: RwLock::new(BTreeMetadata {
                 name,
                 config,
-                stats: BtreeIndexStats::default(),
+                stats: BTreeStats::default(),
             }),
             bucket_overload_size,
             max_bucket_id: AtomicU32::new(0),
@@ -240,13 +268,13 @@ where
     /// # Returns
     ///
     /// * `Result<Self, Error>` - Loaded index or error
-    pub async fn load_metadata<R: AsyncRead + Unpin>(mut r: R) -> Result<Self, BtreeError> {
+    pub async fn load_metadata<R: AsyncRead + Unpin>(mut r: R) -> Result<Self, BTreeError> {
         // Read all data from the reader into a buffer
         let data = {
             let mut buf = Vec::new();
             AsyncReadExt::read_to_end(&mut r, &mut buf)
                 .await
-                .map_err(|err| BtreeError::Generic {
+                .map_err(|err| BTreeError::Generic {
                     name: "unknown".to_string(),
                     source: err.into(),
                 })?;
@@ -254,8 +282,8 @@ where
         };
 
         // Deserialize the index metadata
-        let index: BtreeIndexOwnedHelper =
-            ciborium::from_reader(&data[..]).map_err(|err| BtreeError::Serialization {
+        let index: BTreeIndexOwnedHelper =
+            ciborium::from_reader(&data[..]).map_err(|err| BTreeError::Serialization {
                 name: "unknown".to_string(),
                 source: err.into(),
             })?;
@@ -264,7 +292,7 @@ where
         let bucket_overload_size = index.metadata.config.bucket_overload_size;
         let search_count = AtomicU64::new(index.metadata.stats.search_count);
         let max_bucket_id = AtomicU32::new(index.metadata.stats.max_bucket_id);
-        Ok(BtreeIndex {
+        Ok(BTreeIndex {
             name: index.metadata.name.clone(),
             config: index.metadata.config.clone(),
             postings: DashMap::with_capacity(index.metadata.stats.num_elements as usize),
@@ -284,21 +312,24 @@ where
     /// # Arguments
     ///
     /// * `f` - Async function that reads posting data from a specified bucket.
-    ///   `F: AsyncFn(u32) -> Result<Vec<u8>, BtreeError>`
+    ///   `F: AsyncFn(u32) -> Result<Vec<u8>, BTreeError>`
     ///   The function should take a bucket ID as input and return a vector of bytes
     ///   containing the serialized posting data.
     ///
     /// # Returns
     ///
-    /// * `Result<(), BtreeError>` - Success or error
-    pub async fn load_buckets<F>(&mut self, f: F) -> Result<(), BtreeError>
+    /// * `Result<(), BTreeError>` - Success or error
+    pub async fn load_buckets<F>(&mut self, f: F) -> Result<(), BTreeError>
     where
-        F: AsyncFn(u32) -> Result<Vec<u8>, BtreeError>,
+        F: AsyncFn(u32) -> Result<Vec<u8>, BoxError>,
     {
         for i in 0..=self.max_bucket_id.load(AtomicOrdering::Relaxed) {
-            let data = f(i).await?;
+            let data = f(i).await.map_err(|err| BTreeError::Generic {
+                name: self.name.clone(),
+                source: err,
+            })?;
             let postings: HashMap<FV, PostingValue<PK>> = ciborium::from_reader(&data[..])
-                .map_err(|err| BtreeError::Serialization {
+                .map_err(|err| BTreeError::Serialization {
                     name: self.name.clone(),
                     source: err.into(),
                 })?;
@@ -330,7 +361,7 @@ where
 
     /// Returns the index metadata
     /// This includes up-to-date statistics about the index
-    pub fn metadata(&self) -> BtreeIndexMetadata {
+    pub fn metadata(&self) -> BTreeMetadata {
         let mut metadata = self.metadata.read().clone();
         metadata.stats.num_elements = self.postings.len() as u64;
         metadata.stats.search_count = self.search_count.load(AtomicOrdering::Relaxed);
@@ -339,37 +370,12 @@ where
     }
 
     /// Gets current statistics about the index
-    pub fn stats(&self) -> BtreeIndexStats {
+    pub fn stats(&self) -> BTreeStats {
         let mut stats = { self.metadata.read().stats.clone() };
         stats.num_elements = self.postings.len() as u64;
         stats.search_count = self.search_count.load(AtomicOrdering::Relaxed);
         stats.max_bucket_id = self.max_bucket_id.load(AtomicOrdering::Relaxed);
         stats
-    }
-
-    /// Gets a posting by key and applies a function to it
-    ///
-    /// # Arguments
-    ///
-    /// * `field_value` - The key to look up
-    /// * `f` - Function to apply to the posting value if found.
-    ///   where `F: FnOnce(&FV, &Vec<PK>) -> Option<R>`
-    ///
-    ///
-    /// # Returns
-    ///
-    /// * `Result<Option<R>, BtreeError>` - Result of the function or error if key not found
-    pub fn get_posting_with<R, F>(&self, field_value: &FV, f: F) -> Result<Option<R>, BtreeError>
-    where
-        F: FnOnce(&FV, &Vec<PK>) -> Option<R>,
-    {
-        self.postings
-            .get(field_value)
-            .map(|v| f(field_value, &v.2))
-            .ok_or_else(|| BtreeError::NotFound {
-                name: self.name.clone(),
-                value: format!("{:?}", field_value),
-            })
     }
 
     /// Inserts a document_id-field_value pair to the index
@@ -383,8 +389,8 @@ where
     /// # Returns
     ///
     /// * `Ok(bool)` if the document_id-field_value pair was successfully added
-    /// * `Err(BtreeError)` if failed
-    pub fn insert(&self, doc_id: PK, field_value: FV, now_ms: u64) -> Result<bool, BtreeError> {
+    /// * `Err(BTreeError)` if failed
+    pub fn insert(&self, doc_id: PK, field_value: FV, now_ms: u64) -> Result<bool, BTreeError> {
         let bucket = self.max_bucket_id.load(AtomicOrdering::Acquire);
 
         // Calculate the size increase for this insertion
@@ -393,7 +399,7 @@ where
                 dashmap::Entry::Occupied(mut entry) => {
                     // Check if duplicate keys are allowed
                     if !self.config.allow_duplicates {
-                        return Err(BtreeError::AlreadyExists {
+                        return Err(BTreeError::AlreadyExists {
                             name: self.name.clone(),
                             id: format!("{:?}", doc_id),
                             value: format!("{:?}", field_value),
@@ -431,7 +437,7 @@ where
             let mut b = self
                 .buckets
                 .get_mut(&bucket)
-                .ok_or_else(|| BtreeError::Generic {
+                .ok_or_else(|| BTreeError::Generic {
                     name: self.name.clone(),
                     source: format!("bucket {bucket} not found").into(),
                 })?;
@@ -489,8 +495,8 @@ where
     ///
     /// # Returns
     ///
-    /// * `Result<(), BtreeError>` - Success or error
-    pub fn batch_insert<I>(&self, items: I, now_ms: u64) -> Result<(), BtreeError>
+    /// * `Result<usize, BTreeError>` - Success or error
+    pub fn batch_insert<I>(&self, items: I, now_ms: u64) -> Result<usize, BTreeError>
     where
         I: IntoIterator<Item = (PK, FV)>,
     {
@@ -501,7 +507,7 @@ where
         }
 
         if grouped_items.is_empty() {
-            return Ok(());
+            return Ok(0);
         }
         let insert_count = grouped_items.len() as u64;
 
@@ -599,7 +605,7 @@ where
                 let mut ob =
                     self.buckets
                         .get_mut(&old_bucket_id)
-                        .ok_or_else(|| BtreeError::Generic {
+                        .ok_or_else(|| BTreeError::Generic {
                             name: self.name.clone(),
                             source: format!("bucket {old_bucket_id} not found").into(),
                         })?;
@@ -643,7 +649,7 @@ where
             m.stats.insert_count += insert_count;
         });
 
-        Ok(())
+        Ok(insert_count as usize)
     }
 
     /// Removes a document_id-field_value pair from the index with hook function
@@ -711,14 +717,14 @@ where
     /// # Returns
     ///
     /// * `Option<R>` - Result of the function applied to the posting value
-    pub fn search_with<F, R>(&self, field_value: FV, f: F) -> Option<R>
+    pub fn search_with<F, R>(&self, field_value: &FV, f: F) -> Option<R>
     where
         F: FnOnce(&Vec<PK>) -> Option<R>,
     {
         self.search_count.fetch_add(1, AtomicOrdering::Relaxed);
 
         self.postings
-            .get(&field_value)
+            .get(field_value)
             .and_then(|posting| f(&posting.2))
     }
 
@@ -746,8 +752,8 @@ where
 
         match query {
             RangeQuery::Eq(key) => {
-                if let Some(posting) = self.postings.get(&key) {
-                    let (conti, rt) = f(&key, &posting.2);
+                if let Some(posting) = self.postings.get(key) {
+                    let (conti, rt) = f(key, &posting.2);
                     if let Some(r) = rt {
                         results.push(r);
                     }
@@ -760,10 +766,8 @@ where
                 for k in self
                     .btree
                     .read()
-                    .range(std::ops::RangeFrom {
-                        start: start_key.clone(),
-                    })
-                    .filter(|&k| k > &start_key)
+                    .range(std::ops::RangeFrom { start: start_key })
+                    .filter(|&k| k > start_key)
                 {
                     if let Some(posting) = self.postings.get(k) {
                         let (conti, rt) = f(k, &posting.2);
@@ -777,9 +781,11 @@ where
                 }
             }
             RangeQuery::Ge(start_key) => {
-                for k in self.btree.read().range(std::ops::RangeFrom {
-                    start: start_key.clone(),
-                }) {
+                for k in self
+                    .btree
+                    .read()
+                    .range(std::ops::RangeFrom { start: start_key })
+                {
                     if let Some(posting) = self.postings.get(k) {
                         let (conti, rt) = f(k, &posting.2);
                         if let Some(r) = rt {
@@ -795,9 +801,7 @@ where
                 for k in self
                     .btree
                     .read()
-                    .range(std::ops::RangeTo {
-                        end: end_key.clone(),
-                    })
+                    .range(std::ops::RangeTo { end: end_key })
                     .rev()
                 {
                     if let Some(posting) = self.postings.get(k) {
@@ -815,9 +819,7 @@ where
                 for k in self
                     .btree
                     .read()
-                    .range(std::ops::RangeToInclusive {
-                        end: end_key.clone(),
-                    })
+                    .range(std::ops::RangeToInclusive { end: end_key })
                     .rev()
                 {
                     if let Some(posting) = self.postings.get(k) {
@@ -876,21 +878,21 @@ where
         &self,
         mut w: W,
         now_ms: u64,
-    ) -> Result<(), BtreeError> {
+    ) -> Result<(), BTreeError> {
+        let mut buf = Vec::with_capacity(8192);
+        let mut meta = self.metadata();
+
         let serialized_data = {
-            let mut buf = Vec::with_capacity(8192);
-            self.update_metadata(|m| {
-                m.stats.last_saved = now_ms.max(m.stats.last_saved);
-            });
+            meta.stats.last_saved = now_ms.max(meta.stats.last_saved);
             let postings: DashMap<FV, PostingValue<PK>> = DashMap::new();
             ciborium::into_writer(
-                &BtreeIndexRef {
+                &BTreeIndexRef {
                     postings: &postings,
-                    metadata: &self.metadata(),
+                    metadata: &meta,
                 },
                 &mut buf,
             )
-            .map_err(|err| BtreeError::Serialization {
+            .map_err(|err| BTreeError::Serialization {
                 name: self.name.clone(),
                 source: err.into(),
             })?;
@@ -899,10 +901,13 @@ where
 
         AsyncWriteExt::write_all(&mut w, &serialized_data)
             .await
-            .map_err(|err| BtreeError::Generic {
+            .map_err(|err| BTreeError::Generic {
                 name: self.name.clone(),
                 source: err.into(),
             })?;
+        self.update_metadata(|m| {
+            m.stats.last_saved = meta.stats.last_saved.max(m.stats.last_saved);
+        });
 
         Ok(())
     }
@@ -919,10 +924,10 @@ where
     ///
     /// # Returns
     ///
-    /// * `Result<(), BtreeError>` - Success or error
-    pub async fn store_dirty_buckets<F>(&self, f: F) -> Result<(), BtreeError>
+    /// * `Result<(), BTreeError>` - Success or error
+    pub async fn store_dirty_buckets<F>(&self, f: F) -> Result<(), BTreeError>
     where
-        F: AsyncFn(u32, Vec<u8>) -> Result<bool, BtreeError>,
+        F: AsyncFn(u32, Vec<u8>) -> Result<bool, BoxError>,
     {
         for mut bucket in self.buckets.iter_mut() {
             if bucket.1 {
@@ -933,7 +938,7 @@ where
                     if let Some(posting) = self.postings.get(k) {
                         postings.insert(
                             k,
-                            ciborium::cbor!(posting).map_err(|err| BtreeError::Serialization {
+                            ciborium::cbor!(posting).map_err(|err| BTreeError::Serialization {
                                 name: self.name.clone(),
                                 source: err.into(),
                             })?,
@@ -943,7 +948,7 @@ where
 
                 let mut data = Vec::new();
                 ciborium::into_writer(&postings, &mut data).map_err(|err| {
-                    BtreeError::Serialization {
+                    BTreeError::Serialization {
                         name: self.name.clone(),
                         source: err.into(),
                     }
@@ -969,14 +974,14 @@ where
     /// * `f` - Function that modifies the metadata
     fn update_metadata<F>(&self, f: F)
     where
-        F: FnOnce(&mut BtreeIndexMetadata),
+        F: FnOnce(&mut BTreeMetadata),
     {
         let mut metadata = self.metadata.write();
         f(&mut metadata);
     }
 }
 
-impl<PK> BtreeIndex<String, PK>
+impl<PK> BTreeIndex<PK, String>
 where
     PK: Ord + Debug + Clone + Serialize + DeserializeOwned,
 {
@@ -1083,16 +1088,16 @@ mod tests {
     }
 
     // 辅助函数：创建一个测试用的 B-tree 索引
-    fn create_test_index() -> BtreeIndex<String, u64> {
-        let config = BtreeConfig {
+    fn create_test_index() -> BTreeIndex<u64, String> {
+        let config = BTreeConfig {
             bucket_overload_size: 1024,
             allow_duplicates: true,
         };
-        BtreeIndex::new("test_index".to_string(), Some(config))
+        BTreeIndex::new("test_index".to_string(), Some(config))
     }
 
     // 辅助函数：创建一个测试用的 B-tree 索引并插入一些数据
-    fn create_populated_index() -> BtreeIndex<String, u64> {
+    fn create_populated_index() -> BTreeIndex<u64, String> {
         let index = create_test_index();
 
         // 插入一些测试数据
@@ -1100,7 +1105,7 @@ mod tests {
         let _ = index.insert(2, "banana".to_string(), now_ms());
         let _ = index.insert(3, "cherry".to_string(), now_ms());
         let _ = index.insert(4, "date".to_string(), now_ms());
-        let _ = index.insert(5, "elderberry".to_string(), now_ms());
+        let _ = index.insert(5, "eggplant".to_string(), now_ms());
 
         // 测试重复键
         let _ = index.insert(6, "apple".to_string(), now_ms());
@@ -1109,8 +1114,8 @@ mod tests {
         index
     }
 
-    #[tokio::test]
-    async fn test_create_index() {
+    #[test]
+    fn test_create_index() {
         let index = create_test_index();
 
         assert_eq!(index.name(), "test_index");
@@ -1122,8 +1127,8 @@ mod tests {
         assert_eq!(metadata.stats.num_elements, 0);
     }
 
-    #[tokio::test]
-    async fn test_insert() {
+    #[test]
+    fn test_insert() {
         let index = create_test_index();
 
         // 测试插入
@@ -1145,11 +1150,11 @@ mod tests {
         assert!(result.unwrap());
 
         // 测试不允许重复键的情况
-        let config = BtreeConfig {
+        let config = BTreeConfig {
             bucket_overload_size: 1024,
             allow_duplicates: false,
         };
-        let unique_index = BtreeIndex::new("unique_index".to_string(), Some(config));
+        let unique_index = BTreeIndex::new("unique_index".to_string(), Some(config));
 
         let result = unique_index.insert(1, "apple".to_string(), now_ms());
         assert!(result.is_ok());
@@ -1157,13 +1162,13 @@ mod tests {
         let result = unique_index.insert(2, "apple".to_string(), now_ms());
         assert!(result.is_err());
         match result {
-            Err(BtreeError::AlreadyExists { .. }) => (),
+            Err(BTreeError::AlreadyExists { .. }) => (),
             _ => panic!("Expected AlreadyExists error"),
         }
     }
 
-    #[tokio::test]
-    async fn test_batch_insert() {
+    #[test]
+    fn test_batch_insert() {
         let index = create_test_index();
 
         // 准备批量插入的数据
@@ -1172,7 +1177,7 @@ mod tests {
             (2, "banana".to_string()),
             (3, "cherry".to_string()),
             (4, "date".to_string()),
-            (5, "elderberry".to_string()),
+            (5, "eggplant".to_string()),
         ];
 
         // 测试批量插入
@@ -1190,11 +1195,11 @@ mod tests {
         assert_eq!(index.len(), 5); // 字段值数量仍然是5
 
         // 测试重复键的情况
-        let config = BtreeConfig {
+        let config = BTreeConfig {
             bucket_overload_size: 1024,
             allow_duplicates: false,
         };
-        let unique_index = BtreeIndex::new("unique_index".to_string(), Some(config));
+        let unique_index = BTreeIndex::new("unique_index".to_string(), Some(config));
 
         let result = unique_index.insert(1, "apple".to_string(), now_ms());
         assert!(result.is_ok());
@@ -1205,8 +1210,8 @@ mod tests {
         assert_eq!(unique_index.len(), 2); // 字段值数量是2
     }
 
-    #[tokio::test]
-    async fn test_remove() {
+    #[test]
+    fn test_remove() {
         let index = create_populated_index();
 
         // 测试删除存在的条目
@@ -1218,7 +1223,7 @@ mod tests {
         assert!(!result);
 
         // 测试删除后的搜索
-        let result = index.search_with("apple".to_string(), |ids| Some(ids.clone()));
+        let result = index.search_with(&"apple".to_string(), |ids| Some(ids.clone()));
         assert!(result.is_some());
         let ids = result.unwrap();
         assert!(!ids.contains(&1)); // ID 1 已被删除
@@ -1228,91 +1233,96 @@ mod tests {
         let result = index.remove(6, "apple".to_string(), now_ms());
         assert!(result);
 
-        let result = index.search_with("apple".to_string(), |ids| Some(ids.clone()));
+        let result = index.search_with(&"apple".to_string(), |ids| Some(ids.clone()));
         assert!(result.is_none()); // 键应该已经被完全移除
     }
 
-    #[tokio::test]
-    async fn test_search() {
+    #[test]
+    fn test_search() {
         let index = create_populated_index();
 
         // 测试精确搜索
-        let result = index.search_with("apple".to_string(), |ids| Some(ids.clone()));
+        let result = index.search_with(&"apple".to_string(), |ids| Some(ids.clone()));
         assert!(result.is_some());
         let ids = result.unwrap();
         assert!(ids.contains(&1));
         assert!(ids.contains(&6));
 
         // 测试搜索不存在的键
-        let result = index.search_with("nonexistent".to_string(), |ids| Some(ids.clone()));
+        let result = index.search_with(&"nonexistent".to_string(), |ids| Some(ids.clone()));
         assert!(result.is_none());
     }
 
-    #[tokio::test]
-    async fn test_range_search() {
+    #[test]
+    fn test_range_search() {
         let index = create_populated_index();
+        let apple = "apple".to_string();
+        let banana = "banana".to_string();
+        let cherry = "cherry".to_string();
+        let date = "date".to_string();
+        let eggplant = "eggplant".to_string();
 
         // 测试等于查询
-        let query = RangeQuery::Eq("apple".to_string());
+        let query = RangeQuery::Eq(&apple);
         let results =
             index.search_range_with(query, |k, ids| (true, Some((k.clone(), ids.clone()))));
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, "apple");
 
         // 测试大于查询
-        let query = RangeQuery::Gt("cherry".to_string());
+        let query = RangeQuery::Gt(&cherry);
         let results = index.search_range_with(query, |k, _| (true, Some(k.clone())));
         assert_eq!(results.len(), 2);
         assert!(results.contains(&"date".to_string()));
-        assert!(results.contains(&"elderberry".to_string()));
+        assert!(results.contains(&"eggplant".to_string()));
 
         // 测试大于等于查询
-        let query = RangeQuery::Ge("cherry".to_string());
+        let query = RangeQuery::Ge(&cherry);
         let results = index.search_range_with(query, |k, _| (true, Some(k.clone())));
         assert_eq!(results.len(), 3);
         assert!(results.contains(&"cherry".to_string()));
 
         // 测试小于查询
-        let query = RangeQuery::Lt("cherry".to_string());
+        let query = RangeQuery::Lt(&cherry);
         let results = index.search_range_with(query, |k, _| (true, Some(k.clone())));
         assert_eq!(results.len(), 2);
-        assert!(results.contains(&"apple".to_string()));
-        assert!(results.contains(&"banana".to_string()));
+        assert!(results.contains(&apple));
+        assert!(results.contains(&banana));
 
         // 测试小于等于查询
-        let query = RangeQuery::Le("cherry".to_string());
+        let query = RangeQuery::Le(&cherry);
         let results = index.search_range_with(query, |k, _| (true, Some(k.clone())));
         assert_eq!(results.len(), 3);
-        assert!(results.contains(&"cherry".to_string()));
+        assert!(results.contains(&cherry));
 
         // 测试范围查询
-        let query = RangeQuery::Between("banana".to_string(), "date".to_string());
+        let query = RangeQuery::Between(&banana, &date);
         let results = index.search_range_with(query, |k, _| (true, Some(k.clone())));
         assert_eq!(results.len(), 3);
-        assert!(results.contains(&"banana".to_string()));
-        assert!(results.contains(&"cherry".to_string()));
-        assert!(results.contains(&"date".to_string()));
+        assert!(results.contains(&banana));
+        assert!(results.contains(&cherry));
+        assert!(results.contains(&date));
 
         // 测试包含查询
         let mut keys = BTreeSet::new();
-        keys.insert("apple".to_string());
-        keys.insert("elderberry".to_string());
+        keys.insert(&apple);
+        keys.insert(&eggplant);
         let query = RangeQuery::Include(keys);
         let results = index.search_range_with(query, |k, _| (true, Some(k.clone())));
         assert_eq!(results.len(), 2);
-        assert!(results.contains(&"apple".to_string()));
-        assert!(results.contains(&"elderberry".to_string()));
+        assert!(results.contains(&apple));
+        assert!(results.contains(&eggplant));
 
         // 测试提前终止搜索
-        let query = RangeQuery::Ge("apple".to_string());
+        let query = RangeQuery::Ge(&apple);
         let results = index.search_range_with(query, |k, _| (k != "banana", Some(k.clone())));
         assert_eq!(results.len(), 2);
         assert_eq!(results[0], "apple");
         assert_eq!(results[1], "banana");
     }
 
-    #[tokio::test]
-    async fn test_prefix_search() {
+    #[test]
+    fn test_prefix_search() {
         let index = create_populated_index();
 
         // 插入一些带前缀的数据
@@ -1345,7 +1355,7 @@ mod tests {
         println!("Serialized metadata: {:?}", const_hex::encode(&buf));
 
         // 反序列化元数据
-        let result = BtreeIndex::<String, u64>::load_metadata(&buf[..]).await;
+        let result = BTreeIndex::<u64, String>::load_metadata(&buf[..]).await;
         let mut loaded_index = result.unwrap();
 
         // 验证元数据
@@ -1378,10 +1388,11 @@ mod tests {
                 .load_buckets(async |bucket_id| {
                     let guard = bucket_data_clone.lock().await;
                     if bucket_id as usize >= guard.len() {
-                        return Err(BtreeError::Generic {
+                        return Err(BTreeError::Generic {
                             name: "test".to_string(),
                             source: "Bucket not found".into(),
-                        });
+                        }
+                        .into());
                     }
                     Ok(guard[bucket_id as usize].clone())
                 })
@@ -1393,21 +1404,21 @@ mod tests {
         assert_eq!(loaded_index.len(), index.len());
 
         // 测试搜索
-        let result = loaded_index.search_with("apple".to_string(), |ids| Some(ids.clone()));
+        let result = loaded_index.search_with(&"apple".to_string(), |ids| Some(ids.clone()));
         assert!(result.is_some());
         let ids = result.unwrap();
         assert!(ids.contains(&1));
         assert!(ids.contains(&6));
     }
 
-    #[tokio::test]
-    async fn test_bucket_overflow() {
+    #[test]
+    fn test_bucket_overflow() {
         // 创建一个非常小的 bucket 大小的索引，以便测试 bucket 溢出
-        let config = BtreeConfig {
+        let config = BTreeConfig {
             bucket_overload_size: 100, // 非常小的 bucket 大小
             allow_duplicates: true,
         };
-        let index = BtreeIndex::new("overflow_test".to_string(), Some(config));
+        let index = BTreeIndex::new("overflow_test".to_string(), Some(config));
 
         // 插入足够多的数据以触发 bucket 溢出
         for i in 0..100 {
@@ -1422,40 +1433,15 @@ mod tests {
         // 验证所有数据都可以被搜索到
         for i in 0..100 {
             let key = format!("key_{}", i);
-            let result = index.search_with(key, |ids| Some(ids.clone()));
+            let result = index.search_with(&key, |ids| Some(ids.clone()));
             assert!(result.is_some());
             let ids = result.unwrap();
             assert!(ids.contains(&i));
         }
     }
 
-    #[tokio::test]
-    async fn test_get_posting_with() {
-        let index = create_populated_index();
-
-        // 测试获取存在的 posting
-        let result = index.get_posting_with(&"apple".to_string(), |k, posting| {
-            Some((k.clone(), posting.clone()))
-        });
-        assert!(result.is_ok());
-        let (key, ids) = result.unwrap().unwrap();
-        assert_eq!(key, "apple");
-        assert!(ids.contains(&1));
-        assert!(ids.contains(&6));
-
-        // 测试获取不存在的 posting
-        let result = index.get_posting_with(&"nonexistent".to_string(), |k, posting| {
-            Some((k.clone(), posting.clone()))
-        });
-        assert!(result.is_err());
-        match result {
-            Err(BtreeError::NotFound { .. }) => (),
-            _ => panic!("Expected NotFound error"),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_stats() {
+    #[test]
+    fn test_stats() {
         let index = create_test_index();
 
         // 初始状态
@@ -1475,8 +1461,8 @@ mod tests {
         assert_eq!(stats.insert_count, 2);
 
         // 执行一些搜索
-        let _ = index.search_with("apple".to_string(), |_| Some(()));
-        let _ = index.search_range_with(RangeQuery::Ge("a".to_string()), |_, _| (true, Some(())));
+        let _ = index.search_with(&"apple".to_string(), |_| Some(()));
+        let _ = index.search_range_with(RangeQuery::Ge(&"a".to_string()), |_, _| (true, Some(())));
 
         // 检查搜索后的统计信息
         let stats = index.stats();
@@ -1491,8 +1477,8 @@ mod tests {
         assert_eq!(stats.delete_count, 1);
     }
 
-    #[tokio::test]
-    async fn test_counting_writer() {
+    #[test]
+    fn test_counting_writer() {
         // 测试 CountingWriter
         let mut writer = CountingWriter::new();
         assert_eq!(writer.size(), 0);

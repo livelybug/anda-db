@@ -92,7 +92,7 @@ pub fn dimension(&self) -> usize;
 pub fn metadata(&self) -> HnswIndexMetadata;
 
 // Gets current statistics about the index
-pub fn stats(&self) -> HnswIndexStats;
+pub fn stats(&self) -> HnswStats;
 
 // Gets all node IDs in the index.
 pub fn node_ids(&self) -> BTreeSet<u64>;

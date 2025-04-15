@@ -28,90 +28,144 @@ anda_db_btree = "0.1.0"
 ### Basic Example
 
 ```rust
-use anda_db_btree::{BtreeIndex, BtreeConfig, RangeQuery};
+use anda_db_btree::{BTreeConfig, BTreeError, BTreeIndex, RangeQuery};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
-// Create a new B-tree index
-let config = BtreeConfig {
-    bucket_overload_size: 1024 * 512, // 512KB per bucket
-    allow_duplicates: true,
-};
-let index = BtreeIndex::<String, u64>::new("my_index".to_string(), Some(config));
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Create a new B-tree index
+    let config = BTreeConfig {
+        bucket_overload_size: 1024 * 512, // 512KB per bucket
+        allow_duplicates: true,
+    };
+    let index = BTreeIndex::<u64, String>::new("my_index".to_string(), Some(config));
 
-// Insert some data
-let now_ms = std::time::SystemTime::now()
-    .duration_since(std::time::UNIX_EPOCH)
-    .unwrap()
-    .as_millis() as u64;
+    // Insert some data
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
 
-index.insert(1, "apple".to_string(), now_ms).unwrap();
-index.insert(2, "banana".to_string(), now_ms).unwrap();
-index.insert(3, "cherry".to_string(), now_ms).unwrap();
+    let apple = "apple".to_string();
+    let banana = "banana".to_string();
+    let cherry = "cherry".to_string();
+    let date = "date".to_string();
+    let eggplant = "eggplant".to_string();
 
-// Batch insert
-let items = vec![
-    (4, "date".to_string()),
-    (5, "elderberry".to_string()),
-];
-index.batch_insert(items, now_ms).unwrap();
+    index.insert(1, apple.clone(), now_ms).unwrap();
+    index.insert(2, banana.clone(), now_ms).unwrap();
+    index.insert(3, cherry.clone(), now_ms).unwrap();
 
-// Search for exact matches
-let result = index.search_with("apple".to_string(), |ids| Some(ids.clone()));
-assert!(result.is_some());
-println!("Documents with 'apple': {:?}", result.unwrap());
+    // Batch insert
+    let items = vec![(4, date.clone()), (5, eggplant.clone())];
+    index.batch_insert(items, now_ms).unwrap();
 
-// Range queries
-let query = RangeQuery::Between("banana".to_string(), "date".to_string());
-let results = index.search_range_with(query, |k, ids| {
-    println!("Key: {}, IDs: {:?}", k, ids);
-    (true, Some(k.clone()))
-});
-println!("Keys in range: {:?}", results);
+    // Search for exact matches
+    let result = index.search_with(&apple, |ids| Some(ids.clone()));
+    assert!(result.is_some());
+    println!("Documents with 'apple': {:?}", result.unwrap());
 
-// Prefix search (for String keys)
-let results = index.search_prefix_with("app", |k, ids| {
-    (true, Some((k.to_string(), ids.clone())))
-});
-println!("Keys with prefix 'app': {:?}", results);
+    // Range queries
+    let query = RangeQuery::Between(&banana, &date);
+    let results = index.search_range_with(query, |k, ids| {
+        println!("Key: {}, IDs: {:?}", k, ids);
+        (true, Some(k.clone()))
+    });
+    println!("Keys in range: {:?}", results);
 
-// Remove data
-index.remove(1, "apple".to_string(), now_ms);
-```
+    // Prefix search (for String keys)
+    let results =
+        index.search_prefix_with("app", |k, ids| (true, Some((k.to_string(), ids.clone()))));
+    println!("Keys with prefix 'app': {:?}", results);
 
-### Persistence
+    // persist the index to files
+    {
+        let file = tokio::fs::File::create("debug/btree_demo_metadata.cbor")
+            .await?
+            .compat_write();
+        // Store the index metadata
+        index.store_metadata(file, 0).await?;
 
-The B-tree index supports serialization and deserialization for persistence:
+        // Store the index data
+        index
+            .store_dirty_buckets(async |id: u32, data: Vec<u8>| {
+                let mut file =
+                    tokio::fs::File::create(format!("debug/btree_demo_bucket_{id}.cbor"))
+                        .await
+                        .map_err(|err| BTreeError::Generic {
+                            name: index.name().to_string(),
+                            source: err.into(),
+                        })?;
+                file.write_all(&data)
+                    .await
+                    .map_err(|err| BTreeError::Generic {
+                        name: index.name().to_string(),
+                        source: err.into(),
+                    })?;
+                file.flush().await.map_err(|err| BTreeError::Generic {
+                    name: index.name().to_string(),
+                    source: err.into(),
+                })?;
+                Ok(true)
+            })
+            .await?;
+    }
 
-```rust
-use futures::io::Cursor;
+    // Load the index from metadata
+    let mut index2 = BTreeIndex::<String, u64>::load_metadata(
+        tokio::fs::File::open("debug/btree_demo_metadata.cbor")
+            .await?
+            .compat(),
+    )
+    .await?;
 
-// Serialize index metadata
-let mut buf = Vec::new();
-index.store_metadata(&mut buf, now_ms).await.unwrap();
+    assert_eq!(index2.name(), "my_index");
+    assert_eq!(index2.len(), 0);
 
-// Store dirty buckets
-index.store_dirty_buckets(async |bucket_id, data| {
-    // Store bucket data to disk or other storage
-    // For example, write to a file named by bucket_id
-    Ok(true) // Return true to continue with next bucket
-}).await.unwrap();
+    // Load the index data
+    index2
+        .load_buckets(async |id: u32| {
+            let mut file = tokio::fs::File::open(format!("debug/btree_demo_bucket_{id}.cbor"))
+                .await
+                .map_err(|err| BTreeError::Generic {
+                    name: index.name().to_string(),
+                    source: err.into(),
+                })?;
+            let mut data = Vec::new();
+            file.read_to_end(&mut data)
+                .await
+                .map_err(|err| BTreeError::Generic {
+                    name: index.name().to_string(),
+                    source: err.into(),
+                })?;
+            Ok(data)
+        })
+        .await?;
 
-// Later, load the index
-let loaded_index = BtreeIndex::<String, u64>::load_metadata(Cursor::new(&buf)).await.unwrap();
+    assert_eq!(index2.len(), 5);
 
-// Load buckets
-loaded_index.load_buckets(async |bucket_id| {
-    // Load bucket data from storage
-    // Return the raw bytes
-    Ok(Vec::new()) // Replace with actual data loading
-}).await.unwrap();
+    let result = index.search_with(&apple, |ids| Some(ids.clone()));
+    assert!(result.is_some());
+
+    // Remove data
+    let ok = index.remove(1, apple.clone(), now_ms);
+    assert!(ok);
+    let result = index.search_with(&apple, |ids| Some(ids.clone()));
+    assert!(result.is_none());
+
+    println!("OK");
+
+    Ok(())
+}
 ```
 
 ## Configuration
 
-The `BtreeConfig` struct allows customizing the index behavior:
+The `BTreeConfig` struct allows customizing the index behavior:
 
 ```rust
-let config = BtreeConfig {
+let config = BTreeConfig {
     // Maximum size of a bucket before creating a new one (in bytes)
     bucket_overload_size: 1024 * 512, // 512KB
 
@@ -129,12 +183,12 @@ let config = BtreeConfig {
 
 ## Error Handling
 
-The library provides a comprehensive error type `BtreeError` that covers various failure scenarios:
+The library provides a comprehensive error type `BTreeError` that covers various failure scenarios:
 
-- `BtreeError::Generic`: General index-related errors
-- `BtreeError::Serialization`: CBOR serialization/deserialization errors
-- `BtreeError::NotFound`: When a requested value is not found in the index
-- `BtreeError::AlreadyExists`: When trying to insert a duplicate key with `allow_duplicates` set to false
+- `BTreeError::Generic`: General index-related errors
+- `BTreeError::Serialization`: CBOR serialization/deserialization errors
+- `BTreeError::NotFound`: When a requested value is not found in the index
+- `BTreeError::AlreadyExists`: When trying to insert a duplicate key with `allow_duplicates` set to false
 
 ## License
 Copyright © 2025 [LDC Labs](https://github.com/ldclabs).
