@@ -82,8 +82,10 @@ pub const NODE_VERSION_FN: PostingMapFn<u64> = |_: &str, val: &PostingValue| Som
 pub struct BM25Metadata {
     /// Index name.
     pub name: String,
+
     /// BM25 algorithm parameters
     pub config: BM25Config,
+
     /// Index statistics.
     pub stats: BM25Stats,
 }
@@ -106,9 +108,6 @@ pub struct BM25Stats {
     /// Number of elements in the index.
     pub num_elements: u64,
 
-    /// Average number of tokens per segment
-    pub avg_seg_tokens: f32,
-
     /// Number of search operations performed.
     pub search_count: u64,
 
@@ -117,6 +116,9 @@ pub struct BM25Stats {
 
     /// Number of delete operations performed.
     pub delete_count: u64,
+
+    /// Average number of tokens per segment
+    pub avg_seg_tokens: f32,
 }
 
 /// Serializable BM25 index structure (owned version).

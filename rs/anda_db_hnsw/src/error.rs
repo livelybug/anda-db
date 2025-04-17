@@ -21,14 +21,6 @@ pub enum HnswError {
         got: usize,
     },
 
-    /// Error when trying to search an empty index.
-    #[error("HNSW index {name:?} is empty")]
-    EmptyIndex { name: String },
-
-    /// Error when index has reached its maximum capacity.
-    #[error("HNSW index {name:?} is full")]
-    IndexFull { name: String },
-
     /// Error when a token is not found.
     #[error("HNSW index {name:?}, node not found: {id:?}")]
     NotFound { name: String, id: u64 },

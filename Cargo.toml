@@ -20,6 +20,7 @@ license = "MIT"
 async-trait = "0.1"
 bytes = "1"
 const-hex = "1.14"
+croaring = "2.3"
 futures = { version = "0.3" }
 tokio = { version = "1.44" }
 tokio-util = { version = "0.7" }

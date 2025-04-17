@@ -1,7 +1,7 @@
 use anda_db_hnsw::{HnswConfig, HnswIndex};
 use rand::Rng;
+use std::io::{Read, Write};
 use tokio::time;
-use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 pub fn unix_ms() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -23,7 +23,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 创建索引 (384维向量，如BERT嵌入)
     let config = HnswConfig {
         dimension: DIM,
-        max_nodes: Some(1_000_000),
         ..Default::default()
     };
     // 39900 inserted 100 vectors in 2.482874333s
@@ -43,7 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut rng = rand::rng();
 
     let mut inert_start = time::Instant::now();
-    for i in 0..50_000 {
+    for i in 0..1_000 {
         let vector: Vec<f32> = (0..DIM).map(|_| rng.random::<f32>()).collect();
         let _ = index.insert_f32(i as u64, vector, unix_ms())?;
         // println!("{} inserted vector {}", i, i);
@@ -81,30 +80,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 打印统计信息
     let stats = index.stats();
     println!("Index statistics:");
-    println!("- Total vectors: {}", stats.num_nodes);
+    println!("- Total vectors: {}", stats.num_elements);
     println!("- Max layer: {}", stats.max_layer);
-    println!("- Avg connections: {:.2}", stats.avg_connections);
     println!("- Search operations: {}", stats.search_count);
     println!("- Insert operations: {}", stats.insert_count);
     println!("- Delete operations: {}", stats.delete_count);
 
     // 最终保存
     {
-        let file = tokio::fs::File::create("hnsw_demo.cbor")
-            .await?
-            .compat_write();
+        let metadata = std::fs::File::create("debug/hnsw_demo/metadata.cbor")?;
+        let ids = std::fs::File::create("debug/hnsw_demo/ids.cbor")?;
         let store_start = time::Instant::now();
-        index.store_all(file, unix_ms()).await?;
+        index
+            .store_all(metadata, ids, 0, async |id, data| {
+                let mut node = std::fs::File::create(format!("debug/hnsw_demo/node_{id}.cbor"))?;
+                node.write_all(data)?;
+                Ok(true)
+            })
+            .await?;
+
+        // metadata.close().await?;
+        // ids.close().await?;
         println!("Stored index with nodes in {:?}", store_start.elapsed());
     }
 
-    let file = tokio::fs::File::open("hnsw_demo.cbor").await?.compat();
+    let metadata = std::fs::File::open("debug/hnsw_demo/metadata.cbor")?;
+    let ids = std::fs::File::open("debug/hnsw_demo/ids.cbor")?;
     let load_start = time::Instant::now();
-    let index = HnswIndex::load(file).await?;
+    let loaded_index = HnswIndex::load_all(metadata, ids, async |id| {
+        let mut node = std::fs::File::open(format!("debug/hnsw_demo/node_{id}.cbor"))?;
+        let mut buf = Vec::new();
+        node.read_to_end(&mut buf)?;
+        Ok(buf)
+    })
+    .await?;
+
     println!("Load index in {:?}", load_start.elapsed());
     let query: Vec<f32> = (0..DIM).map(|_| rng.random::<f32>()).collect();
     let query_start = time::Instant::now();
-    let results = index.search_f32(&query, 10)?;
+    let results = loaded_index.search_f32(&query, 10)?;
     println!(
         "Search returned {} results in {:?}",
         results.len(),

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 pub use ic_auth_types::Xid;
 
-use super::{Cbor, Fe, Ft, Fv, IndexedFieldValues, Schema, SchemaError, Segment};
+use super::{Cbor, Ft, Fv, IndexedFieldValues, Schema, SchemaError};
 
 /// Document represents a single document in the Anda DB.
 /// It contains an ID, a set of fields, and a reference to its schema.

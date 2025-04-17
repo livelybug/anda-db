@@ -22,14 +22,14 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-anda_db_tfs = "0.3"
+anda_db_tfs = "0.4"
 ```
 
 For full features including tantivy tokenizers and jieba support:
 
 ```toml
 [dependencies]
-anda_db_tfs = { version = "0.3", features = ["full"] }
+anda_db_tfs = { version = "0.4", features = ["full"] }
 ```
 
 ## Quick Start
@@ -122,89 +122,6 @@ let results = index.insert(docs, now_ms);
 ## API Documentation
 
 👉 https://docs.rs/anda_db_tfs
-
-### BM25Index
-
-The main struct for creating and managing a search index.
-
-```rust
-// Creates a new index
-pub fn new(name: String, tokenizer: T, config: Option<BM25Config>) -> Self;
-
-// Loads the index from a reader
-pub async fn load<R: AsyncWrite>(r: R, tokenizer: T) -> Result<Self, BM25Error>;
-
-// Gets the number of segments in the index
-pub fn len(&self) -> usize;
-
-// Checks if the index is empty
-pub fn is_empty(&self) -> bool;
-
-/// Returns the index name
-pub fn name(&self) -> &str;
-
-// Returns the index metadata
-pub fn metadata(&self) -> BM25Metadata;
-
-// Gets current statistics about the index
-pub fn stats(&self) -> BM25Stats;
-
-// Gets all tokens in the index.
-pub fn tokens(&self) -> BTreeSet<String>;
-
-// Gets a posting by token and applies a function to it.
-pub fn get_posting_with<R, F>(&self, token: &str, f: F) -> Result<Option<R>, BM25Error>
-where
-    F: FnOnce(&str, &PostingValue) -> Option<R>;
-
-// Sets the posting if it is not already present or if the version is newer.
-// This method is only used to bootstrap the index from persistent storage.
-pub fn set_posting(&self, token: String, value: PostingValue) -> bool;
-
-// Inserts a segment to the index
-pub fn insert(&self, id: u64, text: &str, now_ms: u64) -> Result<(), BM25Error>;
-
-// Inserts a segment to the index with hook function
-pub fn insert_with<R, F>(
-    &self,
-    id: u64,
-    text: &str,
-    now_ms: u64,
-    hook: F,
-) -> Result<Vec<(String, R)>, BM25Error>
-where
-    F: Fn(&str, &PostingValue) -> Option<R>;
-
-// Inserts multiple segments to the index in parallel
-pub fn insert_batch(&self, docs: Vec<(u64, String)>, now_ms: u64) -> Vec<Result<(), BM25Error>>;
-
-// Removes a segment from the index
-pub fn remove(&self, id: u64, text: &str, now_ms: u64) -> bool;
-
-// Removes a segment from the index with hook function.
-pub fn remove_with<R, F>(
-    &self,
-    id: u64,
-    text: &str,
-    now_ms: u64,
-    hook: F,
-) -> (bool, Vec<(String, R)>)
-where
-    F: Fn(&str, &PostingValue) -> Option<R>;
-
-// Searches the index
-pub fn search(&self, query: &str, top_k: usize) -> Vec<(u64, f32)>;
-
-/// Searches the index for segments matching the query expression,
-/// which can include boolean operators (AND, OR, NOT).
-pub fn search_advanced(&self, query: &str, top_k: usize) -> Vec<(u64, f32)>;
-
-// Stores the index without postings to a writer.
-pub async fn store<W: AsyncRead>(&self, w: W, now_ms: u64) -> Result<(), BM25Error>;
-
-// Stores the index with postings to a writer. It maybe very large.
-pub async fn store_all<W: AsyncRead>(&self, w: W, now_ms: u64) -> Result<(), BM25Error>;
-```
 
 ### BM25Config
 

@@ -12,13 +12,13 @@
 //! - Efficient serialization and deserialization in CBOR format
 
 use dashmap::DashMap;
-use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     fmt::Debug,
     hash::Hash,
+    io::{Read, Write},
     sync::atomic::{AtomicU32, AtomicU64, Ordering as AtomicOrdering},
 };
 
@@ -258,32 +258,39 @@ where
         }
     }
 
+    /// Loads an index from metadata reader and a closure for loading buckets.
+    ///
+    /// # Arguments
+    ///
+    /// * `metadata` - Metadata reader
+    /// * `f` - Closure for loading buckets
+    ///
+    /// # Returns
+    ///
+    /// * `Result<Self, BTreeError>` - Loaded index or error.
+    pub async fn load_all<R: Read, F>(metadata: R, f: F) -> Result<Self, BTreeError>
+    where
+        F: AsyncFnMut(u32) -> Result<Vec<u8>, BoxError>,
+    {
+        let mut index = Self::load_metadata(metadata)?;
+        index.load_buckets(f).await?;
+        Ok(index)
+    }
+
     /// Loads an index from a reader
     /// This only loads metadata, you need to call [`Self::load_buckets`] to load the actual posting data
     ///
     /// # Arguments
     ///
-    /// * `r` - Any type implementing the [`futures::io::AsyncRead`] trait
+    /// * `r` - Any type implementing the [`Read`] trait
     ///
     /// # Returns
     ///
     /// * `Result<Self, Error>` - Loaded index or error
-    pub async fn load_metadata<R: AsyncRead + Unpin>(mut r: R) -> Result<Self, BTreeError> {
-        // Read all data from the reader into a buffer
-        let data = {
-            let mut buf = Vec::new();
-            AsyncReadExt::read_to_end(&mut r, &mut buf)
-                .await
-                .map_err(|err| BTreeError::Generic {
-                    name: "unknown".to_string(),
-                    source: err.into(),
-                })?;
-            buf
-        };
-
+    pub fn load_metadata<R: Read>(r: R) -> Result<Self, BTreeError> {
         // Deserialize the index metadata
         let index: BTreeIndexOwnedHelper =
-            ciborium::from_reader(&data[..]).map_err(|err| BTreeError::Serialization {
+            ciborium::from_reader(r).map_err(|err| BTreeError::Serialization {
                 name: "unknown".to_string(),
                 source: err.into(),
             })?;
@@ -319,9 +326,9 @@ where
     /// # Returns
     ///
     /// * `Result<(), BTreeError>` - Success or error
-    pub async fn load_buckets<F>(&mut self, f: F) -> Result<(), BTreeError>
+    pub async fn load_buckets<F>(&mut self, mut f: F) -> Result<(), BTreeError>
     where
-        F: AsyncFn(u32) -> Result<Vec<u8>, BoxError>,
+        F: AsyncFnMut(u32) -> Result<Vec<u8>, BoxError>,
     {
         for i in 0..=self.max_bucket_id.load(AtomicOrdering::Relaxed) {
             let data = f(i).await.map_err(|err| BTreeError::Generic {
@@ -394,8 +401,9 @@ where
         let bucket = self.max_bucket_id.load(AtomicOrdering::Acquire);
 
         // Calculate the size increase for this insertion
-        let size_increase = {
-            match self.postings.entry(field_value.clone()) {
+        let mut is_new = false;
+        let mut size_increase = 0;
+        match self.postings.entry(field_value.clone()) {
                 dashmap::Entry::Occupied(mut entry) => {
                     // Check if duplicate keys are allowed
                     if !self.config.allow_duplicates {
@@ -409,29 +417,27 @@ where
                     let posting = entry.get_mut();
                     // Add segment_id if it doesn't exist
                     if !posting.2.contains(&doc_id) {
-                        let size_increase = CountingWriter::count_cbor(&doc_id) as u32 + 2;
+                        size_increase = CountingWriter::count_cbor(&doc_id) as u32 + 2;
                         posting.2.push(doc_id);
                         posting.1 += 1; // increment version
-                        size_increase
-                    } else {
-                        0 // No change if document_id already exists
                     }
                 }
                 dashmap::Entry::Vacant(entry) => {
                     // Create a new posting for this field value
                     let posting = (bucket, 1, vec![doc_id]);
-                    let size_increase = CountingWriter::count_cbor(&posting) as u32 + 2;
+                    size_increase = CountingWriter::count_cbor(&posting) as u32 + 2;
                     entry.insert(posting);
-
-                    // Add the field value to the B-tree for range queries
-                    self.btree.write().insert(field_value.clone());
-                    size_increase
+                    is_new = true;
                 }
-            }
-            // release the lock on the entry
-        };
+            };
+
+        if is_new {
+            // Add the field value to the B-tree for range queries
+            self.btree.write().insert(field_value.clone());
+        }
 
         // If the index was modified, update bucket state
+        let mut new_bucket = 0;
         if size_increase > 0 {
             // Update bucket state
             let mut b = self
@@ -449,27 +455,44 @@ where
                 b.1 = true;
                 // Add field value to bucket if not already present
                 if !b.2.contains(&field_value) {
-                    b.2.push(field_value);
+                    b.2.push(field_value.clone());
                 }
             } else {
                 // If the current bucket is full, create a new one
-                let new_bucket = self.max_bucket_id.fetch_add(1, AtomicOrdering::Release) + 1;
-                if let Some(mut posting) = self.postings.get_mut(&field_value) {
-                    // Update the posting's bucket ID
-                    posting.0 = new_bucket;
-                    let size_decrease = CountingWriter::count_cbor(&posting) as u32 + 2;
-                    // Remove the current field value from the current bucket
-                    // The freed space can still accommodate small growth in other field values
-                    if let Some(pos) = b.2.iter().position(|k| &field_value == k) {
-                        b.0 = b.0.saturating_sub(size_decrease);
-                        b.1 = true;
-                        b.2.swap_remove(pos);
+                let mut size_decrease = 0;
+                new_bucket = self.max_bucket_id.fetch_add(1, AtomicOrdering::Release) + 1;
+                {
+                    if let Some(mut posting) = self.postings.get_mut(&field_value) {
+                        // Update the posting's bucket ID
+                        posting.0 = new_bucket;
+                        size_decrease = CountingWriter::count_cbor(&posting) as u32 + 2;
                     }
                 }
+                // Remove the current field value from the current bucket
+                // The freed space can still accommodate small growth in other field values
+                if let Some(pos) = b.2.iter().position(|k| &field_value == k) {
+                    b.0 = b.0.saturating_sub(size_decrease);
+                    b.1 = true;
+                    b.2.swap_remove(pos);
+                }
+            }
+        }
 
-                // Create a new bucket and migrate this data to it
-                self.buckets
-                    .insert(new_bucket, (size_increase, true, vec![field_value]));
+        if new_bucket > 0 {
+            // Create a new bucket and migrate this data to it
+            match self.buckets.entry(new_bucket) {
+                dashmap::Entry::Vacant(entry) => {
+                    // Create a new bucket with the initial size
+                    entry.insert((size_increase, true, vec![field_value]));
+                }
+                dashmap::Entry::Occupied(mut entry) => {
+                    let bucket_entry = entry.get_mut();
+                    bucket_entry.0 += size_increase;
+                    bucket_entry.1 = true; // Mark as dirty
+                    if !bucket_entry.2.contains(&field_value) {
+                        bucket_entry.2.push(field_value);
+                    }
+                }
             }
         }
 
@@ -514,11 +537,15 @@ where
         // Batch processing work, optimized by grouping writes by bucket
         // Phase 1: Update the postings collection
         let mut bucket_updates: HashMap<u32, (u32, Vec<FV>)> = HashMap::new();
+        let mut new_btree_values: BTreeSet<FV> = BTreeSet::new();
+
         for (field_value, doc_ids) in grouped_items {
             // Consider concurrent scenarios where buckets might be modified by other threads
             let bucket = self.max_bucket_id.load(AtomicOrdering::Relaxed);
-            let (size_increase, inserted_to_bucket) = match self.postings.entry(field_value.clone())
-            {
+            let mut size_increase = 0;
+            let mut inserted_to_bucket = bucket;
+
+            match self.postings.entry(field_value.clone()) {
                 dashmap::Entry::Occupied(mut entry) => {
                     // Check if duplicate keys are allowed
                     if !self.config.allow_duplicates && !doc_ids.is_empty() {
@@ -535,23 +562,20 @@ where
                         }
                     }
 
-                    if new_ids.is_empty() {
-                        (0, posting.0)
-                    } else {
-                        let size_increase = new_ids
+                    if !new_ids.is_empty() {
+                        size_increase = new_ids
                             .iter()
                             .fold(0, |acc, id| acc + CountingWriter::count_cbor(id) as u32 + 2);
                         posting.2.extend(new_ids);
                         posting.1 += 1; // increment version
-                        (size_increase, posting.0)
                     }
+                    inserted_to_bucket = posting.0;
                 }
                 dashmap::Entry::Vacant(entry) => {
                     let posting = (bucket, 1, doc_ids);
-                    let size_increase = CountingWriter::count_cbor(&posting) as u32 + 2;
+                    size_increase = CountingWriter::count_cbor(&posting) as u32 + 2;
                     entry.insert(posting);
-                    self.btree.write().insert(field_value.clone());
-                    (size_increase, bucket)
+                    new_btree_values.insert(field_value.clone());
                 }
             };
 
@@ -569,8 +593,13 @@ where
             }
         }
 
+        if !new_btree_values.is_empty() {
+            self.btree.write().append(&mut new_btree_values);
+        }
+
         // Phase 2: Update bucket states
-        let mut field_values_to_create: Vec<(u32, Vec<FV>)> = Vec::new();
+        // field_values_to_migrate: (old_bucket_id, field_value, size)
+        let mut field_values_to_migrate: Vec<(u32, FV, u32)> = Vec::new();
         for (bucket_id, (size_increase, field_values)) in bucket_updates {
             if let Some(mut bucket_entry) = self.buckets.get_mut(&bucket_id) {
                 // Check if the bucket would overflow
@@ -589,53 +618,79 @@ where
                     }
                 } else {
                     // Bucket doesn't have enough space, need to migrate these values to a new bucket
-                    field_values_to_create.push((bucket_id, field_values));
+                    for fv in field_values {
+                        // 获取需要迁移的 field_value 大小
+                        let size = if let Some(posting) = self.postings.get(&fv) {
+                            CountingWriter::count_cbor(&posting) as u32 + 2
+                        } else {
+                            0
+                        };
+
+                        if size > 0 {
+                            field_values_to_migrate.push((bucket_id, fv, size));
+                        }
+                    }
                 }
             }
         }
 
         // Phase 3: Create new buckets if needed
-        if !field_values_to_create.is_empty() {
+        if !field_values_to_migrate.is_empty() {
             let mut next_bucket_id = self.max_bucket_id.fetch_add(1, AtomicOrdering::Release) + 1;
-            let mut nb = self
-                .buckets
-                .entry(next_bucket_id)
-                .or_insert_with(|| (0, true, Vec::new()));
-            for (old_bucket_id, field_values) in field_values_to_create {
-                let mut ob =
-                    self.buckets
-                        .get_mut(&old_bucket_id)
-                        .ok_or_else(|| BTreeError::Generic {
-                            name: self.name.clone(),
-                            source: format!("bucket {old_bucket_id} not found").into(),
-                        })?;
 
-                for field_value in field_values {
+            {
+                self.buckets
+                    .entry(next_bucket_id)
+                    .or_insert_with(|| (0, true, Vec::new()));
+                // release the lock on the entry
+            }
+
+            for (old_bucket_id, field_value, size) in field_values_to_migrate {
+                if let Some(mut posting) = self.postings.get_mut(&field_value) {
+                    posting.0 = next_bucket_id;
+                }
+
+                if let Some(mut ob) = self.buckets.get_mut(&old_bucket_id) {
+                    if let Some(pos) = ob.2.iter().position(|k| &field_value == k) {
+                        ob.0 = ob.0.saturating_sub(size);
+                        ob.1 = true;
+                        ob.2.swap_remove(pos);
+                    }
+                }
+
+                let mut new_bucket = false;
+                if let Some(mut nb) = self.buckets.get_mut(&next_bucket_id) {
+                    if nb.2.is_empty() || nb.0 + size < self.bucket_overload_size {
+                        // Bucket has enough space, update directly
+                        nb.0 += size;
+                        if !nb.2.contains(&field_value) {
+                            nb.2.push(field_value.clone());
+                        }
+                    } else {
+                        // Bucket doesn't have enough space, need to migrate to the next bucket
+                        new_bucket = true;
+                    }
+                }
+
+                if new_bucket {
+                    next_bucket_id = self.max_bucket_id.fetch_add(1, AtomicOrdering::Release) + 1;
+                    // update the posting's bucket_id again
                     if let Some(mut posting) = self.postings.get_mut(&field_value) {
                         posting.0 = next_bucket_id;
-                        let size_decrease = CountingWriter::count_cbor(&posting) as u32 + 2;
-                        // Remove current FV from the current bucket
-                        // The freed space can still accommodate small growth in other FV postings
-                        if let Some(pos) = ob.2.iter().position(|k| &field_value == k) {
-                            ob.0 = ob.0.saturating_sub(size_decrease);
-                            ob.1 = true;
-                            ob.2.swap_remove(pos);
-                        }
+                    }
 
-                        if nb.2.is_empty() || nb.0 + size_decrease < self.bucket_overload_size {
-                            // Bucket has enough space, update directly
-                            nb.0 += size_decrease;
-                            if !nb.2.contains(&field_value) {
-                                nb.2.push(field_value);
+                    match self.buckets.entry(next_bucket_id) {
+                        dashmap::Entry::Vacant(entry) => {
+                            // Create a new bucket with the initial size
+                            entry.insert((size, true, vec![field_value]));
+                        }
+                        dashmap::Entry::Occupied(mut entry) => {
+                            let bucket_entry = entry.get_mut();
+                            bucket_entry.0 += size;
+                            bucket_entry.1 = true; // Mark as dirty
+                            if !bucket_entry.2.contains(&field_value) {
+                                bucket_entry.2.push(field_value);
                             }
-                        } else {
-                            // Bucket doesn't have enough space, need to migrate to the next bucket
-                            next_bucket_id =
-                                self.max_bucket_id.fetch_add(1, AtomicOrdering::Release) + 1;
-                            nb = self
-                                .buckets
-                                .entry(next_bucket_id)
-                                .or_insert_with(|| (0, true, Vec::new()));
                         }
                     }
                 }
@@ -664,35 +719,44 @@ where
     ///
     /// * `bool` - `true` if the document_id-field_value pair was successfully removed, `false` otherwise
     pub fn remove(&self, doc_id: PK, field_value: FV, now_ms: u64) -> bool {
-        if let Some(mut posting) = self.postings.get_mut(&field_value) {
-            if let Some(pos) = posting.2.iter().position(|id| id == &doc_id) {
-                let size_decrease = if posting.2.len() > 1 {
-                    CountingWriter::count_cbor(&doc_id) as u32 + 2
-                } else {
-                    CountingWriter::count_cbor(&posting) as u32 + 2
-                };
-                posting.1 += 1; // increment version
-                posting.2.swap_remove(pos);
+        let mut removed = false;
+        let mut size_decrease = 0;
+        let mut posting_empty = false;
+        let mut bucket_id = 0;
 
-                // Update the bucket state
-                if let Some(mut b) = self.buckets.get_mut(&posting.0) {
-                    b.0 = b.0.saturating_sub(size_decrease);
-                    b.1 = true;
+        {
+            if let Some(mut posting) = self.postings.get_mut(&field_value) {
+                removed = true;
+                bucket_id = posting.0;
+                if let Some(pos) = posting.2.iter().position(|id| id == &doc_id) {
+                    size_decrease = if posting.2.len() > 1 {
+                        CountingWriter::count_cbor(&doc_id) as u32 + 2
+                    } else {
+                        CountingWriter::count_cbor(&posting) as u32 + 2
+                    };
+                    posting.1 += 1; // increment version
+                    posting.2.swap_remove(pos);
+                    posting_empty = posting.2.is_empty();
+                }
+            }
+        }
 
-                    if posting.2.is_empty() {
-                        // remove FV from the bucket
-                        if let Some(pos) = b.2.iter().position(|k| &field_value == k) {
-                            b.2.swap_remove(pos);
-                        }
+        if removed {
+            // Update the bucket state
+            if let Some(mut b) = self.buckets.get_mut(&bucket_id) {
+                b.0 = b.0.saturating_sub(size_decrease);
+                b.1 = true;
+
+                if posting_empty {
+                    // remove FV from the bucket
+                    if let Some(pos) = b.2.iter().position(|k| &field_value == k) {
+                        b.2.swap_remove(pos);
                     }
                 }
             }
 
-            if posting.2.is_empty() {
+            if posting_empty {
                 self.btree.write().remove(&field_value);
-
-                // If no documents left, remove the key entirely
-                drop(posting);
                 self.postings.remove(&field_value);
             }
 
@@ -701,10 +765,9 @@ where
                 m.stats.last_deleted = now_ms;
                 m.stats.delete_count += 1;
             });
-            return true;
         }
 
-        false
+        removed
     }
 
     /// Searches the index for an exact key match
@@ -848,8 +911,8 @@ where
             }
             RangeQuery::Include(keys) => {
                 for k in keys.into_iter() {
-                    if let Some(posting) = self.postings.get(&k) {
-                        let (conti, rt) = f(&k, &posting.2);
+                    if let Some(posting) = self.postings.get(k) {
+                        let (conti, rt) = f(k, &posting.2);
                         if let Some(r) = rt {
                             results.push(r);
                         }
@@ -864,6 +927,21 @@ where
         results
     }
 
+    /// Stores the index metadata and dirty buckets to persistent storage.
+    pub async fn store_all<W: Write, F>(
+        &self,
+        metadata: W,
+        now_ms: u64,
+        f: F,
+    ) -> Result<(), BTreeError>
+    where
+        F: AsyncFnMut(u32, &[u8]) -> Result<bool, BoxError>,
+    {
+        self.store_metadata(metadata, now_ms)?;
+        self.store_dirty_buckets(f).await?;
+        Ok(())
+    }
+
     /// Stores the index metadata to a writer
     ///
     /// # Arguments
@@ -874,37 +952,22 @@ where
     /// # Returns
     ///
     /// * `Result<(), Error>` - Success or error
-    pub async fn store_metadata<W: AsyncWrite + Unpin>(
-        &self,
-        mut w: W,
-        now_ms: u64,
-    ) -> Result<(), BTreeError> {
-        let mut buf = Vec::with_capacity(8192);
+    pub fn store_metadata<W: Write>(&self, w: W, now_ms: u64) -> Result<(), BTreeError> {
         let mut meta = self.metadata();
+        meta.stats.last_saved = now_ms.max(meta.stats.last_saved);
+        let postings: DashMap<FV, PostingValue<PK>> = DashMap::new();
+        ciborium::into_writer(
+            &BTreeIndexRef {
+                postings: &postings,
+                metadata: &meta,
+            },
+            w,
+        )
+        .map_err(|err| BTreeError::Serialization {
+            name: self.name.clone(),
+            source: err.into(),
+        })?;
 
-        let serialized_data = {
-            meta.stats.last_saved = now_ms.max(meta.stats.last_saved);
-            let postings: DashMap<FV, PostingValue<PK>> = DashMap::new();
-            ciborium::into_writer(
-                &BTreeIndexRef {
-                    postings: &postings,
-                    metadata: &meta,
-                },
-                &mut buf,
-            )
-            .map_err(|err| BTreeError::Serialization {
-                name: self.name.clone(),
-                source: err.into(),
-            })?;
-            buf
-        };
-
-        AsyncWriteExt::write_all(&mut w, &serialized_data)
-            .await
-            .map_err(|err| BTreeError::Generic {
-                name: self.name.clone(),
-                source: err.into(),
-            })?;
         self.update_metadata(|m| {
             m.stats.last_saved = meta.stats.last_saved.max(m.stats.last_saved);
         });
@@ -925,10 +988,11 @@ where
     /// # Returns
     ///
     /// * `Result<(), BTreeError>` - Success or error
-    pub async fn store_dirty_buckets<F>(&self, f: F) -> Result<(), BTreeError>
+    pub async fn store_dirty_buckets<F>(&self, mut f: F) -> Result<(), BTreeError>
     where
-        F: AsyncFn(u32, Vec<u8>) -> Result<bool, BoxError>,
+        F: AsyncFnMut(u32, &[u8]) -> Result<bool, BoxError>,
     {
+        let mut buf = Vec::with_capacity(8192);
         for mut bucket in self.buckets.iter_mut() {
             if bucket.1 {
                 // If the bucket is dirty, it needs to be persisted
@@ -946,15 +1010,15 @@ where
                     }
                 }
 
-                let mut data = Vec::new();
-                ciborium::into_writer(&postings, &mut data).map_err(|err| {
+                buf.clear();
+                ciborium::into_writer(&postings, &mut buf).map_err(|err| {
                     BTreeError::Serialization {
                         name: self.name.clone(),
                         source: err.into(),
                     }
                 })?;
 
-                if let Ok(conti) = f(*bucket.key(), data).await {
+                if let Ok(conti) = f(*bucket.key(), &buf).await {
                     // Only mark as clean if persistence was successful, otherwise wait for next round
                     bucket.1 = false;
                     if !conti {
@@ -1077,7 +1141,7 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
-    use tokio::sync::Mutex;
+    use tokio::sync::{Barrier, Mutex};
 
     // 获取当前时间戳（毫秒）
     fn now_ms() -> u64 {
@@ -1349,13 +1413,13 @@ mod tests {
 
         // 序列化元数据
         let mut buf = Vec::new();
-        let result = index.store_metadata(&mut buf, now_ms()).await;
+        let result = index.store_metadata(&mut buf, now_ms());
         assert!(result.is_ok());
 
         println!("Serialized metadata: {:?}", const_hex::encode(&buf));
 
         // 反序列化元数据
-        let result = BTreeIndex::<u64, String>::load_metadata(&buf[..]).await;
+        let result = BTreeIndex::<u64, String>::load_metadata(&buf[..]);
         let mut loaded_index = result.unwrap();
 
         // 验证元数据
@@ -1374,7 +1438,7 @@ mod tests {
                     while guard.len() <= bucket_id as usize {
                         guard.push(Vec::new());
                     }
-                    guard[bucket_id as usize] = data;
+                    guard[bucket_id as usize] = data.to_vec();
                     Ok(true)
                 })
                 .await;
@@ -1437,6 +1501,59 @@ mod tests {
             assert!(result.is_some());
             let ids = result.unwrap();
             assert!(ids.contains(&i));
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_batch_insert_chaos() {
+        let index = Arc::new(BTreeIndex::<u64, String>::new(
+            "chaos_index".to_string(),
+            Some(BTreeConfig {
+                bucket_overload_size: 256,
+                allow_duplicates: true,
+            }),
+        ));
+
+        let n_threads = 10;
+        let n_keys_per_thread = 100;
+        let barrier = Arc::new(Barrier::new(n_threads));
+        let mut handles = Vec::new();
+
+        for t in 0..n_threads {
+            let index = index.clone();
+            let b = barrier.clone();
+            handles.push(tokio::spawn(async move {
+                // 等待所有线程准备好
+                b.wait().await;
+
+                let base = t * n_keys_per_thread;
+                let items: Vec<_> = (0..n_keys_per_thread)
+                    .map(|i| ((base + i) as u64, format!("key_{}", base + i)))
+                    .collect();
+                // 多次调用 batch_insert，模拟混乱
+                for _ in 0..3 {
+                    let _ = index.batch_insert(items.clone(), now_ms());
+                }
+            }));
+        }
+
+        // 等待所有任务完成
+        futures::future::try_join_all(handles).await.unwrap();
+
+        // 检查所有数据都能被检索到
+        for t in 0..n_threads {
+            let base = t * n_keys_per_thread;
+            for i in 0..n_keys_per_thread {
+                let key = format!("key_{}", base + i);
+                let result = index.search_with(&key, |ids| Some(ids.clone()));
+                assert!(result.is_some(), "key {} not found", key);
+                assert!(
+                    result.unwrap().contains(&((base + i) as u64)),
+                    "id {} not found for key {}",
+                    base + i,
+                    key
+                );
+            }
         }
     }
 

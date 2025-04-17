@@ -1,8 +1,6 @@
 use anda_db_btree::RangeQuery;
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
-use crate::schema::{Fv, Xid, bf16};
+use crate::schema::{Fv, bf16};
 
 /// A query for searching the database
 #[derive(Debug, Clone, Default)]

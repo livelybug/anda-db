@@ -1,6 +1,6 @@
-use anda_db_btree::{BTreeConfig, BTreeError, BTreeIndex, RangeQuery};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
+use std::io::{Read, Write};
+
+use anda_db_btree::{BTreeConfig, BTreeIndex, RangeQuery};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -51,44 +51,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // persist the index to files
     {
-        let file = tokio::fs::File::create("debug/btree_demo_metadata.cbor")
-            .await?
-            .compat_write();
-        // Store the index metadata
-        index.store_metadata(file, 0).await?;
-
-        // Store the index data
+        let metadata = std::fs::File::create("debug/btree_demo/metadata.cbor")?;
         index
-            .store_dirty_buckets(async |id: u32, data: Vec<u8>| {
-                let mut file =
-                    tokio::fs::File::create(format!("debug/btree_demo_bucket_{id}.cbor"))
-                        .await
-                        .map_err(|err| BTreeError::Generic {
-                            name: index.name().to_string(),
-                            source: err.into(),
-                        })?;
-                file.write_all(&data)
-                    .await
-                    .map_err(|err| BTreeError::Generic {
-                        name: index.name().to_string(),
-                        source: err.into(),
-                    })?;
-                file.flush().await.map_err(|err| BTreeError::Generic {
-                    name: index.name().to_string(),
-                    source: err.into(),
-                })?;
+            .store_all(metadata, now_ms, async |id, data| {
+                let mut bucket =
+                    std::fs::File::create(format!("debug/btree_demo/bucket_{id}.cbor"))?;
+                bucket.write_all(data)?;
                 Ok(true)
             })
             .await?;
     }
 
     // Load the index from metadata
-    let mut index2 = BTreeIndex::<String, u64>::load_metadata(
-        tokio::fs::File::open("debug/btree_demo_metadata.cbor")
-            .await?
-            .compat(),
-    )
-    .await?;
+    let mut index2 = BTreeIndex::<String, u64>::load_metadata(std::fs::File::open(
+        "debug/btree_demo/metadata.cbor",
+    )?)?;
 
     assert_eq!(index2.name(), "my_index");
     assert_eq!(index2.len(), 0);
@@ -96,19 +73,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load the index data
     index2
         .load_buckets(async |id: u32| {
-            let mut file = tokio::fs::File::open(format!("debug/btree_demo_bucket_{id}.cbor"))
-                .await
-                .map_err(|err| BTreeError::Generic {
-                    name: index.name().to_string(),
-                    source: err.into(),
-                })?;
+            let mut file = std::fs::File::open(format!("debug/btree_demo/bucket_{id}.cbor"))?;
             let mut data = Vec::new();
-            file.read_to_end(&mut data)
-                .await
-                .map_err(|err| BTreeError::Generic {
-                    name: index.name().to_string(),
-                    source: err.into(),
-                })?;
+            file.read_to_end(&mut data)?;
             Ok(data)
         })
         .await?;

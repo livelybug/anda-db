@@ -2,7 +2,7 @@
 name = "anda_db_btree"
 description = "A B-tree index library in Rust."
 repository = "https://github.com/ldclabs/anda_db/tree/main/rs/anda_db_btree"
-version = "0.1.0"
+version = "0.2.0"
 publish = true
 edition.workspace = true
 keywords.workspace = true
@@ -20,7 +20,6 @@ parking_lot = { workspace = true }
 [dev-dependencies]
 const-hex = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
-tokio-util = { workspace = true, features = ["compat"] }
 
 [[example]]
 name = "btree_demo"

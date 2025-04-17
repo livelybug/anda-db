@@ -464,14 +464,9 @@ impl Storage {
         &self,
         doc_path: &str,
         data: Bytes,
-        version: Option<ObjectVersion>,
+        mode: PutMode,
     ) -> Result<ObjectVersion, DBError> {
         let path = self.inner.base_path.child(doc_path);
-        let mode = if let Some(version) = version {
-            PutMode::Update(version.into())
-        } else {
-            PutMode::Overwrite
-        };
         self.inner.put(path, data, mode).await
     }
 
