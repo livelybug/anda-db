@@ -1,7 +1,6 @@
-use anda_db_derive::FieldTyped;
 use serde::{Deserialize, Serialize};
 
-use super::FieldType;
+use crate::{FieldType, FieldTyped};
 
 /// Represents a resource for AI Agents.
 /// It can be a file, a URL, or any other type of resource.
@@ -46,7 +45,7 @@ pub struct Resource {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::Ft;
+    use crate::Ft;
 
     #[test]
     fn test_field_type() {

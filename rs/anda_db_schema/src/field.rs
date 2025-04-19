@@ -10,7 +10,7 @@
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{collections::BTreeMap, fmt};
 
-use super::{BoxError, SchemaError};
+use super::{BoxError, SchemaError, validate_field_name};
 
 /// Re-export bf16 from half crate
 pub use half::bf16;
@@ -198,7 +198,7 @@ impl FieldType {
 /// Field value definitions for Anda DB
 ///
 /// Corresponds to the various field types, storing actual data values
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq)]
 pub enum FieldValue {
     /// Unsigned 64-bit integer value
     U64(u64),
@@ -211,7 +211,6 @@ pub enum FieldValue {
     /// 16-bit floating point type implementing the bfloat16 format.
     Bf16(bf16),
     /// Binary data value
-    #[serde(with = "serde_bytes")]
     Bytes(Vec<u8>),
     /// UTF-8 encoded text value
     Text(String),
@@ -974,41 +973,6 @@ impl FieldEntry {
     }
 }
 
-/// Validate a field name
-///
-/// Field names must:
-/// - Not be empty
-/// - Not exceed 64 characters
-/// - Contain only lowercase letters, numbers, and underscores
-///
-/// # Arguments
-/// * `s` - The field name to validate
-///
-/// # Returns
-/// * `Result<(), SchemaError>` - Ok if valid, or an error message if invalid
-pub fn validate_field_name(s: &str) -> Result<(), SchemaError> {
-    if s.is_empty() {
-        return Err(SchemaError::FieldName("empty string".to_string()));
-    }
-
-    if s.len() > 64 {
-        return Err(SchemaError::FieldName(format!(
-            "string length {} exceeds the limit 64",
-            s.len()
-        )));
-    }
-
-    for c in s.chars() {
-        if !matches!(c, 'a'..='z' | '0'..='9' | '_' ) {
-            return Err(SchemaError::FieldName(format!(
-                "Invalid character {:?} in {:?}",
-                c, s
-            )));
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1408,10 +1372,12 @@ mod tests {
         // 测试 FieldType 序列化和反序列化
         let field_type = Ft::Array(vec![Ft::U64, Ft::Text]);
         let serialized = serde_json::to_string(&field_type).unwrap();
+        println!("Serialized FieldType: {}", serialized);
         let deserialized: Ft = serde_json::from_str(&serialized).unwrap();
         assert_eq!(field_type, deserialized);
         let mut serialized = Vec::new();
         into_writer(&field_type, &mut serialized).unwrap();
+        println!("Serialized FieldType: {:?}", const_hex::encode(&serialized));
         let deserialized: Ft = from_reader(&serialized[..]).unwrap();
         assert_eq!(field_type, deserialized);
 
@@ -1419,6 +1385,19 @@ mod tests {
         let field_value = Fv::Array(vec![Fv::U64(1), Fv::Text("hello".to_string())]);
         let mut serialized = Vec::new();
         into_writer(&field_value, &mut serialized).unwrap();
+        println!(
+            "Serialized FieldValue: {:?}",
+            const_hex::encode(&serialized)
+        );
+        assert_eq!(const_hex::encode(&serialized), "82016568656c6c6f");
+        let deserialized: Fv = from_reader(&serialized[..]).unwrap();
+        assert_eq!(field_value, deserialized);
+
+        let field_value = Fv::Bytes(vec![1, 2, 3, 4]);
+        let mut serialized = Vec::new();
+        into_writer(&field_value, &mut serialized).unwrap();
+        println!("Serialized bytes: {:?}", const_hex::encode(&serialized));
+        assert_eq!(const_hex::encode(&serialized), "4401020304");
         let deserialized: Fv = from_reader(&serialized[..]).unwrap();
         assert_eq!(field_value, deserialized);
 
@@ -1436,6 +1415,8 @@ mod tests {
         let xid = Xid([1u8; 12]);
         let mut data = Vec::new();
         into_writer(&xid, &mut data).unwrap();
+        println!("Serialized Xid: {:?}", const_hex::encode(&data));
+        assert_eq!(const_hex::encode(&data), "4c010101010101010101010101");
         let cb: Cbor = from_reader(&data[..]).unwrap();
         let fv: FieldValue = FieldValue::try_from(cb).unwrap();
         let deserialized_xid: Xid = fv.deserialized().unwrap();

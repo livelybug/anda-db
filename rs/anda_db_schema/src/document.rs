@@ -423,7 +423,7 @@ impl Serialize for Document {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::{Fe, Ft, Fv};
+    use crate::{Fe, Ft, Fv};
     use serde::{Deserialize, Serialize};
     use std::{collections::BTreeMap, str::FromStr};
 

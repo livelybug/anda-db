@@ -19,6 +19,7 @@ license = "MIT"
 [workspace.dependencies]
 async-trait = "0.1"
 bytes = "1"
+base64 = "0.22"
 const-hex = "1.14"
 croaring = "2.3"
 futures = { version = "0.3" }

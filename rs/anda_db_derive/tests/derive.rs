@@ -1,5 +1,5 @@
-use anda_db::schema::{FieldType, Xid};
 use anda_db_derive::FieldTyped;
+use anda_db_schema::{FieldType, Xid};
 use half::bf16;
 use serde::{Deserialize, Serialize};
 use serde_bytes::{ByteArray, ByteBuf};

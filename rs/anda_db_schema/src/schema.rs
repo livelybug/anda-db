@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{FieldEntry, FieldType, IndexedFieldValues, Resource, SchemaError, Segment};
+use crate::{FieldEntry, FieldType, IndexedFieldValues, Resource, SchemaError, Segment};
 
 /// Schema represents Anda DB document schema definition.
 /// It contains a collection of fields and their indexes.
@@ -287,7 +287,7 @@ impl Eq for Schema {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::{Fe, Ft, Fv};
+    use crate::{Fe, Ft, Fv};
 
     #[test]
     fn test_schema_builder() {

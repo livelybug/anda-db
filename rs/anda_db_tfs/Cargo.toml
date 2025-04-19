@@ -12,7 +12,6 @@ license.workspace = true
 [dependencies]
 ciborium = { workspace = true }
 dashmap = { workspace = true, features = ["serde"] }
-futures = { workspace = true }
 serde = { workspace = true }
 tantivy-tokenizer-api = { workspace = true }
 tantivy = { workspace = true, optional = true }
@@ -23,7 +22,6 @@ parking_lot = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
-tokio-util = { workspace = true, features = ["compat"] }
 structured-logger = { workspace = true }
 tantivy = { workspace = true }
 tantivy-jieba = { workspace = true }

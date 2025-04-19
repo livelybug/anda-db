@@ -16,7 +16,7 @@ mod field_typed;
 ///
 /// ```rust
 /// use anda_db_derive::FieldTyped;
-/// use anda_db::schema::{FieldType, Xid};
+/// use anda_db_schema::{FieldType, Xid};
 ///
 /// #[derive(FieldTyped)]
 /// struct User {

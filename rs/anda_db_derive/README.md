@@ -12,8 +12,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-anda_db = "0.1.0"
-anda_db_derive = "0.1.0"
+anda_db_schema = "0.2"
 ```
 
 ## Usage
@@ -47,8 +46,7 @@ The `FieldTyped` derive macro analyzes struct fields and their types, mapping th
 #### Example
 
 ```rust
-use anda_db::schema::{FieldType, Xid};
-use anda_db_derive::FieldTyped;
+use anda_db_schema::{FieldTyped, FieldType, Xid};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 

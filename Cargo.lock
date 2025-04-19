@@ -55,8 +55,8 @@ name = "anda_db"
 version = "0.1.0"
 dependencies = [
  "anda_db_btree",
- "anda_db_derive",
  "anda_db_hnsw",
+ "anda_db_schema",
  "anda_db_tfs",
  "async-compression",
  "async-trait",
@@ -102,9 +102,9 @@ dependencies = [
 
 [[package]]
 name = "anda_db_derive"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
- "anda_db",
+ "anda_db_schema",
  "half",
  "proc-macro2",
  "quote",
@@ -134,13 +134,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "anda_db_schema"
+version = "0.1.0"
+dependencies = [
+ "anda_db_derive",
+ "base64",
+ "ciborium",
+ "const-hex",
+ "half",
+ "ic_auth_types",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "anda_db_tfs"
 version = "0.4.0"
 dependencies = [
  "ciborium",
  "criterion",
  "dashmap",
- "futures",
  "parking_lot",
  "rayon",
  "serde",
@@ -150,7 +165,6 @@ dependencies = [
  "tantivy-tokenizer-api",
  "thiserror 1.0.69",
  "tokio",
- "tokio-util",
 ]
 
 [[package]]

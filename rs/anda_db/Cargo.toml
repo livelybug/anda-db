@@ -10,7 +10,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-anda_db_derive = { path = "../anda_db_derive" }
+anda_db_schema = { path = "../anda_db_schema" }
 anda_db_btree = { path = "../anda_db_btree" }
 anda_db_hnsw = { path = "../anda_db_hnsw" }
 anda_db_tfs = { path = "../anda_db_tfs" }
