@@ -10,7 +10,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-anda_db_derive = { path = "../anda_db_derive" }
+anda_db_derive = { path = "../anda_db_derive", version = "0.1" }
 base64 = { workspace = true }
 ciborium = { workspace = true }
 half = { workspace = true }

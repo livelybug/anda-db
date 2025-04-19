@@ -10,10 +10,10 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-anda_db_schema = { path = "../anda_db_schema" }
-anda_db_btree = { path = "../anda_db_btree" }
-anda_db_hnsw = { path = "../anda_db_hnsw" }
-anda_db_tfs = { path = "../anda_db_tfs" }
+anda_db_schema = { path = "../anda_db_schema", version = "0.1" }
+anda_db_btree = { path = "../anda_db_btree", version = "0.2" }
+anda_db_hnsw = { path = "../anda_db_hnsw", version = "0.4" }
+anda_db_tfs = { path = "../anda_db_tfs", version = "0.4" }
 async-trait = { workspace = true }
 bytes = { workspace = true }
 ciborium = { workspace = true }
