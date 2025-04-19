@@ -1,6 +1,6 @@
 use anda_db_tfs::{BM25Index, jieba_tokenizer};
 use serde::{Deserialize, Serialize};
-use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
+use std::io::{Read, Write};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Document {
@@ -31,14 +31,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     ];
 
-    let rs = index.insert_batch(
-        docs.iter()
-            .into_iter()
-            .map(|doc| (doc.id, doc.text.clone()))
-            .collect(),
-        0,
-    );
-    assert_eq!(rs.len(), 3);
+    for doc in &docs {
+        index.insert(doc.id, &doc.text, 0).unwrap();
+    }
+
+    assert_eq!(index.len(), 3);
 
     // 搜索
     let results = index.search("rust memory", 2);
@@ -57,14 +54,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 保存和加载
     {
-        let file = tokio::fs::File::create("tfs_demo.cbor")
-            .await?
-            .compat_write();
-        index.store_all(file, 0).await?;
+        let metadata = std::fs::File::create("debug/tfs_demo/metadata.cbor")?;
+        index
+            .store_all(
+                metadata,
+                0,
+                async |id, data| {
+                    let mut node = std::fs::File::create(format!("debug/tfs_demo/seg_{id}.cbor"))?;
+                    node.write_all(data)?;
+                    Ok(true)
+                },
+                async |id, data| {
+                    let mut node =
+                        std::fs::File::create(format!("debug/tfs_demo/posting_{id}.cbor"))?;
+                    node.write_all(data)?;
+                    Ok(true)
+                },
+            )
+            .await?;
     }
 
-    let file = tokio::fs::File::open("tfs_demo.cbor").await?.compat();
-    let loaded_index = BM25Index::load(file, jieba_tokenizer()).await?;
+    let metadata = std::fs::File::open("debug/hnsw_demo/metadata.cbor")?;
+    let loaded_index = BM25Index::load_all(
+        jieba_tokenizer(),
+        metadata,
+        async |id| {
+            let mut node = std::fs::File::open(format!("debug/tfs_demo/seg_{id}.cbor"))?;
+            let mut buf = Vec::new();
+            node.read_to_end(&mut buf)?;
+            Ok(buf)
+        },
+        async |id| {
+            let mut node = std::fs::File::open(format!("debug/tfs_demo/posting_{id}.cbor"))?;
+            let mut buf = Vec::new();
+            node.read_to_end(&mut buf)?;
+            Ok(buf)
+        },
+    )
+    .await?;
     println!("Loaded index with {} documents", loaded_index.len());
 
     Ok(())

@@ -55,13 +55,48 @@ for (seg_id, score) in results {
 // Remove a segment
 index.remove(3, "The lazy dog sleeps all day", now_ms);
 
-// Store the index to a file
-let file = tokio::fs::File::create("index.cbor").await.unwrap().compat_write();
-index.store_all(file, now_ms).await.unwrap();
+// Store the index
+{
+    let metadata = std::fs::File::create("tfs_demo/metadata.cbor")?;
+    index
+        .store_all(
+            metadata,
+            0,
+            async |id, data| {
+                let mut node = std::fs::File::create(format!("tfs_demo/seg_{id}.cbor"))?;
+                node.write_all(data)?;
+                Ok(true)
+            },
+            async |id, data| {
+                let mut node =
+                    std::fs::File::create(format!("tfs_demo/posting_{id}.cbor"))?;
+                node.write_all(data)?;
+                Ok(true)
+            },
+        )
+        .await?;
+}
 
 // Load the index from a file
-let file = tokio::fs::File::open("index.cbor").await.unwrap().compat();
-let loaded_index = BM25Index::load(file, SimpleTokenizer::default()).await.unwrap();
+let metadata = std::fs::File::open("debug/hnsw_demo/metadata.cbor")?;
+let loaded_index = BM25Index::load_all(
+    jieba_tokenizer(),
+    metadata,
+    async |id| {
+        let mut node = std::fs::File::open(format!("tfs_demo/seg_{id}.cbor"))?;
+        let mut buf = Vec::new();
+        node.read_to_end(&mut buf)?;
+        Ok(buf)
+    },
+    async |id| {
+        let mut node = std::fs::File::open(format!("tfs_demo/posting_{id}.cbor"))?;
+        let mut buf = Vec::new();
+        node.read_to_end(&mut buf)?;
+        Ok(buf)
+    },
+)
+.await?;
+println!("Loaded index with {} documents", loaded_index.len());
 ```
 
 ## Chinese Text Support
@@ -101,24 +136,6 @@ let tokenizer = TokenizerChain::builder(SimpleTokenizer::default())
 let index = BM25Index::new(index_name, tokenizer, Some(params));
 ```
 
-### Batch Segment Processing
-
-```rust
-use anda_db_tfs::{BM25Index, default_tokenizer};
-
-let index = BM25Index::new("my_index".to_string(), default_tokenizer(), None);
-
-// Prepare multiple segments
-let docs = vec![
-    (1, "Segment one content".to_string()),
-    (2, "Segment two content".to_string()),
-    (3, "Segment three content".to_string()),
-];
-
-// Add segments in batch
-let results = index.insert(docs, now_ms);
-```
-
 ## API Documentation
 
 👉 https://docs.rs/anda_db_tfs
@@ -142,8 +159,9 @@ Default values: `k1 = 1.2, b = 0.75`
 
 The library uses a custom error type `BM25Error` for various error conditions:
 
-- `BM25Error::Db`: Database-related errors.
-- `BM25Error::Cbor`: Serialization/deserialization errors.
+- `BM25Error::Generic`: Index-related errors.
+- `BM25Error::Serialization`: CBOR serialization/deserialization errors.
+- `BM25Error::NotFound`: Error when a token is not found.
 - `BM25Error::AlreadyExists`: When trying to add a segment with an ID that already exists.
 - `BM25Error::TokenizeFailed`: When tokenization produces no tokens for a segment.
 

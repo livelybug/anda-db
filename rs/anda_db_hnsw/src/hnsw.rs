@@ -148,6 +148,7 @@ pub fn serialize_node(node: &HnswNode) -> Vec<u8> {
     ciborium::into_writer(node, &mut buf).expect("Failed to serialize node");
     buf
 }
+
 /// Index metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HnswMetadata {
@@ -334,7 +335,8 @@ impl HnswIndex {
         F: AsyncFnMut(u64) -> Result<Vec<u8>, BoxError>,
     {
         // TODO: concurrent loading
-        for id in self.ids.read().iter() {
+        let ids = self.ids.read().clone();
+        for id in ids.iter() {
             let node = f(id).await.map_err(|err| HnswError::Generic {
                 name: self.name.clone(),
                 source: err,
@@ -517,8 +519,10 @@ impl HnswIndex {
             }
         }
 
+        #[allow(clippy::type_complexity)]
         let mut multi_distance_cache: HashMap<(u64, u64), f32> = HashMap::new(); // For select_neighbors heuristic
         // 存储邻居节点需要添加的反向连接信息: neighbor_id -> [(layer, (new_node_id, dist))]
+        #[allow(clippy::type_complexity)]
         let mut neighbor_updates_required: BTreeMap<u64, Vec<(u8, (u64, bf16))>> = BTreeMap::new();
 
         // Build connections
@@ -622,6 +626,7 @@ impl HnswIndex {
             // 获取邻居节点的可变引用（锁定对应分片）
             if let Some(mut neighbor_node) = self.nodes.get_mut(&neighbor_id) {
                 // 1. 添加反向连接
+                #[allow(clippy::type_complexity)]
                 let mut to_truncate: Vec<(u8, SmallVec<[(u64, bf16); 64]>)> = Vec::new();
                 for (update_layer, connection) in updates {
                     if let Some(n_layer_list) =
@@ -707,7 +712,8 @@ impl HnswIndex {
         self.insert(id, vector.into_iter().map(bf16::from_f32).collect(), now_ms)
     }
 
-    /// Removes a vector from the index
+    /// Removes a vector from the index.
+    /// It will not remove the node data from the persistent storage. You need to do it manually.
     ///
     /// # Arguments
     ///

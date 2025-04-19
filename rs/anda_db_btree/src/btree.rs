@@ -273,7 +273,7 @@ where
         F: AsyncFnMut(u32) -> Result<Vec<u8>, BoxError>,
     {
         let mut index = Self::load_metadata(metadata)?;
-        index.load_buckets(f).await?;
+        index.load_postings(f).await?;
         Ok(index)
     }
 
@@ -297,8 +297,8 @@ where
 
         // Extract configuration values
         let bucket_overload_size = index.metadata.config.bucket_overload_size;
-        let search_count = AtomicU64::new(index.metadata.stats.search_count);
         let max_bucket_id = AtomicU32::new(index.metadata.stats.max_bucket_id);
+        let search_count = AtomicU64::new(index.metadata.stats.search_count);
         Ok(BTreeIndex {
             name: index.metadata.name.clone(),
             config: index.metadata.config.clone(),
@@ -326,7 +326,7 @@ where
     /// # Returns
     ///
     /// * `Result<(), BTreeError>` - Success or error
-    pub async fn load_buckets<F>(&mut self, mut f: F) -> Result<(), BTreeError>
+    pub async fn load_postings<F>(&mut self, mut f: F) -> Result<(), BTreeError>
     where
         F: AsyncFnMut(u32) -> Result<Vec<u8>, BoxError>,
     {
@@ -404,32 +404,32 @@ where
         let mut is_new = false;
         let mut size_increase = 0;
         match self.postings.entry(field_value.clone()) {
-                dashmap::Entry::Occupied(mut entry) => {
-                    // Check if duplicate keys are allowed
-                    if !self.config.allow_duplicates {
-                        return Err(BTreeError::AlreadyExists {
-                            name: self.name.clone(),
-                            id: format!("{:?}", doc_id),
-                            value: format!("{:?}", field_value),
-                        });
-                    }
+            dashmap::Entry::Occupied(mut entry) => {
+                // Check if duplicate keys are allowed
+                if !self.config.allow_duplicates {
+                    return Err(BTreeError::AlreadyExists {
+                        name: self.name.clone(),
+                        id: format!("{:?}", doc_id),
+                        value: format!("{:?}", field_value),
+                    });
+                }
 
-                    let posting = entry.get_mut();
-                    // Add segment_id if it doesn't exist
-                    if !posting.2.contains(&doc_id) {
-                        size_increase = CountingWriter::count_cbor(&doc_id) as u32 + 2;
-                        posting.2.push(doc_id);
-                        posting.1 += 1; // increment version
-                    }
+                let posting = entry.get_mut();
+                // Add segment_id if it doesn't exist
+                if !posting.2.contains(&doc_id) {
+                    size_increase = CountingWriter::count_cbor(&doc_id) as u32 + 2;
+                    posting.2.push(doc_id);
+                    posting.1 += 1; // increment version
                 }
-                dashmap::Entry::Vacant(entry) => {
-                    // Create a new posting for this field value
-                    let posting = (bucket, 1, vec![doc_id]);
-                    size_increase = CountingWriter::count_cbor(&posting) as u32 + 2;
-                    entry.insert(posting);
-                    is_new = true;
-                }
-            };
+            }
+            dashmap::Entry::Vacant(entry) => {
+                // Create a new posting for this field value
+                let posting = (bucket, 1, vec![doc_id]);
+                size_increase = CountingWriter::count_cbor(&posting) as u32 + 2;
+                entry.insert(posting);
+                is_new = true;
+            }
+        };
 
         if is_new {
             // Add the field value to the B-tree for range queries
@@ -472,7 +472,7 @@ where
                 // The freed space can still accommodate small growth in other field values
                 if let Some(pos) = b.2.iter().position(|k| &field_value == k) {
                     b.0 = b.0.saturating_sub(size_decrease);
-                    b.1 = true;
+                    // b.1 = true; // do not need to set dirty
                     b.2.swap_remove(pos);
                 }
             }
@@ -653,7 +653,7 @@ where
                 if let Some(mut ob) = self.buckets.get_mut(&old_bucket_id) {
                     if let Some(pos) = ob.2.iter().position(|k| &field_value == k) {
                         ob.0 = ob.0.saturating_sub(size);
-                        ob.1 = true;
+                        // ob.1 = true; // do not need to set dirty
                         ob.2.swap_remove(pos);
                     }
                 }
@@ -938,7 +938,7 @@ where
         F: AsyncFnMut(u32, &[u8]) -> Result<bool, BoxError>,
     {
         self.store_metadata(metadata, now_ms)?;
-        self.store_dirty_buckets(f).await?;
+        self.store_dirty_postings(f).await?;
         Ok(())
     }
 
@@ -946,7 +946,7 @@ where
     ///
     /// # Arguments
     ///
-    /// * `w` - Any type implementing the [`futures::io::AsyncWrite`] trait
+    /// * `w` - Any type implementing the [`Write`] trait
     /// * `now_ms` - Current timestamp in milliseconds
     ///
     /// # Returns
@@ -975,7 +975,7 @@ where
         Ok(())
     }
 
-    /// Stores dirty buckets to persistent storage using the provided async function
+    /// Stores dirty postings to persistent storage using the provided async function
     ///
     /// This method iterates through all buckets and persists those that have been modified
     /// since the last save operation.
@@ -988,7 +988,7 @@ where
     /// # Returns
     ///
     /// * `Result<(), BTreeError>` - Success or error
-    pub async fn store_dirty_buckets<F>(&self, mut f: F) -> Result<(), BTreeError>
+    pub async fn store_dirty_postings<F>(&self, mut f: F) -> Result<(), BTreeError>
     where
         F: AsyncFnMut(u32, &[u8]) -> Result<bool, BoxError>,
     {
@@ -1433,7 +1433,7 @@ mod tests {
         {
             let bucket_data_clone = bucket_data.clone();
             let result = index
-                .store_dirty_buckets(async |bucket_id, data| {
+                .store_dirty_postings(async |bucket_id, data| {
                     let mut guard = bucket_data_clone.lock().await;
                     while guard.len() <= bucket_id as usize {
                         guard.push(Vec::new());
@@ -1449,7 +1449,7 @@ mod tests {
         {
             let bucket_data_clone = bucket_data.clone();
             let result = loaded_index
-                .load_buckets(async |bucket_id| {
+                .load_postings(async |bucket_id| {
                     let guard = bucket_data_clone.lock().await;
                     if bucket_id as usize >= guard.len() {
                         return Err(BTreeError::Generic {

@@ -74,12 +74,8 @@ impl BTree {
         let btree = match *field.r#type() {
             Ft::U64 => BTree::U64(InnerBTree::new(name, field, config, storage, now_ms).await?),
             Ft::I64 => BTree::I64(InnerBTree::new(name, field, config, storage, now_ms).await?),
-            Ft::Text => {
-                BTree::String(InnerBTree::new(name, field, config, storage, now_ms).await?)
-            }
-            Ft::Bytes => {
-                BTree::Bytes(InnerBTree::new(name, field, config, storage, now_ms).await?)
-            }
+            Ft::Text => BTree::String(InnerBTree::new(name, field, config, storage, now_ms).await?),
+            Ft::Bytes => BTree::Bytes(InnerBTree::new(name, field, config, storage, now_ms).await?),
             _ => {
                 return Err(DBError::Index {
                     name,
@@ -179,17 +175,15 @@ impl BTree {
                 .btree
                 .insert(doc_id.clone(), val.clone(), now_ms)
                 .map_err(DBError::from),
-            _ => {
-                Err(DBError::Index {
-                    name: self.name().to_string(),
-                    source: format!(
-                        "BTree: field value type mismatch: expected {:?}, found {:?}",
-                        self.field_name(),
-                        field_value
-                    )
-                    .into(),
-                })
-            }
+            _ => Err(DBError::Index {
+                name: self.name().to_string(),
+                source: format!(
+                    "BTree: field value type mismatch: expected {:?}, found {:?}",
+                    self.field_name(),
+                    field_value
+                )
+                .into(),
+            }),
         }
     }
 
@@ -350,7 +344,7 @@ where
             })?;
 
         btree
-            .load_buckets(async |id: u32| {
+            .load_postings(async |id: u32| {
                 let path = BTree::bucket_path(&name, id);
                 let (data, _) = storage.fetch_raw(&path).await?;
                 Ok(data.into())
@@ -373,7 +367,7 @@ where
             .put_bytes(&path, data.into(), PutMode::Overwrite)
             .await?;
         self.btree
-            .store_dirty_buckets(async |id, data| {
+            .store_dirty_postings(async |id, data| {
                 let path = BTree::bucket_path(&self.name, id);
                 let _ = self
                     .storage

@@ -14,10 +14,10 @@ ciborium = { workspace = true }
 dashmap = { workspace = true, features = ["serde"] }
 futures = { workspace = true }
 serde = { workspace = true }
-rayon = { workspace = true }
 tantivy-tokenizer-api = { workspace = true }
 tantivy = { workspace = true, optional = true }
 tantivy-jieba = { workspace = true, optional = true }
+rayon = { workspace = true, optional = true }
 thiserror = { workspace = true }
 parking_lot = { workspace = true }
 
@@ -27,11 +27,13 @@ tokio-util = { workspace = true, features = ["compat"] }
 structured-logger = { workspace = true }
 tantivy = { workspace = true }
 tantivy-jieba = { workspace = true }
+rayon = { workspace = true }
 criterion = { workspace = true }
 
 [features]
 default = []
-full = ["tantivy", "tantivy-jieba"]
+full = ["tantivy", "tantivy-jieba", "parallel"]
+parallel = ["dep:rayon"]
 tantivy = ["dep:tantivy"]
 tantivy-jieba = ["dep:tantivy-jieba", "dep:tantivy"]
 
