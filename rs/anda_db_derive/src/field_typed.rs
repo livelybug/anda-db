@@ -138,9 +138,9 @@ fn parse_field_type_str(type_str: &str) -> proc_macro2::TokenStream {
         "I64" => quote! { FieldType::I64 },
         "F64" => quote! { FieldType::F64 },
         "F32" => quote! { FieldType::F32 },
-        "Bf16" => quote! { FieldType::Bf16 },
         "Bool" => quote! { FieldType::Bool },
         "Json" => quote! { FieldType::Json },
+        "Vector" => quote! { FieldType::Vector },
 
         // 复合类型 - 支持 Array 和 Option
         s if s.starts_with("Array<") && s.ends_with(">") => {
@@ -183,6 +183,8 @@ fn determine_field_type(ty: &Type) -> Result<proc_macro2::TokenStream, String> {
                         if let Some(GenericArgument::Type(inner_type)) = args.args.first() {
                             if is_u8_type(inner_type) {
                                 return Ok(quote! { FieldType::Bytes });
+                            } else if is_bf16_type(inner_type) {
+                                return Ok(quote! { FieldType::Vector });
                             } else {
                                 let inner_field_type = determine_field_type(inner_type)?;
                                 return Ok(quote! { FieldType::Array(vec![#inner_field_type]) });
@@ -199,7 +201,6 @@ fn determine_field_type(ty: &Type) -> Result<proc_macro2::TokenStream, String> {
                 "u8" | "u16" | "u32" | "u64" | "usize" => Ok(quote! { FieldType::U64 }),
                 "f32" => Ok(quote! { FieldType::F32 }),
                 "f64" => Ok(quote! { FieldType::F64 }),
-                "bf16" => Ok(quote! { FieldType::Bf16 }),
                 "Bytes" | "ByteArray" | "ByteBuf" => Ok(quote! { FieldType::Bytes }),
                 "HashMap" | "BTreeMap" => {
                     // 处理 HashMap 和 BTreeMap 类型
@@ -259,6 +260,7 @@ fn determine_field_type(ty: &Type) -> Result<proc_macro2::TokenStream, String> {
             }
         }
         Type::Array(array) if is_u8_type(&array.elem) => Ok(quote! { FieldType::Bytes }),
+        Type::Array(array) if is_bf16_type(&array.elem) => Ok(quote! { FieldType::Vector }),
         Type::Array(array) => {
             let inner_type = determine_field_type(&array.elem)?;
             Ok(quote! { FieldType::Array(vec![#inner_type]) })
@@ -282,6 +284,15 @@ fn is_string_type(ty: &Type) -> bool {
     if let Type::Path(type_path) = ty {
         if let Some(segment) = type_path.path.segments.first() {
             return segment.ident == "String" || segment.ident == "str";
+        }
+    }
+    false
+}
+
+fn is_bf16_type(ty: &Type) -> bool {
+    if let Type::Path(type_path) = ty {
+        if let Some(segment) = type_path.path.segments.first() {
+            return segment.ident == "bf16";
         }
     }
     false

@@ -63,14 +63,30 @@ pub struct BM25Index<T: Tokenizer + Clone> {
     search_count: AtomicU64,
 }
 
-/// configuration parameters for the BM25 ranking algorithm
+/// Parameters for the BM25 ranking algorithm
 ///
 /// - `k1`: Controls term frequency saturation. Higher values give more weight to term frequency.
 /// - `b`: Controls segment length normalization. 0.0 means no normalization, 1.0 means full normalization.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BM25Config {
+pub struct BM25Params {
     pub k1: f32,
     pub b: f32,
+}
+
+impl Default for BM25Params {
+    /// Returns default BM25 parameters (k1=1.2, b=0.75) which work well for most use cases
+    fn default() -> Self {
+        BM25Params { k1: 1.2, b: 0.75 }
+    }
+}
+
+/// Configuration parameters for the BM25 index
+///
+/// - `bm25`: BM25 algorithm parameters
+/// - `bucket_overload_size`: Maximum size of a bucket before creating a new one (in bytes)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BM25Config {
+    pub bm25: BM25Params,
     /// Maximum size of a bucket before creating a new one (in bytes)
     pub bucket_overload_size: u32,
 }
@@ -79,8 +95,7 @@ impl Default for BM25Config {
     /// Returns default BM25 parameters (k1=1.2, b=0.75) which work well for most use cases
     fn default() -> Self {
         BM25Config {
-            k1: 1.2,
-            b: 0.75,
+            bm25: BM25Params::default(),
             bucket_overload_size: 1024 * 512,
         }
     }
@@ -648,8 +663,9 @@ where
     /// # Returns
     ///
     /// A vector of (segment_id, score) pairs, sorted by descending score
-    pub fn search(&self, query: &str, top_k: usize) -> Vec<(u64, f32)> {
-        let scored_docs = self.score_term(query.trim());
+    pub fn search(&self, query: &str, top_k: usize, params: Option<BM25Params>) -> Vec<(u64, f32)> {
+        let params = params.as_ref().unwrap_or(&self.config.bm25);
+        let scored_docs = self.score_term(query.trim(), params);
 
         self.search_count.fetch_add(1, Ordering::Relaxed);
         let mut sorted_scores: Vec<(u64, f32)> = scored_docs.into_iter().collect();
@@ -670,9 +686,15 @@ where
     /// # Returns
     ///
     /// A vector of (segment_id, score) pairs, sorted by descending score
-    pub fn search_advanced(&self, query: &str, top_k: usize) -> Vec<(u64, f32)> {
+    pub fn search_advanced(
+        &self,
+        query: &str,
+        top_k: usize,
+        params: Option<BM25Params>,
+    ) -> Vec<(u64, f32)> {
         let query_expr = QueryType::parse(query);
-        let scored_docs = self.execute_query(&query_expr);
+        let params = params.as_ref().unwrap_or(&self.config.bm25);
+        let scored_docs = self.execute_query(&query_expr, params);
 
         self.search_count.fetch_add(1, Ordering::Relaxed);
         // Convert to vector and sort by score (descending)
@@ -684,17 +706,17 @@ where
     }
 
     /// Execute a query expression, returning a mapping of segment IDs to scores
-    fn execute_query(&self, query: &QueryType) -> HashMap<u64, f32> {
+    fn execute_query(&self, query: &QueryType, params: &BM25Params) -> HashMap<u64, f32> {
         match query {
-            QueryType::Term(term) => self.score_term(term),
-            QueryType::And(subqueries) => self.score_and(subqueries),
-            QueryType::Or(subqueries) => self.score_or(subqueries),
-            QueryType::Not(subquery) => self.score_not(subquery),
+            QueryType::Term(term) => self.score_term(term, params),
+            QueryType::And(subqueries) => self.score_and(subqueries, params),
+            QueryType::Or(subqueries) => self.score_or(subqueries, params),
+            QueryType::Not(subquery) => self.score_not(subquery, params),
         }
     }
 
     /// Scores a single term
-    fn score_term(&self, term: &str) -> HashMap<u64, f32> {
+    fn score_term(&self, term: &str, params: &BM25Params) -> HashMap<u64, f32> {
         if self.postings.is_empty() {
             return HashMap::new();
         }
@@ -723,11 +745,10 @@ where
                             .get(doc_id)
                             .map(|v| *v as f32)
                             .unwrap_or(0.0);
-                        let tf_component = (*tf as f32 * (self.config.k1 + 1.0))
+                        let tf_component = (*tf as f32 * (params.k1 + 1.0))
                             / (*tf as f32
-                                + self.config.k1
-                                    * (1.0 - self.config.b
-                                        + self.config.b * tokens / avg_seg_tokens));
+                                + params.k1
+                                    * (1.0 - params.b + params.b * tokens / avg_seg_tokens));
 
                         let score = idf * tf_component;
                         term_scores.insert(*doc_id, score);
@@ -748,7 +769,7 @@ where
     }
 
     /// Scores an OR query
-    fn score_or(&self, subqueries: &[Box<QueryType>]) -> HashMap<u64, f32> {
+    fn score_or(&self, subqueries: &[Box<QueryType>], params: &BM25Params) -> HashMap<u64, f32> {
         let mut result = HashMap::new();
         if subqueries.is_empty() {
             return result;
@@ -756,7 +777,7 @@ where
 
         // Execute all subqueries and merge results
         for subquery in subqueries {
-            let sub_result = self.execute_query(subquery);
+            let sub_result = self.execute_query(subquery, params);
 
             for (doc_id, score) in sub_result {
                 *result.entry(doc_id).or_insert(0.0) += score;
@@ -767,20 +788,20 @@ where
     }
 
     /// Scores an AND query
-    fn score_and(&self, subqueries: &[Box<QueryType>]) -> HashMap<u64, f32> {
+    fn score_and(&self, subqueries: &[Box<QueryType>], params: &BM25Params) -> HashMap<u64, f32> {
         if subqueries.is_empty() {
             return HashMap::new();
         }
 
         // Execute the first subquery
-        let mut result = self.execute_query(&subqueries[0]);
+        let mut result = self.execute_query(&subqueries[0], params);
         if result.is_empty() {
             return HashMap::new();
         }
 
         // Execute the remaining subqueries and intersect the results
         for subquery in &subqueries[1..] {
-            let sub_result = self.execute_query(subquery);
+            let sub_result = self.execute_query(subquery, params);
             if matches!(subquery.as_ref(), QueryType::Not(_)) {
                 // handle NOT query, remove it from the result
                 for doc_id in sub_result.keys() {
@@ -805,8 +826,8 @@ where
     }
 
     /// Scores a NOT query
-    fn score_not(&self, subquery: &QueryType) -> HashMap<u64, f32> {
-        self.execute_query(subquery)
+    fn score_not(&self, subquery: &QueryType, params: &BM25Params) -> HashMap<u64, f32> {
+        self.execute_query(subquery, params)
     }
 
     /// Stores the index metadata, IDs and nodes to persistent storage.
@@ -1100,7 +1121,7 @@ mod tests {
         let index = create_test_index();
 
         // 测试基本搜索功能
-        let results = index.search("fox", 10);
+        let results = index.search("fox", 10, None);
         assert_eq!(results.len(), 3); // 应该找到3个包含"fox"的文档
 
         // 检查结果排序 - 文档1和2应该排在前面，因为它们都包含"fox"
@@ -1109,19 +1130,19 @@ mod tests {
         assert!(results.iter().any(|(id, _)| *id == 4));
 
         // 测试多词搜索
-        let results = index.search("quick fox dog", 10);
+        let results = index.search("quick fox dog", 10, None);
         assert!(results[0].0 == 1); // 文档1应该排在最前面，因为它同时包含"quick", "fox", "dog"
 
         // 测试top_k限制
-        let results = index.search("dog", 2);
+        let results = index.search("dog", 2, None);
         assert_eq!(results.len(), 2); // 应该只返回2个结果，尽管有3个文档包含"dog"
 
         // 测试空查询
-        let results = index.search("", 10);
+        let results = index.search("", 10, None);
         assert_eq!(results.len(), 0);
 
         // 测试无匹配查询
-        let results = index.search("elephant giraffe", 10);
+        let results = index.search("elephant giraffe", 10, None);
         assert_eq!(results.len(), 0);
     }
 
@@ -1134,7 +1155,7 @@ mod tests {
         assert!(index.is_empty());
 
         // 测试空索引的搜索
-        let results = index.search("test", 10);
+        let results = index.search("test", 10, None);
         assert_eq!(results.len(), 0);
     }
 
@@ -1179,8 +1200,8 @@ mod tests {
         assert_eq!(loaded_index.len(), index.len());
 
         // 验证搜索结果
-        let mut original_results = index.search("fox", 10);
-        let mut loaded_results = loaded_index.search("fox", 10);
+        let mut original_results = index.search("fox", 10, None);
+        let mut loaded_results = loaded_index.search("fox", 10, None);
 
         assert_eq!(original_results.len(), loaded_results.len());
         original_results.sort_by(|a, b| a.0.cmp(&b.0));
@@ -1194,39 +1215,12 @@ mod tests {
 
     #[test]
     fn test_bm25_params() {
-        let tokenizer = default_tokenizer();
-
         // 使用默认参数
         let default_index = create_test_index();
 
-        // 使用自定义参数
-        let custom_index = BM25Index::new(
-            "anda_db_tfs_bm25".to_string(),
-            tokenizer,
-            Some(BM25Config {
-                k1: 1.5,
-                b: 0.75,
-                ..Default::default()
-            }),
-        );
-
-        // 添加相同的文档
-        custom_index
-            .insert(1, "The quick brown fox jumps over the lazy dog", 0)
-            .unwrap();
-        custom_index
-            .insert(2, "A fast brown fox runs past the lazy dog", 0)
-            .unwrap();
-        custom_index
-            .insert(3, "The lazy dog sleeps all day", 0)
-            .unwrap();
-        custom_index
-            .insert(4, "Quick brown foxes are rare in the wild", 0)
-            .unwrap();
-
         // 搜索相同的查询
-        let default_results = default_index.search("fox", 10);
-        let custom_results = custom_index.search("fox", 10);
+        let default_results = default_index.search("fox", 10, None);
+        let custom_results = default_index.search("fox", 10, Some(BM25Params { k1: 1.5, b: 0.75 }));
 
         // 验证结果数量相同但分数不同
         assert_eq!(default_results.len(), custom_results.len());
@@ -1247,42 +1241,42 @@ mod tests {
         let index = create_test_index();
 
         // 测试简单的 Term 查询
-        let results = index.search_advanced("fox", 10);
+        let results = index.search_advanced("fox", 10, None);
         assert_eq!(results.len(), 3); // 应该找到3个包含"fox"的文档
 
         // 测试 AND 查询
-        let results = index.search_advanced("fox AND lazy", 10);
+        let results = index.search_advanced("fox AND lazy", 10, None);
         assert_eq!(results.len(), 2); // 文档1和2同时包含"fox"和"lazy"
         assert!(results.iter().any(|(id, _)| *id == 1));
         assert!(results.iter().any(|(id, _)| *id == 2));
 
         // 测试 OR 查询
-        let results = index.search_advanced("quick OR fast", 10);
+        let results = index.search_advanced("quick OR fast", 10, None);
         assert_eq!(results.len(), 3); // 文档1包含"quick"，文档2包含"fast"，文档4包含"quick"
         assert!(results.iter().any(|(id, _)| *id == 1));
         assert!(results.iter().any(|(id, _)| *id == 2));
         assert!(results.iter().any(|(id, _)| *id == 4));
 
         // 测试 NOT 查询
-        let results = index.search_advanced("dog AND NOT lazy", 10);
+        let results = index.search_advanced("dog AND NOT lazy", 10, None);
         assert_eq!(results.len(), 0); // 所有包含"dog"的文档也包含"lazy"
 
         // 测试复杂的嵌套查询
-        let results = index.search_advanced("(quick OR fast) AND fox", 10);
+        let results = index.search_advanced("(quick OR fast) AND fox", 10, None);
         assert_eq!(results.len(), 3); // 文档1、2和4
 
         // 测试更复杂的嵌套查询
-        let results = index.search_advanced("(brown AND fox) AND NOT (rare OR sleeps)", 10);
+        let results = index.search_advanced("(brown AND fox) AND NOT (rare OR sleeps)", 10, None);
         assert_eq!(results.len(), 2); // 文档1和2，排除了包含"rare"的文档4和包含"sleeps"的文档3
         assert!(results.iter().any(|(id, _)| *id == 1));
         assert!(results.iter().any(|(id, _)| *id == 2));
 
         // 测试空查询
-        let results = index.search_advanced("", 10);
+        let results = index.search_advanced("", 10, None);
         assert_eq!(results.len(), 0);
 
         // 测试无匹配查询
-        let results = index.search_advanced("elephant AND giraffe", 10);
+        let results = index.search_advanced("elephant AND giraffe", 10, None);
         assert_eq!(results.len(), 0);
     }
 
@@ -1291,22 +1285,25 @@ mod tests {
         let index = create_test_index();
 
         // 测试带括号的复杂查询
-        let results = index.search_advanced("(fox AND quick) OR (dog AND sleeps)", 10);
+        let results = index.search_advanced("(fox AND quick) OR (dog AND sleeps)", 10, None);
         assert_eq!(results.len(), 3); // 文档1, 3, 4
         assert!(results.iter().any(|(id, _)| *id == 1));
         assert!(results.iter().any(|(id, _)| *id == 3));
         assert!(results.iter().any(|(id, _)| *id == 4));
 
         // 测试多层嵌套括号
-        let results =
-            index.search_advanced("((brown AND fox) OR (lazy AND sleeps)) AND NOT rare", 10);
+        let results = index.search_advanced(
+            "((brown AND fox) OR (lazy AND sleeps)) AND NOT rare",
+            10,
+            None,
+        );
         assert_eq!(results.len(), 3); // 文档1、2和3，排除了包含"rare"的文档4
         assert!(results.iter().any(|(id, _)| *id == 1));
         assert!(results.iter().any(|(id, _)| *id == 2));
         assert!(results.iter().any(|(id, _)| *id == 3));
 
         // 测试带括号的 NOT 查询
-        let results = index.search_advanced("dog AND NOT (quick OR fast)", 10);
+        let results = index.search_advanced("dog AND NOT (quick OR fast)", 10, None);
         assert_eq!(results.len(), 1); // 只有文档3，因为它包含"dog"但不包含"quick"或"fast"
         assert_eq!(results[0].0, 3);
     }
@@ -1316,14 +1313,14 @@ mod tests {
         let index = create_test_index();
 
         // 测试分数排序 - 包含更多匹配词的文档应该排在前面
-        let results = index.search_advanced("quick OR fox OR dog", 10);
+        let results = index.search_advanced("quick OR fox OR dog", 10, None);
         assert!(results.len() >= 3);
 
         // 文档1应该排在最前面，因为它同时包含所有三个词
         assert_eq!(results[0].0, 1);
 
         // 测试 top_k 限制
-        let results = index.search_advanced("dog", 2);
+        let results = index.search_advanced("dog", 2, None);
         assert_eq!(results.len(), 2); // 应该只返回2个结果，尽管有3个文档包含"dog"
     }
 
@@ -1332,8 +1329,8 @@ mod tests {
         let index = create_test_index();
 
         // 对于简单查询，search 和 search_advanced 应该返回相似的结果
-        let simple_results = index.search("fox", 10);
-        let advanced_results = index.search_advanced("fox", 10);
+        let simple_results = index.search("fox", 10, None);
+        let advanced_results = index.search_advanced("fox", 10, None);
 
         assert_eq!(simple_results.len(), advanced_results.len());
 
@@ -1347,8 +1344,8 @@ mod tests {
         }
 
         // 测试多词查询 - search 将它们视为 OR，search_advanced 也应该如此
-        let simple_results = index.search("quick fox", 10);
-        let advanced_results = index.search_advanced("quick OR fox", 10);
+        let simple_results = index.search("quick fox", 10, None);
+        let advanced_results = index.search_advanced("quick OR fox", 10, None);
 
         // 检查文档ID是否匹配
         let simple_ids: Vec<u64> = simple_results.iter().map(|(id, _)| *id).collect();

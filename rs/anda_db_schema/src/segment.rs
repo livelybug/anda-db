@@ -1,7 +1,7 @@
 use half::bf16;
 use serde::{Deserialize, Serialize};
 
-use crate::{FieldType, FieldTyped};
+use crate::{FieldType, FieldTyped, Fv};
 
 /// Segment represents a unit consisting of a piece of text and an optional embedding vector.
 /// It is the basic unit for both Full-Text Search and Vector Search.
@@ -66,5 +66,32 @@ impl Segment {
     pub fn set_vec(&mut self, vec: Vec<bf16>) -> &mut Self {
         self.vec = Some(vec);
         self
+    }
+
+    pub fn fv_exact_id(fv: &Fv) -> Option<&u64> {
+        if let Fv::Map(m) = fv {
+            if let Some(id) = m.get("i") {
+                return id.try_into().ok();
+            }
+        }
+        None
+    }
+
+    pub fn fv_exact_text(fv: &Fv) -> Option<&str> {
+        if let Fv::Map(m) = fv {
+            if let Some(t) = m.get("t") {
+                return t.try_into().ok();
+            }
+        }
+        None
+    }
+
+    pub fn fv_exact_vec(fv: &Fv) -> Option<&Vec<bf16>> {
+        if let Fv::Map(m) = fv {
+            if let Some(v) = m.get("v") {
+                return v.try_into().ok();
+            }
+        }
+        None
     }
 }

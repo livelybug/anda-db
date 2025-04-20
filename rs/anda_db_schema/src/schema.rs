@@ -15,9 +15,9 @@ pub struct Schema {
 
 impl Schema {
     /// The key name for the ID field
-    const ID_KEY: &str = "id"; // with idx 0
-    const SEGMENTS_KEY: &str = "segments";
-    const RESOURCE_KEY: &str = "resource";
+    pub const ID_KEY: &str = "id"; // with idx 0
+    pub const SEGMENTS_KEY: &str = "segments";
+    pub const RESOURCE_KEY: &str = "resource";
 
     /// Creates a new SchemaBuilder instance.
     ///

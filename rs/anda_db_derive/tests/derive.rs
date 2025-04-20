@@ -12,7 +12,7 @@ struct User {
     tags: HashMap<String, String>,               // 会被正确映射为 Map
     properties: BTreeMap<String, Vec<u8>>,       // 会被正确映射为 Map 包含 Bytes
     optional_data: Option<HashMap<String, f64>>, // 会被正确映射为 Option<Map>
-    vector1: Vec<bf16>,                          // 会被正确映射为 Vec<Bf16>
+    vector1: Vec<bf16>,                          // 会被正确映射为 Vector
 
     #[serde(rename = "b1")]
     blob1: ByteArray<64>, // 会被正确映射为 Bytes
@@ -59,10 +59,7 @@ fn field_typed_derive_works() {
                         [("*".to_string(), FieldType::F64)]
                     ))))
                 ),
-                (
-                    "vector1".to_string(),
-                    FieldType::Array(vec![FieldType::Bf16])
-                ),
+                ("vector1".to_string(), FieldType::Vector),
                 ("b1".to_string(), FieldType::Bytes),
                 ("blob2".to_string(), FieldType::Bytes),
             ]

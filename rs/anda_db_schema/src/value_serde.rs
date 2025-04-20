@@ -11,11 +11,11 @@ impl Serialize for FieldValue {
     #[inline]
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self {
-            FieldValue::U64(x) => serializer.serialize_u64(*x),
+            FieldValue::Bool(x) => serializer.serialize_bool(*x),
             FieldValue::I64(x) => serializer.serialize_i64(*x),
+            FieldValue::U64(x) => serializer.serialize_u64(*x),
             FieldValue::F64(x) => serializer.serialize_f64(*x),
             FieldValue::F32(x) => serializer.serialize_f32(*x),
-            FieldValue::Bf16(x) => serializer.serialize_u16(x.to_bits()),
             FieldValue::Bytes(x) => {
                 if serializer.is_human_readable() {
                     BASE64_URL_SAFE.encode(x).serialize(serializer)
@@ -24,9 +24,15 @@ impl Serialize for FieldValue {
                 }
             }
             FieldValue::Text(x) => serializer.serialize_str(x),
-            FieldValue::Bool(x) => serializer.serialize_bool(*x),
-            FieldValue::Null => serializer.serialize_unit(),
             FieldValue::Json(x) => x.serialize(serializer),
+            FieldValue::Null => serializer.serialize_unit(),
+            FieldValue::Vector(x) => {
+                let mut seq = serializer.serialize_seq(Some(x.len()))?;
+                for v in x {
+                    seq.serialize_element(&v.to_bits())?;
+                }
+                seq.end()
+            }
             FieldValue::Array(x) => {
                 let mut seq = serializer.serialize_seq(Some(x.len()))?;
                 for v in x {
@@ -52,13 +58,10 @@ impl<'de> de::Deserialize<'de> for FieldValue {
         let val = deserializer.deserialize_any(Visitor)?;
 
         if is_human_readable {
-            match &val {
-                FieldValue::Text(x) => {
-                    if let Ok(decoded) = BASE64_URL_SAFE.decode(x) {
-                        return Ok(FieldValue::Bytes(decoded));
-                    }
+            if let FieldValue::Text(x) = &val {
+                if let Ok(decoded) = BASE64_URL_SAFE.decode(x) {
+                    return Ok(FieldValue::Bytes(decoded));
                 }
-                _ => {}
             }
         }
         Ok(val)
@@ -133,7 +136,7 @@ impl<'de> de::Visitor<'de> for Visitor {
 
     #[inline]
     fn visit_u64<E: de::Error>(self, v: u64) -> Result<Self::Value, E> {
-        Ok(FieldValue::U64(v.into()))
+        Ok(FieldValue::U64(v))
     }
 
     #[inline]

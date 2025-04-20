@@ -153,10 +153,10 @@ impl AndaDB {
         &self,
         schema: Schema,
         config: CollectionConfig,
-        f: F,
+        mut f: F,
     ) -> Result<Arc<Collection>, DBError>
     where
-        F: AsyncFn(&mut Collection) -> Result<(), BoxError>,
+        F: AsyncFnMut(&mut Collection) -> Result<(), BoxError>,
     {
         let mut collections = self.collections.write();
         if collections.contains_key(&config.name) {
@@ -191,10 +191,10 @@ impl AndaDB {
         &self,
         schema: Schema,
         config: CollectionConfig,
-        f: F,
+        mut f: F,
     ) -> Result<Arc<Collection>, DBError>
     where
-        F: AsyncFn(&mut Collection) -> Result<(), BoxError>,
+        F: AsyncFnMut(&mut Collection) -> Result<(), BoxError>,
     {
         {
             if let Some(collection) = self.collections.read().get(&config.name) {
@@ -220,9 +220,13 @@ impl AndaDB {
         Ok(collection)
     }
 
-    pub async fn open_collection<F>(&self, name: String, f: F) -> Result<Arc<Collection>, DBError>
+    pub async fn open_collection<F>(
+        &self,
+        name: String,
+        mut f: F,
+    ) -> Result<Arc<Collection>, DBError>
     where
-        F: AsyncFn(&mut Collection) -> Result<(), BoxError>,
+        F: AsyncFnMut(&mut Collection) -> Result<(), BoxError>,
     {
         {
             if let Some(collection) = self.collections.read().get(&name) {

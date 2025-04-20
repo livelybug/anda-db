@@ -39,25 +39,25 @@ pub type IndexedFieldValues = BTreeMap<usize, FieldValue>;
 /// and composite types (Array, Map, Option)
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub enum FieldType {
-    /// Unsigned 64-bit integer
-    U64,
+    /// Boolean value
+    Bool,
     /// Signed 64-bit integer
     I64,
+    /// Unsigned 64-bit integer
+    U64,
     /// 64-bit floating point number
     F64,
     /// 32-bit floating point number
     F32,
-    /// 16-bit floating point type implementing the bfloat16 format.
-    /// Detail: https://docs.rs/half/latest/half/struct.bf16.html
-    Bf16,
     /// Binary data
     Bytes,
     /// UTF-8 encoded text
     Text,
-    /// Boolean value
-    Bool,
     /// JSON value
     Json,
+    /// Vec<bf16>, bf16: 16-bit floating point type implementing the bfloat16 format.
+    /// Detail: https://docs.rs/half/latest/half/struct.bf16.html
+    Vector,
     /// Array of field types
     Array(Vec<FieldType>),
     /// Map with string keys and field type values
@@ -70,15 +70,15 @@ impl fmt::Debug for FieldType {
     /// Debug formatting for FieldType
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            FieldType::U64 => write!(f, "U64"),
+            FieldType::Bool => write!(f, "Bool"),
             FieldType::I64 => write!(f, "I64"),
+            FieldType::U64 => write!(f, "U64"),
             FieldType::F64 => write!(f, "F64"),
             FieldType::F32 => write!(f, "F32"),
-            FieldType::Bf16 => write!(f, "Bf16"),
             FieldType::Bytes => write!(f, "Bytes"),
             FieldType::Text => write!(f, "Text"),
-            FieldType::Bool => write!(f, "Bool"),
             FieldType::Json => write!(f, "Json"),
+            FieldType::Vector => write!(f, "Vector"),
             FieldType::Array(v) => write!(f, "Array({:?})", v),
             FieldType::Map(v) => write!(f, "Map({:?})", v),
             FieldType::Option(v) => write!(f, "Option({:?})", v),
@@ -96,15 +96,15 @@ impl FieldType {
     /// * `Result<FieldValue, SchemaError>` - The extracted field value or an error message
     pub fn extract(&self, value: Cbor) -> Result<FieldValue, SchemaError> {
         match &self {
-            FieldType::U64 => FieldValue::u64_from(value),
+            FieldType::Bool => FieldValue::bool_from(value),
             FieldType::I64 => FieldValue::i64_from(value),
+            FieldType::U64 => FieldValue::u64_from(value),
             FieldType::F64 => FieldValue::f64_from(value),
             FieldType::F32 => FieldValue::f32_from(value),
-            FieldType::Bf16 => FieldValue::bf16_from(value),
             FieldType::Bytes => FieldValue::bytes_from(value),
             FieldType::Text => FieldValue::text_from(value),
-            FieldType::Bool => FieldValue::bool_from(value),
             FieldType::Json => FieldValue::json_from(value),
+            FieldType::Vector => FieldValue::vector_from(value),
             FieldType::Array(types) => FieldValue::array_from(value, types),
             FieldType::Map(types) => FieldValue::map_from(value, types),
             FieldType::Option(ft) => {
@@ -125,14 +125,15 @@ impl FieldType {
     /// * `Result<(), SchemaError>` - Ok if valid, or an error message if invalid
     pub fn validate(&self, value: &FieldValue) -> Result<(), SchemaError> {
         match (self, value) {
-            (FieldType::U64, FieldValue::U64(_)) => Ok(()),
+            (FieldType::Bool, FieldValue::Bool(_)) => Ok(()),
             (FieldType::I64, FieldValue::I64(_)) => Ok(()),
+            (FieldType::U64, FieldValue::U64(_)) => Ok(()),
             (FieldType::F64, FieldValue::F64(_)) => Ok(()),
             (FieldType::F32, FieldValue::F32(_)) => Ok(()),
-            (FieldType::Bf16, FieldValue::Bf16(_)) => Ok(()),
             (FieldType::Bytes, FieldValue::Bytes(_)) => Ok(()),
             (FieldType::Text, FieldValue::Text(_)) => Ok(()),
-            (FieldType::Bool, FieldValue::Bool(_)) => Ok(()),
+            (FieldType::Json, FieldValue::Json(_)) => Ok(()),
+            (FieldType::Vector, FieldValue::Vector(_)) => Ok(()),
             (FieldType::Array(types), FieldValue::Array(values)) => match types.len() {
                 0 => Ok(()),
                 1 => {
@@ -180,7 +181,6 @@ impl FieldType {
                 }
                 Ok(())
             }
-            (FieldType::Json, FieldValue::Json(_)) => Ok(()),
             (FieldType::Option(ft), val) => {
                 if val == &FieldValue::Null {
                     return Ok(());
@@ -200,28 +200,29 @@ impl FieldType {
 /// Corresponds to the various field types, storing actual data values
 #[derive(Clone, PartialEq)]
 pub enum FieldValue {
-    /// Unsigned 64-bit integer value
-    U64(u64),
+    /// Boolean value
+    Bool(bool),
     /// Signed 64-bit integer value
     I64(i64),
+    /// Unsigned 64-bit integer value
+    U64(u64),
     /// 64-bit floating point value
     F64(f64),
     /// 32-bit floating point value
     F32(f32),
-    /// 16-bit floating point type implementing the bfloat16 format.
-    Bf16(bf16),
     /// Binary data value
     Bytes(Vec<u8>),
     /// UTF-8 encoded text value
     Text(String),
-    /// Boolean value
-    Bool(bool),
+    /// JSON value
+    Json(Json),
+    /// Vec<bf16>, bf16: 16-bit floating point type implementing the bfloat16 format.
+    /// Detail: https://docs.rs/half/latest/half/struct.bf16.html
+    Vector(Vec<bf16>),
     /// Array of field values
     Array(Vec<FieldValue>),
     /// Map with string keys and field values
     Map(BTreeMap<String, FieldValue>),
-    /// JSON value
-    Json(Json),
     /// Null value (for optional fields)
     Null,
 }
@@ -236,14 +237,20 @@ impl From<FieldValue> for Cbor {
     /// * `Cbor` - The converted CBOR value
     fn from(value: FieldValue) -> Self {
         match value {
-            FieldValue::U64(u) => Cbor::Integer(u.into()),
+            FieldValue::Bool(b) => Cbor::Bool(b),
             FieldValue::I64(i) => Cbor::Integer(i.into()),
+            FieldValue::U64(u) => Cbor::Integer(u.into()),
             FieldValue::F64(f) => Cbor::Float(f),
             FieldValue::F32(f) => Cbor::Float(f as f64),
-            FieldValue::Bf16(f) => Cbor::Integer(f.to_bits().into()),
             FieldValue::Bytes(b) => Cbor::Bytes(b),
             FieldValue::Text(t) => Cbor::Text(t),
-            FieldValue::Bool(b) => Cbor::Bool(b),
+            // JSON value can always be serialized to CBOR format!
+            FieldValue::Json(obj) => {
+                Cbor::serialized(&obj).expect("Failed to serialize JSON to CBOR")
+            }
+            FieldValue::Vector(arr) => {
+                Cbor::Array(arr.into_iter().map(|f| f.to_bits().into()).collect())
+            }
             FieldValue::Array(arr) => Cbor::Array(arr.into_iter().map(Cbor::from).collect()),
             FieldValue::Map(obj) => {
                 let obj = obj
@@ -252,33 +259,30 @@ impl From<FieldValue> for Cbor {
                     .collect();
                 Cbor::Map(obj)
             }
-            // JSON value can always be serialized to CBOR format!
-            FieldValue::Json(obj) => {
-                Cbor::serialized(&obj).expect("Failed to serialize JSON to CBOR")
-            }
+
             FieldValue::Null => Cbor::Null,
         }
     }
 }
 
-impl TryFrom<FieldValue> for u64 {
+impl TryFrom<FieldValue> for bool {
     type Error = BoxError;
 
     fn try_from(value: FieldValue) -> Result<Self, Self::Error> {
         match value {
-            FieldValue::U64(v) => Ok(v),
-            _ => Err(SchemaError::FieldValue(format!("expected U64, got {value:?}")).into()),
+            FieldValue::Bool(v) => Ok(v),
+            _ => Err(SchemaError::FieldValue(format!("expected Bool, got {value:?}")).into()),
         }
     }
 }
 
-impl<'a> TryFrom<&'a FieldValue> for &'a u64 {
+impl<'a> TryFrom<&'a FieldValue> for bool {
     type Error = BoxError;
 
     fn try_from(value: &'a FieldValue) -> Result<Self, Self::Error> {
         match value {
-            FieldValue::U64(v) => Ok(v),
-            _ => Err(SchemaError::FieldValue(format!("expected U64, got {value:?}")).into()),
+            FieldValue::Bool(v) => Ok(*v),
+            _ => Err(SchemaError::FieldValue(format!("expected Bool, got {value:?}")).into()),
         }
     }
 }
@@ -289,6 +293,17 @@ impl TryFrom<FieldValue> for i64 {
     fn try_from(value: FieldValue) -> Result<Self, Self::Error> {
         match value {
             FieldValue::I64(v) => Ok(v),
+            _ => Err(SchemaError::FieldValue(format!("expected I64, got {value:?}")).into()),
+        }
+    }
+}
+
+impl<'a> TryFrom<&'a FieldValue> for i64 {
+    type Error = BoxError;
+
+    fn try_from(value: &'a FieldValue) -> Result<Self, Self::Error> {
+        match value {
+            FieldValue::I64(v) => Ok(*v),
             _ => Err(SchemaError::FieldValue(format!("expected I64, got {value:?}")).into()),
         }
     }
@@ -305,12 +320,56 @@ impl<'a> TryFrom<&'a FieldValue> for &'a i64 {
     }
 }
 
+impl TryFrom<FieldValue> for u64 {
+    type Error = BoxError;
+
+    fn try_from(value: FieldValue) -> Result<Self, Self::Error> {
+        match value {
+            FieldValue::U64(v) => Ok(v),
+            _ => Err(SchemaError::FieldValue(format!("expected U64, got {value:?}")).into()),
+        }
+    }
+}
+
+impl<'a> TryFrom<&'a FieldValue> for u64 {
+    type Error = BoxError;
+
+    fn try_from(value: &'a FieldValue) -> Result<Self, Self::Error> {
+        match value {
+            FieldValue::U64(v) => Ok(*v),
+            _ => Err(SchemaError::FieldValue(format!("expected U64, got {value:?}")).into()),
+        }
+    }
+}
+
+impl<'a> TryFrom<&'a FieldValue> for &'a u64 {
+    type Error = BoxError;
+
+    fn try_from(value: &'a FieldValue) -> Result<Self, Self::Error> {
+        match value {
+            FieldValue::U64(v) => Ok(v),
+            _ => Err(SchemaError::FieldValue(format!("expected U64, got {value:?}")).into()),
+        }
+    }
+}
+
 impl TryFrom<FieldValue> for f64 {
     type Error = BoxError;
 
     fn try_from(value: FieldValue) -> Result<Self, Self::Error> {
         match value {
             FieldValue::F64(v) => Ok(v),
+            _ => Err(SchemaError::FieldValue(format!("expected F64, got {value:?}")).into()),
+        }
+    }
+}
+
+impl<'a> TryFrom<&'a FieldValue> for f64 {
+    type Error = BoxError;
+
+    fn try_from(value: &'a FieldValue) -> Result<Self, Self::Error> {
+        match value {
+            FieldValue::F64(v) => Ok(*v),
             _ => Err(SchemaError::FieldValue(format!("expected F64, got {value:?}")).into()),
         }
     }
@@ -327,13 +386,13 @@ impl TryFrom<FieldValue> for f32 {
     }
 }
 
-impl TryFrom<FieldValue> for bf16 {
+impl<'a> TryFrom<&'a FieldValue> for f32 {
     type Error = BoxError;
 
-    fn try_from(value: FieldValue) -> Result<Self, Self::Error> {
+    fn try_from(value: &'a FieldValue) -> Result<Self, Self::Error> {
         match value {
-            FieldValue::Bf16(v) => Ok(v),
-            _ => Err(SchemaError::FieldValue(format!("expected Bf16, got {value:?}")).into()),
+            FieldValue::F32(v) => Ok(*v),
+            _ => Err(SchemaError::FieldValue(format!("expected F32, got {value:?}")).into()),
         }
     }
 }
@@ -382,13 +441,13 @@ impl<'a> TryFrom<&'a FieldValue> for &'a String {
     }
 }
 
-impl TryFrom<FieldValue> for bool {
+impl<'a> TryFrom<&'a FieldValue> for &'a str {
     type Error = BoxError;
 
-    fn try_from(value: FieldValue) -> Result<Self, Self::Error> {
+    fn try_from(value: &'a FieldValue) -> Result<Self, Self::Error> {
         match value {
-            FieldValue::Bool(v) => Ok(v),
-            _ => Err(SchemaError::FieldValue(format!("expected Bool, got {value:?}")).into()),
+            FieldValue::Text(v) => Ok(v),
+            _ => Err(SchemaError::FieldValue(format!("expected Text, got {value:?}")).into()),
         }
     }
 }
@@ -415,6 +474,28 @@ impl<'a> TryFrom<&'a FieldValue> for &'a Json {
     }
 }
 
+impl TryFrom<FieldValue> for Vec<bf16> {
+    type Error = BoxError;
+
+    fn try_from(value: FieldValue) -> Result<Self, Self::Error> {
+        match value {
+            FieldValue::Vector(v) => Ok(v),
+            _ => Err(SchemaError::FieldValue(format!("expected Vector, got {value:?}")).into()),
+        }
+    }
+}
+
+impl<'a> TryFrom<&'a FieldValue> for &'a Vec<bf16> {
+    type Error = BoxError;
+
+    fn try_from(value: &'a FieldValue) -> Result<Self, Self::Error> {
+        match value {
+            FieldValue::Vector(v) => Ok(v),
+            _ => Err(SchemaError::FieldValue(format!("expected Vector, got {value:?}")).into()),
+        }
+    }
+}
+
 impl<T> TryFrom<FieldValue> for Vec<T>
 where
     T: TryFrom<FieldValue, Error = BoxError>,
@@ -422,6 +503,26 @@ where
     type Error = BoxError;
 
     fn try_from(value: FieldValue) -> Result<Self, Self::Error> {
+        match value {
+            FieldValue::Array(arr) => {
+                let mut rt = Vec::with_capacity(arr.len());
+                for v in arr {
+                    rt.push(v.try_into()?);
+                }
+                Ok(rt)
+            }
+            _ => Err(SchemaError::FieldValue(format!("expected Array, got {value:?}")).into()),
+        }
+    }
+}
+
+impl<'a, T> TryFrom<&'a FieldValue> for Vec<&'a T>
+where
+    &'a T: TryFrom<&'a FieldValue, Error = BoxError>,
+{
+    type Error = BoxError;
+
+    fn try_from(value: &'a FieldValue) -> Result<Self, Self::Error> {
         match value {
             FieldValue::Array(arr) => {
                 let mut rt = Vec::with_capacity(arr.len());
@@ -455,42 +556,58 @@ where
     }
 }
 
+impl<'a, T> TryFrom<&'a FieldValue> for BTreeMap<&'a String, &'a T>
+where
+    &'a T: TryFrom<&'a FieldValue, Error = BoxError>,
+{
+    type Error = BoxError;
+
+    fn try_from(value: &'a FieldValue) -> Result<Self, Self::Error> {
+        match value {
+            FieldValue::Map(map) => {
+                let mut rt = BTreeMap::new();
+                for (k, v) in map {
+                    rt.insert(k, v.try_into()?);
+                }
+                Ok(rt)
+            }
+            _ => Err(SchemaError::FieldValue(format!("expected Map, got {value:?}")).into()),
+        }
+    }
+}
+
 impl fmt::Debug for FieldValue {
     /// Debug formatting for FieldValue
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            FieldValue::U64(v) => write!(f, "U64({})", v),
+            FieldValue::Bool(v) => write!(f, "Bool({})", v),
             FieldValue::I64(v) => write!(f, "I64({})", v),
+            FieldValue::U64(v) => write!(f, "U64({})", v),
             FieldValue::F64(v) => write!(f, "F64({})", v),
             FieldValue::F32(v) => write!(f, "F32({})", v),
-            FieldValue::Bf16(v) => write!(f, "Bf16({})", v),
             FieldValue::Bytes(v) => write!(f, "Bytes({:?})", v),
             FieldValue::Text(v) => write!(f, "Text({:?})", v),
-            FieldValue::Bool(v) => write!(f, "Bool({})", v),
+            FieldValue::Json(v) => write!(f, "Json({:?})", v),
+            FieldValue::Vector(v) => write!(f, "Vector({:?})", v),
             FieldValue::Array(v) => write!(f, "Array({:?})", v),
             FieldValue::Map(v) => write!(f, "Map({:?})", v),
-            FieldValue::Json(v) => write!(f, "Json({:?})", v),
             FieldValue::Null => write!(f, "Null"),
         }
     }
 }
 
 impl FieldValue {
-    /// Create a U64 FieldValue from a CBOR value
+    /// Create a Bool FieldValue from a CBOR value
     ///
     /// # Arguments
     /// * `value` - The CBOR value to convert
     ///
     /// # Returns
     /// * `Result<Self, SchemaError>` - The converted FieldValue or an error message
-    pub fn u64_from(value: Cbor) -> Result<Self, SchemaError> {
+    pub fn bool_from(value: Cbor) -> Result<Self, SchemaError> {
         match value {
-            Cbor::Integer(i) => {
-                Ok(FieldValue::U64(i.try_into().map_err(|v| {
-                    SchemaError::FieldValue(format!("expected U64, got {v:?}"))
-                })?))
-            }
-            v => Err(SchemaError::FieldValue(format!("expected U64, got {v:?}"))),
+            Cbor::Bool(b) => Ok(FieldValue::Bool(b)),
+            v => Err(SchemaError::FieldValue(format!("expected Bool, got {v:?}"))),
         }
     }
 
@@ -509,6 +626,24 @@ impl FieldValue {
                 })?))
             }
             v => Err(SchemaError::FieldValue(format!("expected I64, got {v:?}"))),
+        }
+    }
+
+    /// Create a U64 FieldValue from a CBOR value
+    ///
+    /// # Arguments
+    /// * `value` - The CBOR value to convert
+    ///
+    /// # Returns
+    /// * `Result<Self, SchemaError>` - The converted FieldValue or an error message
+    pub fn u64_from(value: Cbor) -> Result<Self, SchemaError> {
+        match value {
+            Cbor::Integer(i) => {
+                Ok(FieldValue::U64(i.try_into().map_err(|v| {
+                    SchemaError::FieldValue(format!("expected U64, got {v:?}"))
+                })?))
+            }
+            v => Err(SchemaError::FieldValue(format!("expected U64, got {v:?}"))),
         }
     }
 
@@ -537,23 +672,6 @@ impl FieldValue {
         match value {
             Cbor::Float(f) if !f.is_nan() => Ok(FieldValue::F32(f as f32)),
             v => Err(SchemaError::FieldValue(format!("expected F32, got {v:?}"))),
-        }
-    }
-
-    /// Create a Bf16 FieldValue from a CBOR value
-    ///
-    /// # Arguments
-    /// * `value` - The CBOR value to convert
-    ///
-    /// # Returns
-    /// * `Result<Self, SchemaError>` - The converted FieldValue or an error message
-    pub fn bf16_from(value: Cbor) -> Result<Self, SchemaError> {
-        match value {
-            Cbor::Integer(i) => Ok(FieldValue::Bf16(bf16::from_bits(
-                i.try_into()
-                    .map_err(|v| SchemaError::FieldValue(format!("expected I64, got {v:?}")))?,
-            ))),
-            v => Err(SchemaError::FieldValue(format!("expected Bf64, got {v:?}"))),
         }
     }
 
@@ -587,17 +705,55 @@ impl FieldValue {
         }
     }
 
-    /// Create a Bool FieldValue from a CBOR value
+    /// Create a Json FieldValue from a CBOR value
     ///
     /// # Arguments
     /// * `value` - The CBOR value to convert
     ///
     /// # Returns
     /// * `Result<Self, SchemaError>` - The converted FieldValue or an error message
-    pub fn bool_from(value: Cbor) -> Result<Self, SchemaError> {
+    pub fn json_from(value: Cbor) -> Result<Self, SchemaError> {
+        let val: Json = value
+            .deserialized()
+            .map_err(|v| SchemaError::FieldValue(format!("expected Json, got {v:?}")))?;
+        Ok(FieldValue::Json(val))
+    }
+
+    /// Create a Vector FieldValue from a CBOR value
+    ///
+    /// # Arguments
+    /// * `value` - The CBOR value to convert
+    ///
+    /// # Returns
+    /// * `Result<Self, SchemaError>` - The converted FieldValue or an error message
+    pub fn vector_from(value: Cbor) -> Result<Self, SchemaError> {
         match value {
-            Cbor::Bool(b) => Ok(FieldValue::Bool(b)),
-            v => Err(SchemaError::FieldValue(format!("expected Bool, got {v:?}"))),
+            Cbor::Array(arr) => Ok(FieldValue::Vector(
+                arr.into_iter()
+                    .map(Self::bf16_from)
+                    .collect::<Result<Vec<_>, _>>()?,
+            )),
+            v => Err(SchemaError::FieldValue(format!(
+                "expected Vector, got {v:?}"
+            ))),
+        }
+    }
+
+    /// Create a bf16 from a CBOR value
+    ///
+    /// # Arguments
+    /// * `value` - The CBOR value to convert
+    ///
+    /// # Returns
+    /// * `Result<Self, SchemaError>` - The converted FieldValue or an error message
+    pub fn bf16_from(value: Cbor) -> Result<bf16, SchemaError> {
+        match value {
+            Cbor::Integer(i) => {
+                Ok(bf16::from_bits(i.try_into().map_err(|v| {
+                    SchemaError::FieldValue(format!("expected u16, got {v:?}"))
+                })?))
+            }
+            v => Err(SchemaError::FieldValue(format!("expected bf64, got {v:?}"))),
         }
     }
 
@@ -708,20 +864,6 @@ impl FieldValue {
         }
     }
 
-    /// Create a Json FieldValue from a CBOR value
-    ///
-    /// # Arguments
-    /// * `value` - The CBOR value to convert
-    ///
-    /// # Returns
-    /// * `Result<Self, SchemaError>` - The converted FieldValue or an error message
-    pub fn json_from(value: Cbor) -> Result<Self, SchemaError> {
-        let val: Json = value
-            .deserialized()
-            .map_err(|v| SchemaError::FieldValue(format!("expected Json, got {v:?}")))?;
-        Ok(FieldValue::Json(val))
-    }
-
     /// Try to create a FieldValue from a CBOR value, inferring the type
     ///
     /// # Arguments
@@ -731,6 +873,7 @@ impl FieldValue {
     /// * `Result<Self, SchemaError>` - The converted FieldValue or an error message
     pub fn try_from(value: Cbor) -> Result<Self, SchemaError> {
         match value {
+            Cbor::Bool(_) => Self::bool_from(value),
             Cbor::Integer(i) => {
                 let z = ciborium::value::Integer::from(0);
                 if i >= z {
@@ -742,7 +885,6 @@ impl FieldValue {
             Cbor::Float(_) => Self::f64_from(value),
             Cbor::Bytes(_) => Self::bytes_from(value),
             Cbor::Text(_) => Self::text_from(value),
-            Cbor::Bool(_) => Self::bool_from(value),
             Cbor::Array(_) => Self::array_from(value, &[]),
             Cbor::Map(_) => Self::map_from(value, &BTreeMap::new()),
             Cbor::Null => Ok(FieldValue::Null),
@@ -982,15 +1124,15 @@ mod tests {
 
     #[test]
     fn test_field_type_debug() {
-        assert_eq!(format!("{:?}", FieldType::U64), "U64");
+        assert_eq!(format!("{:?}", FieldType::Bool), "Bool");
         assert_eq!(format!("{:?}", FieldType::I64), "I64");
+        assert_eq!(format!("{:?}", FieldType::U64), "U64");
         assert_eq!(format!("{:?}", FieldType::F64), "F64");
         assert_eq!(format!("{:?}", FieldType::F32), "F32");
-        assert_eq!(format!("{:?}", FieldType::Bf16), "Bf16");
         assert_eq!(format!("{:?}", FieldType::Bytes), "Bytes");
         assert_eq!(format!("{:?}", FieldType::Text), "Text");
-        assert_eq!(format!("{:?}", FieldType::Bool), "Bool");
         assert_eq!(format!("{:?}", FieldType::Json), "Json");
+        assert_eq!(format!("{:?}", FieldType::Vector), "Vector");
 
         let array_type = FieldType::Array(vec![FieldType::U64]);
         assert_eq!(format!("{:?}", array_type), "Array([U64])");
@@ -1006,14 +1148,11 @@ mod tests {
 
     #[test]
     fn test_field_value_debug() {
-        assert_eq!(format!("{:?}", FieldValue::U64(42)), "U64(42)");
+        assert_eq!(format!("{:?}", FieldValue::Bool(true)), "Bool(true)");
         assert_eq!(format!("{:?}", FieldValue::I64(-42)), "I64(-42)");
+        assert_eq!(format!("{:?}", FieldValue::U64(42)), "U64(42)");
         assert_eq!(format!("{:?}", FieldValue::F64(3.15)), "F64(3.15)");
         assert_eq!(format!("{:?}", FieldValue::F32(2.71)), "F32(2.71)");
-        assert_eq!(
-            format!("{:?}", FieldValue::Bf16(bf16::from_f32(1.5))),
-            "Bf16(1.5)"
-        );
         assert_eq!(
             format!("{:?}", FieldValue::Bytes(vec![1, 2, 3])),
             "Bytes([1, 2, 3])"
@@ -1022,7 +1161,17 @@ mod tests {
             format!("{:?}", FieldValue::Text("hello".to_string())),
             "Text(\"hello\")"
         );
-        assert_eq!(format!("{:?}", FieldValue::Bool(true)), "Bool(true)");
+
+        let json_val = FieldValue::Json(json!({"name": "test"}));
+        assert_eq!(
+            format!("{:?}", json_val),
+            "Json(Object {\"name\": String(\"test\")})"
+        );
+
+        assert_eq!(
+            format!("{:?}", FieldValue::Vector(vec![bf16::from_f32(1.5)])),
+            "Vector([1.5])"
+        );
 
         let array_val = FieldValue::Array(vec![FieldValue::U64(1), FieldValue::U64(2)]);
         assert_eq!(format!("{:?}", array_val), "Array([U64(1), U64(2)])");
@@ -1032,17 +1181,15 @@ mod tests {
         let map_val = FieldValue::Map(map);
         assert_eq!(format!("{:?}", map_val), "Map({\"key\": Text(\"value\")})");
 
-        let json_val = FieldValue::Json(json!({"name": "test"}));
-        assert_eq!(
-            format!("{:?}", json_val),
-            "Json(Object {\"name\": String(\"test\")})"
-        );
-
         assert_eq!(format!("{:?}", FieldValue::Null), "Null");
     }
 
     #[test]
     fn test_field_type_extract() {
+        // Bool
+        let bool_val = FieldType::Bool.extract(Cbor::Bool(true)).unwrap();
+        assert_eq!(bool_val, FieldValue::Bool(true));
+
         // U64
         let u64_val = FieldType::U64.extract(cbor!(42).unwrap()).unwrap();
         assert_eq!(u64_val, FieldValue::U64(42));
@@ -1059,11 +1206,6 @@ mod tests {
         let f32_val = FieldType::F32.extract(Cbor::Float(2.71)).unwrap();
         assert_eq!(f32_val, FieldValue::F32(2.71_f32));
 
-        // Bf16
-        let bf16_bits: u16 = bf16::from_f32(1.5).to_bits();
-        let bf16_val = FieldType::Bf16.extract(cbor!(bf16_bits).unwrap()).unwrap();
-        assert_eq!(bf16_val, FieldValue::Bf16(bf16::from_bits(bf16_bits)));
-
         // Bytes
         let bytes_val = FieldType::Bytes
             .extract(Cbor::Bytes(vec![1, 2, 3]))
@@ -1076,9 +1218,17 @@ mod tests {
             .unwrap();
         assert_eq!(text_val, FieldValue::Text("hello".to_string()));
 
-        // Bool
-        let bool_val = FieldType::Bool.extract(Cbor::Bool(true)).unwrap();
-        assert_eq!(bool_val, FieldValue::Bool(true));
+        // Vector
+        let vector_val = FieldType::Vector
+            .extract(Cbor::Array(vec![
+                Cbor::Integer(bf16::from_f32(1.1).to_bits().into()),
+                Cbor::Integer(bf16::from_f32(1.2).to_bits().into()),
+            ]))
+            .unwrap();
+        assert_eq!(
+            vector_val,
+            FieldValue::Vector(vec![bf16::from_f32(1.1), bf16::from_f32(1.2)])
+        );
 
         // Array with single type
         let array_type = FieldType::Array(vec![FieldType::U64]);
@@ -1136,6 +1286,10 @@ mod tests {
 
     #[test]
     fn test_field_type_validate() {
+        // Bool
+        assert!(FieldType::Bool.validate(&FieldValue::Bool(true)).is_ok());
+        assert!(FieldType::Bool.validate(&FieldValue::U64(1)).is_err());
+
         // U64
         assert!(FieldType::U64.validate(&FieldValue::U64(42)).is_ok());
         assert!(FieldType::U64.validate(&FieldValue::I64(42)).is_err());
@@ -1151,14 +1305,6 @@ mod tests {
         // F32
         assert!(FieldType::F32.validate(&FieldValue::F32(2.71)).is_ok());
         assert!(FieldType::F32.validate(&FieldValue::F64(2.71)).is_err());
-
-        // Bf16
-        assert!(
-            FieldType::Bf16
-                .validate(&FieldValue::Bf16(bf16::from_f32(1.5)))
-                .is_ok()
-        );
-        assert!(FieldType::Bf16.validate(&FieldValue::F32(1.5)).is_err());
 
         // Bytes
         assert!(
@@ -1184,9 +1330,29 @@ mod tests {
                 .is_err()
         );
 
-        // Bool
-        assert!(FieldType::Bool.validate(&FieldValue::Bool(true)).is_ok());
-        assert!(FieldType::Bool.validate(&FieldValue::U64(1)).is_err());
+        // Json
+        assert!(
+            FieldType::Json
+                .validate(&FieldValue::Json(json!({"key": "value"})))
+                .is_ok()
+        );
+        assert!(
+            FieldType::Json
+                .validate(&FieldValue::Text("json".to_string()))
+                .is_err()
+        );
+
+        // Vector
+        assert!(
+            FieldType::Vector
+                .validate(&FieldValue::Vector(vec![bf16::from_f32(1.5)]))
+                .is_ok()
+        );
+        assert!(
+            FieldType::Vector
+                .validate(&FieldValue::Array(vec![FieldValue::U64(1)]))
+                .is_err()
+        );
 
         // Array with single type
         let array_type = FieldType::Array(vec![FieldType::U64]);
@@ -1237,6 +1403,11 @@ mod tests {
 
     #[test]
     fn test_field_value_conversion() {
+        // Bool
+        let bool_val = FieldValue::Bool(true);
+        let cbor: Cbor = bool_val.clone().into();
+        assert_eq!(FieldValue::try_from(cbor).unwrap(), bool_val);
+
         // U64
         let u64_val = FieldValue::U64(42);
         let cbor: Cbor = u64_val.clone().into();
@@ -1262,16 +1433,6 @@ mod tests {
             panic!("Expected F64");
         }
 
-        // Bf16
-        let bf16_val = FieldValue::Bf16(bf16::from_f32(1.5));
-        let cbor: Cbor = bf16_val.clone().into();
-        // Bf16转换为CBOR后再转回来会变成U64
-        let bits = bf16::from_f32(1.5).to_bits();
-        assert_eq!(
-            FieldValue::try_from(cbor).unwrap(),
-            FieldValue::U64(bits as u64)
-        );
-
         // Bytes
         let bytes_val = FieldValue::Bytes(vec![1, 2, 3]);
         let cbor: Cbor = bytes_val.clone().into();
@@ -1282,10 +1443,24 @@ mod tests {
         let cbor: Cbor = text_val.clone().into();
         assert_eq!(FieldValue::try_from(cbor).unwrap(), text_val);
 
-        // Bool
-        let bool_val = FieldValue::Bool(true);
-        let cbor: Cbor = bool_val.clone().into();
-        assert_eq!(FieldValue::try_from(cbor).unwrap(), bool_val);
+        // Json
+        let json_val = FieldValue::Json(json!({"name": "test"}));
+        let cbor: Cbor = json_val.into();
+        // JSON转换为CBOR后再转回来会变成Map
+        let mut expected_map = BTreeMap::new();
+        expected_map.insert("name".to_string(), FieldValue::Text("test".to_string()));
+        assert_eq!(
+            FieldValue::try_from(cbor).unwrap(),
+            FieldValue::Map(expected_map)
+        );
+
+        // Vector
+        let vector_val = FieldValue::Vector(vec![bf16::from_f32(1.5)]);
+        let cbor: Cbor = vector_val.clone().into();
+        // Vector转换为CBOR后再转回来会变成Array
+        let expected_array =
+            FieldValue::Array(vec![FieldValue::U64(bf16::from_f32(1.5).to_bits() as u64)]);
+        assert_eq!(FieldValue::try_from(cbor).unwrap(), expected_array);
 
         // Array
         let array_val = FieldValue::Array(vec![FieldValue::U64(1), FieldValue::U64(2)]);
@@ -1298,17 +1473,6 @@ mod tests {
         let map_val = FieldValue::Map(map);
         let cbor: Cbor = map_val.clone().into();
         assert_eq!(FieldValue::try_from(cbor).unwrap(), map_val);
-
-        // Json
-        let json_val = FieldValue::Json(json!({"name": "test"}));
-        let cbor: Cbor = json_val.into();
-        // JSON转换为CBOR后再转回来会变成Map
-        let mut expected_map = BTreeMap::new();
-        expected_map.insert("name".to_string(), FieldValue::Text("test".to_string()));
-        assert_eq!(
-            FieldValue::try_from(cbor).unwrap(),
-            FieldValue::Map(expected_map)
-        );
 
         // Null
         let null_val = FieldValue::Null;
@@ -1440,18 +1604,12 @@ mod tests {
         assert_eq!(vv, vv2);
 
         // 提供了 Ft 后才能完全正确的序列化
-        let fv = Fv::serialized(&vv, Some(&Ft::Array(vec![Ft::Array(vec![Ft::Bf16])]))).unwrap();
+        let fv = Fv::serialized(&vv, Some(&Ft::Array(vec![Ft::Vector]))).unwrap();
         assert_eq!(
             fv,
             Fv::Array(vec![
-                Fv::Array(vec![
-                    Fv::Bf16(bf16::from_f32(1.0)),
-                    Fv::Bf16(bf16::from_f32(1.1))
-                ]),
-                Fv::Array(vec![
-                    Fv::Bf16(bf16::from_f32(2.0)),
-                    Fv::Bf16(bf16::from_f32(2.1)),
-                ])
+                Fv::Vector(vec![bf16::from_f32(1.0), bf16::from_f32(1.1)]),
+                Fv::Vector(vec![bf16::from_f32(2.0), bf16::from_f32(2.1),])
             ])
         );
         let vv2: Vec<[bf16; 2]> = fv.deserialized().unwrap();

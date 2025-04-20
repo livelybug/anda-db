@@ -38,12 +38,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(index.len(), 3);
 
     // 搜索
-    let results = index.search("rust memory", 2);
+    let results = index.search("rust memory", 2, None);
     for (doc_id, score) in results {
         println!("Found doc {}, score: {:.2}", doc_id, score);
     }
 
-    let results = index.search("安全", 2);
+    let results = index.search("安全", 2, None);
     for (doc_id, score) in results {
         println!("Found doc {}, score: {:.2}", doc_id, score);
     }

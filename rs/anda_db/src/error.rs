@@ -1,5 +1,7 @@
 //! Error types for schema module
 use anda_db_btree::BTreeError;
+use anda_db_hnsw::HnswError;
+use anda_db_tfs::BM25Error;
 use thiserror::Error;
 
 use crate::schema::{BoxError, SchemaError};
@@ -86,6 +88,60 @@ impl From<BTreeError> for DBError {
                 source: err.into(),
             },
             BTreeError::AlreadyExists { name, .. } => DBError::Index {
+                name: name.clone(),
+                source: err.into(),
+            },
+        }
+    }
+}
+
+impl From<HnswError> for DBError {
+    fn from(err: HnswError) -> Self {
+        match &err {
+            HnswError::Generic { name, .. } => DBError::Index {
+                name: name.clone(),
+                source: err.into(),
+            },
+            HnswError::Serialization { name, .. } => DBError::Index {
+                name: name.clone(),
+                source: err.into(),
+            },
+            HnswError::NotFound { name, .. } => DBError::Index {
+                name: name.clone(),
+                source: err.into(),
+            },
+            HnswError::AlreadyExists { name, .. } => DBError::Index {
+                name: name.clone(),
+                source: err.into(),
+            },
+            HnswError::DimensionMismatch { name, .. } => DBError::Index {
+                name: name.clone(),
+                source: err.into(),
+            },
+        }
+    }
+}
+
+impl From<BM25Error> for DBError {
+    fn from(err: BM25Error) -> Self {
+        match &err {
+            BM25Error::Generic { name, .. } => DBError::Index {
+                name: name.clone(),
+                source: err.into(),
+            },
+            BM25Error::Serialization { name, .. } => DBError::Index {
+                name: name.clone(),
+                source: err.into(),
+            },
+            BM25Error::NotFound { name, .. } => DBError::Index {
+                name: name.clone(),
+                source: err.into(),
+            },
+            BM25Error::AlreadyExists { name, .. } => DBError::Index {
+                name: name.clone(),
+                source: err.into(),
+            },
+            BM25Error::TokenizeFailed { name, .. } => DBError::Index {
                 name: name.clone(),
                 source: err.into(),
             },
