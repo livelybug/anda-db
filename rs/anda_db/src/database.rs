@@ -158,13 +158,14 @@ impl AndaDB {
     where
         F: AsyncFnMut(&mut Collection) -> Result<(), BoxError>,
     {
-        let mut collections = self.collections.write();
-        if collections.contains_key(&config.name) {
-            return Err(DBError::AlreadyExists {
-                name: config.name,
-                path: self.name.clone(),
-                source: "collection already exists".into(),
-            });
+        {
+            if self.collections.read().contains_key(&config.name) {
+                return Err(DBError::AlreadyExists {
+                    name: config.name,
+                    path: self.name.clone(),
+                    source: "collection already exists".into(),
+                });
+            }
         }
 
         // self.metadata.collections will check it exists again in Collection::create
@@ -176,13 +177,15 @@ impl AndaDB {
                 source: err,
             })?;
         let collection = Arc::new(collection);
-        collections.insert(collection.name().to_string(), collection.clone());
         {
+            let mut collections = self.collections.write();
+            collections.insert(collection.name().to_string(), collection.clone());
             self.metadata
                 .write()
                 .collections
                 .insert(collection.name().to_string());
         }
+
         self.store().await?;
         Ok(collection)
     }
@@ -207,7 +210,6 @@ impl AndaDB {
             }
         }
 
-        let mut collections = self.collections.write();
         let mut collection = Collection::open(self, config.name).await?;
         f(&mut collection)
             .await
@@ -216,6 +218,7 @@ impl AndaDB {
                 source: err,
             })?;
         let collection = Arc::new(collection);
+        let mut collections = self.collections.write();
         collections.insert(collection.name().to_string(), collection.clone());
         Ok(collection)
     }
@@ -243,7 +246,6 @@ impl AndaDB {
             }
         }
 
-        let mut collections = self.collections.write();
         let mut collection = Collection::open(self, name).await?;
         f(&mut collection)
             .await
@@ -252,6 +254,7 @@ impl AndaDB {
                 source: err,
             })?;
         let collection = Arc::new(collection);
+        let mut collections = self.collections.write();
         collections.insert(collection.name().to_string(), collection.clone());
         Ok(collection)
     }

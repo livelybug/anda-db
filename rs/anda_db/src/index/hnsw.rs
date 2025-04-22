@@ -1,5 +1,4 @@
 use anda_db_hnsw::HnswIndex;
-use anda_db_schema::bf16;
 use bytes::Bytes;
 use std::{fmt::Debug, hash::Hash};
 
@@ -7,11 +6,11 @@ pub use anda_db_hnsw::{HnswConfig, HnswError, HnswMetadata, HnswStats};
 
 use crate::{
     error::DBError,
-    schema::Fe,
+    schema::{Fe, SegmentId, Vector},
     storage::{PutMode, Storage},
 };
 
-pub(crate) struct Hnsw {
+pub struct Hnsw {
     name: String,
     field: Fe,
     index: HnswIndex,
@@ -121,10 +120,6 @@ impl Hnsw {
         self.field.name()
     }
 
-    pub fn len(&self) -> usize {
-        self.index.len()
-    }
-
     pub fn stats(&self) -> HnswStats {
         self.index.stats()
     }
@@ -133,12 +128,12 @@ impl Hnsw {
         self.index.metadata()
     }
 
-    pub fn insert(&self, id: u64, vector: Vec<bf16>, now_ms: u64) -> Result<(), DBError> {
+    pub fn insert(&self, id: SegmentId, vector: Vector, now_ms: u64) -> Result<(), DBError> {
         self.index.insert(id, vector, now_ms)?;
         Ok(())
     }
 
-    pub fn remove(&self, id: u64, now_ms: u64) -> bool {
+    pub fn remove(&self, id: SegmentId, now_ms: u64) -> bool {
         self.index.remove(id, now_ms)
     }
 

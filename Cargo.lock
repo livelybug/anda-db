@@ -63,6 +63,7 @@ dependencies = [
  "bytes",
  "ciborium",
  "criterion",
+ "croaring",
  "dashmap",
  "futures",
  "half",

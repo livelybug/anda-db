@@ -10,10 +10,13 @@
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{collections::BTreeMap, fmt};
 
-use super::{BoxError, SchemaError, validate_field_name};
+use crate::{BoxError, SchemaError, Xid, validate_field_name};
 
 /// Re-export bf16 from half crate
 pub use half::bf16;
+
+/// Type alias for Vec<bf16>
+pub type Vector = Vec<bf16>;
 
 /// Type alias for FieldType
 pub type Ft = FieldType;
@@ -419,6 +422,28 @@ impl<'a> TryFrom<&'a FieldValue> for &'a Vec<u8> {
     }
 }
 
+impl<const N: usize> TryFrom<FieldValue> for [u8; N] {
+    type Error = BoxError;
+
+    fn try_from(value: FieldValue) -> Result<Self, Self::Error> {
+        match value {
+            FieldValue::Bytes(v) => Ok(v.try_into().map_err(|v: Vec<u8>| {
+                SchemaError::FieldValue(format!("expected {N} bytes, got {}", v.len()))
+            })?),
+            _ => Err(SchemaError::FieldValue(format!("expected Bytes, got {value:?}")).into()),
+        }
+    }
+}
+
+impl TryFrom<FieldValue> for Xid {
+    type Error = BoxError;
+
+    fn try_from(value: FieldValue) -> Result<Self, Self::Error> {
+        let xid: [u8; 12] = value.try_into()?;
+        Ok(Xid(xid))
+    }
+}
+
 impl TryFrom<FieldValue> for String {
     type Error = BoxError;
 
@@ -492,6 +517,19 @@ impl<'a> TryFrom<&'a FieldValue> for &'a Vec<bf16> {
         match value {
             FieldValue::Vector(v) => Ok(v),
             _ => Err(SchemaError::FieldValue(format!("expected Vector, got {value:?}")).into()),
+        }
+    }
+}
+
+impl<const N: usize> TryFrom<FieldValue> for [bf16; N] {
+    type Error = BoxError;
+
+    fn try_from(value: FieldValue) -> Result<Self, Self::Error> {
+        match value {
+            FieldValue::Vector(v) => Ok(v.try_into().map_err(|v: Vec<bf16>| {
+                SchemaError::FieldValue(format!("expected {N} elements, got {}", v.len()))
+            })?),
+            _ => Err(SchemaError::FieldValue(format!("expected Bytes, got {value:?}")).into()),
         }
     }
 }
@@ -923,6 +961,19 @@ impl FieldValue {
         let val: Cbor = self.into();
         val.deserialized()
             .map_err(|v| SchemaError::FieldValue(format!("Failed to deserialize: {v:?}")))
+    }
+
+    /// Get a field value from a map as a reference T
+    pub fn get_field_as<'a, T: ?Sized>(&'a self, field: &str) -> Option<&'a T>
+    where
+        &'a T: TryFrom<&'a FieldValue>,
+    {
+        if let Fv::Map(m) = self {
+            if let Some(v) = m.get(field) {
+                return v.try_into().ok();
+            }
+        }
+        None
     }
 }
 

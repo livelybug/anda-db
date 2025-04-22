@@ -512,7 +512,7 @@ impl Storage {
         }
     }
 
-    async fn delete(&self, doc_path: &str) -> Result<(), DBError> {
+    pub async fn delete(&self, doc_path: &str) -> Result<(), DBError> {
         let path = self.inner.base_path.child(doc_path);
 
         self.inner
@@ -532,7 +532,7 @@ impl Storage {
         Ok(())
     }
 
-    fn list<T>(
+    pub fn list<T>(
         &self,
         prefix: Option<&str>,
         offset: Option<&str>,

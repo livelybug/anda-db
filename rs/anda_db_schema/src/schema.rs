@@ -16,15 +16,13 @@ pub struct Schema {
 impl Schema {
     /// The key name for the ID field
     pub const ID_KEY: &str = "id"; // with idx 0
-    pub const SEGMENTS_KEY: &str = "segments";
-    pub const RESOURCE_KEY: &str = "resource";
 
     /// Creates a new SchemaBuilder instance.
     ///
     /// # Returns
     /// A new SchemaBuilder with default settings.
     pub fn builder() -> SchemaBuilder {
-        SchemaBuilder::default()
+        SchemaBuilder::new()
     }
 
     /// Returns the number of fields in the schema.
@@ -156,10 +154,16 @@ impl<'de> Deserialize<'de> for Schema {
 
 /// SchemaBuilder is used to construct a Schema instance.
 /// It provides methods to add fields and build the final schema.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct SchemaBuilder {
     idx: usize,
     fields: BTreeMap<String, FieldEntry>,
+}
+
+impl Default for SchemaBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SchemaBuilder {
@@ -168,40 +172,58 @@ impl SchemaBuilder {
     /// # Returns
     /// A new SchemaBuilder with default settings.
     pub fn new() -> SchemaBuilder {
-        SchemaBuilder::default()
+        SchemaBuilder {
+            idx: 0,
+            fields: BTreeMap::from([(
+                Schema::ID_KEY.to_string(),
+                FieldEntry::new(Schema::ID_KEY.to_string(), FieldType::U64)
+                    .unwrap()
+                    .with_required()
+                    .with_unique()
+                    .with_idx(0)
+                    .with_description(format!(
+                        "{:?} is a u64 field, used as an internal unique identifier",
+                        Schema::ID_KEY
+                    )),
+            )]),
+        }
     }
 
-    pub fn with_segments(mut self, required: bool) -> Self {
-        if self.fields.contains_key(Schema::SEGMENTS_KEY) {
-            panic!("Field \"segments\" already exists in schema");
-        }
+    pub fn with_xid(&mut self, field: &str) -> Result<&mut Self, SchemaError> {
+        let entry = FieldEntry::new(field.to_string(), FieldType::Bytes)?
+            .with_unique()
+            .with_required()
+            .with_description(format!(
+                "{:?} is a field of type Xid, used as an unique identifier",
+                field
+            ));
 
-        self.idx += 1;
+        self.add_field(entry)
+    }
+
+    pub fn with_segments(&mut self, field: &str, required: bool) -> Result<&mut Self, SchemaError> {
         let ft = Segment::field_type();
-        let mut entry =
-            FieldEntry::new(Schema::SEGMENTS_KEY.to_string(), FieldType::Array(vec![ft])).unwrap();
+        let mut entry = FieldEntry::new(field.to_string(), FieldType::Array(vec![ft]))?
+            .with_description(format!(
+                "{:?} is a field of type Segment, used to store segments",
+                field
+            ));
         if required {
             entry = entry.with_required();
         }
-        self.fields
-            .insert(entry.name().to_string(), entry.with_idx(self.idx));
-        self
+        self.add_field(entry)
     }
 
-    pub fn with_resource(mut self, required: bool) -> Self {
-        if self.fields.contains_key(Schema::RESOURCE_KEY) {
-            panic!("Field \"resource\" already exists in schema");
-        }
-
-        self.idx += 1;
+    pub fn with_resource(&mut self, field: &str, required: bool) -> Result<&mut Self, SchemaError> {
         let ft = Resource::field_type();
-        let mut entry = FieldEntry::new(Schema::RESOURCE_KEY.to_string(), ft).unwrap();
+        let mut entry = FieldEntry::new(field.to_string(), ft)?.with_description(format!(
+            "{:?} is a field of type Resource, used to store resources",
+            field
+        ));
         if required {
             entry = entry.with_required();
         }
-        self.fields
-            .insert(entry.name().to_string(), entry.with_idx(self.idx));
-        self
+        self.add_field(entry)
     }
 
     /// Adds a field to the schema.
@@ -216,21 +238,12 @@ impl SchemaBuilder {
     /// Returns an error if:
     /// - A field with the same name already exists
     /// - The maximum number of fields has been reached
-    pub fn add_field(&mut self, entry: FieldEntry) -> Result<(), SchemaError> {
+    pub fn add_field(&mut self, entry: FieldEntry) -> Result<&mut Self, SchemaError> {
         if self.fields.contains_key(entry.name()) {
             return Err(SchemaError::Schema(format!(
                 "Field {:?} already exists in schema",
                 entry.name()
             )));
-        }
-
-        if entry.name() == Schema::ID_KEY {
-            // ID field is always the first field at index 0
-            self.fields.insert(
-                Schema::ID_KEY.to_string(),
-                entry.with_required().with_unique().with_idx(0),
-            );
-            return Ok(());
         }
 
         self.idx += 1;
@@ -242,7 +255,7 @@ impl SchemaBuilder {
 
         self.fields
             .insert(entry.name().to_string(), entry.with_idx(self.idx));
-        Ok(())
+        Ok(self)
     }
 
     /// Builds the final Schema from this builder.
@@ -255,12 +268,6 @@ impl SchemaBuilder {
     /// - The schema has no fields
     /// - The schema has too many fields (more than u8::MAX)
     pub fn build(self) -> Result<Schema, SchemaError> {
-        if self.fields.is_empty() {
-            return Err(SchemaError::Schema(
-                "Schema must have at least one field".to_string(),
-            ));
-        }
-
         if self.fields.len() > u8::MAX as usize {
             return Err(SchemaError::Schema(
                 "Schema has reached the maximum number of fields".to_string(),
@@ -292,10 +299,12 @@ mod tests {
     #[test]
     fn test_schema_builder() {
         let mut builder = SchemaBuilder::new();
+        assert_eq!(builder.fields.len(), 1); // 只有 ID 字段
 
         // 测试添加 ID 字段
-        let id_field = Fe::new("id".to_string(), Ft::Text).unwrap();
-        assert!(builder.add_field(id_field).is_ok());
+        let id_field = Fe::new("id".to_string(), Ft::U64).unwrap();
+        // ID 字段已经存在，添加失败
+        assert!(builder.add_field(id_field).is_err());
 
         // 测试添加普通字段
         let name_field = Fe::new("name".to_string(), Ft::Text).unwrap();
@@ -316,13 +325,13 @@ mod tests {
         assert!(!schema.is_empty());
 
         // 验证字段索引
-        assert!(schema.idx.contains(&0)); // id
+        assert!(schema.idx.contains(&0)); // _id
         assert!(schema.idx.contains(&1)); // name
         assert!(schema.idx.contains(&2)); // age
 
         // 验证获取字段
-        let id_field = schema.get_field("id").unwrap();
-        assert_eq!(id_field.name(), "id");
+        let id_field = schema.get_field(Schema::ID_KEY).unwrap();
+        assert_eq!(id_field.name(), Schema::ID_KEY);
         assert_eq!(id_field.idx(), 0);
         assert!(id_field.required());
         assert!(id_field.unique());
@@ -346,9 +355,6 @@ mod tests {
         let mut builder = SchemaBuilder::new();
 
         // 添加字段
-        let id_field = Fe::new("id".to_string(), Ft::Text).unwrap();
-        builder.add_field(id_field).unwrap();
-
         let name_field = Fe::new("name".to_string(), Ft::Text).unwrap();
         builder.add_field(name_field).unwrap();
 
@@ -359,12 +365,15 @@ mod tests {
 
         // 创建有效的字段值
         let mut valid_values = IndexedFieldValues::new();
-        valid_values.insert(0, Fv::Text("user1".to_string()));
+        valid_values.insert(0, Fv::U64(99));
         valid_values.insert(1, Fv::Text("John".to_string()));
         valid_values.insert(2, Fv::U64(30));
 
         // 验证有效值
         assert!(schema.validate(&valid_values).is_ok());
+        // 验证无效值
+        valid_values.insert(0, Fv::I64(99));
+        assert!(schema.validate(&valid_values).is_err());
 
         // 缺少必填字段
         let mut missing_required = IndexedFieldValues::new();
@@ -375,7 +384,7 @@ mod tests {
 
         // 无效的字段索引
         let mut invalid_index = IndexedFieldValues::new();
-        invalid_index.insert(0, Fv::Text("user1".to_string()));
+        invalid_index.insert(0, Fv::U64(99));
         invalid_index.insert(1, Fv::Text("John".to_string()));
         invalid_index.insert(2, Fv::U64(30));
         invalid_index.insert(99, Fv::Text("Invalid".to_string())); // 无效索引
@@ -383,7 +392,7 @@ mod tests {
 
         // 字段类型不匹配
         let mut invalid_type = IndexedFieldValues::new();
-        invalid_type.insert(0, Fv::Text("user1".to_string()));
+        invalid_type.insert(0, Fv::U64(99));
         invalid_type.insert(1, Fv::Text("John".to_string()));
         invalid_type.insert(2, Fv::Text("30".to_string())); // 应该是 Integer
         assert!(schema.validate(&invalid_type).is_err());
@@ -393,12 +402,10 @@ mod tests {
     fn test_schema_builder_limits() {
         // 测试空 Schema
         let empty_builder = SchemaBuilder::new();
-        assert!(empty_builder.build().is_err());
+        assert!(empty_builder.build().is_ok());
 
         // 测试最大字段数限制
         let mut builder = SchemaBuilder::new();
-        let id_field = Fe::new("id".to_string(), Ft::Text).unwrap();
-        builder.add_field(id_field).unwrap();
 
         // 设置 idx 接近 u16::MAX
         builder.idx = u16::MAX as usize - 1;
@@ -413,15 +420,11 @@ mod tests {
     #[test]
     fn test_schema_equality() {
         let mut builder1 = SchemaBuilder::new();
-        let id_field1 = Fe::new("id".to_string(), Ft::Text).unwrap();
-        builder1.add_field(id_field1).unwrap();
         let name_field1 = Fe::new("name".to_string(), Ft::Text).unwrap();
         builder1.add_field(name_field1).unwrap();
         let schema1 = builder1.build().unwrap();
 
         let mut builder2 = SchemaBuilder::new();
-        let id_field2 = Fe::new("id".to_string(), Ft::Text).unwrap();
-        builder2.add_field(id_field2).unwrap();
         let name_field2 = Fe::new("name".to_string(), Ft::Text).unwrap();
         builder2.add_field(name_field2).unwrap();
         let schema2 = builder2.build().unwrap();
@@ -431,9 +434,7 @@ mod tests {
 
         // 不同结构的 Schema
         let mut builder3 = SchemaBuilder::new();
-        let id_field3 = Fe::new("id".to_string(), Ft::Text).unwrap();
-        builder3.add_field(id_field3).unwrap();
-        let age_field3 = Fe::new("age".to_string(), Ft::U64).unwrap();
+        let age_field3 = Fe::new("name".to_string(), Ft::U64).unwrap();
         builder3.add_field(age_field3).unwrap();
         let schema3 = builder3.build().unwrap();
 
@@ -443,8 +444,6 @@ mod tests {
     #[test]
     fn test_schema_iter() {
         let mut builder = SchemaBuilder::new();
-        let id_field = Fe::new("id".to_string(), Ft::Text).unwrap();
-        builder.add_field(id_field).unwrap();
         let name_field = Fe::new("name".to_string(), Ft::Text).unwrap();
         builder.add_field(name_field).unwrap();
         let schema = builder.build().unwrap();
@@ -454,6 +453,7 @@ mod tests {
 
         // 验证迭代器返回的字段
         let field_names: Vec<&str> = fields.iter().map(|f| f.name()).collect();
+        println!("Field names: {:?}", field_names);
         assert!(field_names.contains(&"id"));
         assert!(field_names.contains(&"name"));
     }

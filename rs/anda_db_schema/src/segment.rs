@@ -1,7 +1,10 @@
 use half::bf16;
 use serde::{Deserialize, Serialize};
 
-use crate::{FieldType, FieldTyped, Fv};
+use crate::{FieldType, FieldTyped, Fv, Vector};
+
+/// Type alias for a segment identifier.
+pub type SegmentId = u64;
 
 /// Segment represents a unit consisting of a piece of text and an optional embedding vector.
 /// It is the basic unit for both Full-Text Search and Vector Search.
@@ -42,7 +45,7 @@ impl Segment {
     }
 
     /// Returns the id of the segment.
-    pub fn id(&self) -> u64 {
+    pub fn id(&self) -> SegmentId {
         self.id
     }
 
@@ -52,46 +55,31 @@ impl Segment {
     }
 
     /// Returns an optional reference to the embedding vector of the segment.
-    pub fn vec(&self) -> Option<&Vec<bf16>> {
+    pub fn vec(&self) -> Option<&Vector> {
         self.vec.as_ref()
     }
 
     /// Sets the id of the segment and returns a mutable reference to self.
-    pub fn set_id(&mut self, id: u64) -> &mut Self {
+    pub fn set_id(&mut self, id: SegmentId) -> &mut Self {
         self.id = id;
         self
     }
 
     /// Sets the embedding vector of the segment and returns a mutable reference to self.
-    pub fn set_vec(&mut self, vec: Vec<bf16>) -> &mut Self {
+    pub fn set_vec(&mut self, vec: Vector) -> &mut Self {
         self.vec = Some(vec);
         self
     }
 
-    pub fn fv_exact_id(fv: &Fv) -> Option<&u64> {
-        if let Fv::Map(m) = fv {
-            if let Some(id) = m.get("i") {
-                return id.try_into().ok();
-            }
-        }
-        None
+    pub fn id_from(fv: &Fv) -> Option<&SegmentId> {
+        fv.get_field_as("i")
     }
 
-    pub fn fv_exact_text(fv: &Fv) -> Option<&str> {
-        if let Fv::Map(m) = fv {
-            if let Some(t) = m.get("t") {
-                return t.try_into().ok();
-            }
-        }
-        None
+    pub fn text_from(fv: &Fv) -> Option<&str> {
+        fv.get_field_as("t")
     }
 
-    pub fn fv_exact_vec(fv: &Fv) -> Option<&Vec<bf16>> {
-        if let Fv::Map(m) = fv {
-            if let Some(v) = m.get("v") {
-                return v.try_into().ok();
-            }
-        }
-        None
+    pub fn vec_from(fv: &Fv) -> Option<&Vector> {
+        fv.get_field_as("v")
     }
 }

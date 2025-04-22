@@ -15,7 +15,7 @@ use dashmap::DashMap;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fmt::Debug,
     hash::Hash,
     io::{Read, Write},
@@ -171,36 +171,44 @@ where
 }
 
 /// Range query specification for flexible querying
-#[derive(Debug, Clone)]
-pub enum RangeQuery<'a, FV> {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum RangeQuery<FV> {
     /// Equal to a specific key
-    Eq(&'a FV),
+    Eq(FV),
 
     /// Greater than a specific key
-    Gt(&'a FV),
+    Gt(FV),
 
     /// Greater than or equal to a specific key
-    Ge(&'a FV),
+    Ge(FV),
 
     /// Less than a specific key
-    Lt(&'a FV),
+    Lt(FV),
 
     /// Less than or equal to a specific key
-    Le(&'a FV),
+    Le(FV),
 
     /// Between two keys (inclusive)
-    Between(&'a FV, &'a FV),
+    Between(FV, FV),
 
     /// Include specific keys
-    Include(BTreeSet<&'a FV>),
+    Include(Vec<FV>),
+
+    /// A logical OR query that requires at least one subquery to match
+    Or(Vec<Box<RangeQuery<FV>>>),
+
+    /// A logical AND query that requires all subqueries to match
+    And(Vec<Box<RangeQuery<FV>>>),
+
+    /// A logical NOT query that negates the result of its subquery
+    Not(Box<RangeQuery<FV>>),
 }
 
-impl<'a, FV: 'a> RangeQuery<'a, FV> {
-    pub fn try_convert_from<FV1>(value: RangeQuery<'a, FV1>) -> Result<Self, BoxError>
+impl<FV> RangeQuery<FV> {
+    pub fn try_convert_from<FV1>(value: RangeQuery<FV1>) -> Result<Self, BoxError>
     where
-        FV: Ord, // Keep the necessary bounds here
-        FV1: 'a,
-        &'a FV: TryFrom<&'a FV1, Error = BoxError>,
+        FV: Ord,
+        FV: TryFrom<FV1, Error = BoxError>,
     {
         match value {
             RangeQuery::Eq(key) => Ok(RangeQuery::Eq(key.try_into()?)),
@@ -216,8 +224,30 @@ impl<'a, FV: 'a> RangeQuery<'a, FV> {
                 let converted_keys = keys
                     .into_iter()
                     .map(|key| key.try_into())
-                    .collect::<Result<BTreeSet<&'a FV>, _>>()?;
+                    .collect::<Result<Vec<FV>, _>>()?;
                 Ok(RangeQuery::Include(converted_keys))
+            }
+            RangeQuery::And(queries) => {
+                let converted_queries = queries
+                    .into_iter()
+                    .map(|query| RangeQuery::try_convert_from(*query))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(RangeQuery::And(
+                    converted_queries.into_iter().map(Box::new).collect(),
+                ))
+            }
+            RangeQuery::Or(queries) => {
+                let converted_queries = queries
+                    .into_iter()
+                    .map(|query| RangeQuery::try_convert_from(*query))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(RangeQuery::Or(
+                    converted_queries.into_iter().map(Box::new).collect(),
+                ))
+            }
+            RangeQuery::Not(query) => {
+                let converted_query = RangeQuery::try_convert_from(*query)?;
+                Ok(RangeQuery::Not(Box::new(converted_query)))
             }
         }
     }
@@ -804,7 +834,7 @@ where
     /// * `Vec<R>` - Vector of results from the function applied to the posting values
     pub fn search_range_with<F, R>(&self, query: RangeQuery<FV>, mut f: F) -> Vec<R>
     where
-        F: FnMut(&FV, &Vec<PK>) -> (bool, Option<R>),
+        F: FnMut(&FV, &Vec<PK>) -> (bool, Vec<R>),
     {
         let mut results = Vec::new();
         if self.postings.is_empty() {
@@ -815,11 +845,9 @@ where
 
         match query {
             RangeQuery::Eq(key) => {
-                if let Some(posting) = self.postings.get(key) {
-                    let (conti, rt) = f(key, &posting.2);
-                    if let Some(r) = rt {
-                        results.push(r);
-                    }
+                if let Some(posting) = self.postings.get(&key) {
+                    let (conti, rt) = f(&key, &posting.2);
+                    results.extend(rt);
                     if !conti {
                         return results;
                     }
@@ -829,14 +857,14 @@ where
                 for k in self
                     .btree
                     .read()
-                    .range(std::ops::RangeFrom { start: start_key })
-                    .filter(|&k| k > start_key)
+                    .range(std::ops::RangeFrom {
+                        start: start_key.clone(),
+                    })
+                    .filter(|&k| k > &start_key)
                 {
                     if let Some(posting) = self.postings.get(k) {
                         let (conti, rt) = f(k, &posting.2);
-                        if let Some(r) = rt {
-                            results.push(r);
-                        }
+                        results.extend(rt);
                         if !conti {
                             return results;
                         }
@@ -851,9 +879,7 @@ where
                 {
                     if let Some(posting) = self.postings.get(k) {
                         let (conti, rt) = f(k, &posting.2);
-                        if let Some(r) = rt {
-                            results.push(r);
-                        }
+                        results.extend(rt);
                         if !conti {
                             return results;
                         }
@@ -869,9 +895,7 @@ where
                 {
                     if let Some(posting) = self.postings.get(k) {
                         let (conti, rt) = f(k, &posting.2);
-                        if let Some(r) = rt {
-                            results.push(r);
-                        }
+                        results.extend(rt);
                         if !conti {
                             return results;
                         }
@@ -887,9 +911,7 @@ where
                 {
                     if let Some(posting) = self.postings.get(k) {
                         let (conti, rt) = f(k, &posting.2);
-                        if let Some(r) = rt {
-                            results.push(r);
-                        }
+                        results.extend(rt);
                         if !conti {
                             return results;
                         }
@@ -900,9 +922,7 @@ where
                 for k in self.btree.read().range(start_key..=end_key) {
                     if let Some(posting) = self.postings.get(k) {
                         let (conti, rt) = f(k, &posting.2);
-                        if let Some(r) = rt {
-                            results.push(r);
-                        }
+                        results.extend(rt);
                         if !conti {
                             return results;
                         }
@@ -911,14 +931,161 @@ where
             }
             RangeQuery::Include(keys) => {
                 for k in keys.into_iter() {
-                    if let Some(posting) = self.postings.get(k) {
-                        let (conti, rt) = f(k, &posting.2);
-                        if let Some(r) = rt {
-                            results.push(r);
-                        }
+                    if let Some(posting) = self.postings.get(&k) {
+                        let (conti, rt) = f(&k, &posting.2);
+                        results.extend(rt);
                         if !conti {
                             return results;
                         }
+                    }
+                }
+            }
+            RangeQuery::And(queries) => {
+                // 先找出最小结果集的子查询，减少交集计算量
+                let keys = self.range_keys(RangeQuery::And(queries));
+                for k in keys {
+                    if let Some(posting) = self.postings.get(&k) {
+                        let (conti, rt) = f(&k, &posting.2);
+                        results.extend(rt);
+                        if !conti {
+                            return results;
+                        }
+                    }
+                }
+            }
+            RangeQuery::Or(queries) => {
+                let keys = self.range_keys(RangeQuery::Or(queries));
+                for k in keys {
+                    if let Some(posting) = self.postings.get(&k) {
+                        let (conti, rt) = f(&k, &posting.2);
+                        results.extend(rt);
+                        if !conti {
+                            return results;
+                        }
+                    }
+                }
+            }
+            RangeQuery::Not(query) => {
+                // 先收集要排除的 key，再遍历全集差集
+                let exclude: BTreeSet<FV> = self.range_keys(*query).into_iter().collect();
+
+                for k in self.btree.read().iter() {
+                    if exclude.contains(k) {
+                        continue;
+                    }
+                    if let Some(posting) = self.postings.get(k) {
+                        let (conti, rt) = f(k, &posting.2);
+                        results.extend(rt);
+                        if !conti {
+                            return results;
+                        }
+                    }
+                }
+            }
+        }
+
+        results
+    }
+
+    fn range_keys(&self, query: RangeQuery<FV>) -> Vec<FV> {
+        let mut results: Vec<FV> = Vec::new();
+
+        match query {
+            RangeQuery::Eq(key) => {
+                if self.btree.read().contains(&key) {
+                    results.push(key);
+                }
+            }
+            RangeQuery::Gt(start_key) => {
+                for k in self
+                    .btree
+                    .read()
+                    .range(std::ops::RangeFrom {
+                        start: start_key.clone(),
+                    })
+                    .filter(|&k| k > &start_key)
+                {
+                    results.push(k.clone());
+                }
+            }
+            RangeQuery::Ge(start_key) => {
+                for k in self
+                    .btree
+                    .read()
+                    .range(std::ops::RangeFrom { start: start_key })
+                {
+                    results.push(k.clone());
+                }
+            }
+            RangeQuery::Lt(end_key) => {
+                for k in self
+                    .btree
+                    .read()
+                    .range(std::ops::RangeTo { end: end_key })
+                    .rev()
+                {
+                    results.push(k.clone());
+                }
+            }
+            RangeQuery::Le(end_key) => {
+                for k in self
+                    .btree
+                    .read()
+                    .range(std::ops::RangeToInclusive { end: end_key })
+                    .rev()
+                {
+                    results.push(k.clone());
+                }
+            }
+            RangeQuery::Between(start_key, end_key) => {
+                for k in self.btree.read().range(start_key..=end_key) {
+                    results.push(k.clone());
+                }
+            }
+            RangeQuery::Include(keys) => {
+                let btree = self.btree.read();
+                for k in keys.into_iter() {
+                    if btree.contains(&k) {
+                        results.push(k.clone());
+                    }
+                }
+            }
+            RangeQuery::And(queries) => {
+                let mut iter = queries.into_iter();
+                if let Some(query) = iter.next() {
+                    let mut intersection: BTreeSet<FV> =
+                        self.range_keys(*query).into_iter().collect();
+
+                    for query in iter {
+                        let keys: BTreeSet<FV> = self.range_keys(*query).into_iter().collect();
+                        intersection = intersection
+                            .intersection(&keys)
+                            .cloned()
+                            .collect::<BTreeSet<_>>();
+                        if intersection.is_empty() {
+                            return vec![];
+                        }
+                    }
+
+                    results.extend(intersection);
+                }
+            }
+            RangeQuery::Or(queries) => {
+                let mut seen = HashSet::new();
+                for query in queries {
+                    let keys = self.range_keys(*query);
+                    for k in keys {
+                        if seen.insert(k.clone()) {
+                            results.push(k);
+                        }
+                    }
+                }
+            }
+            RangeQuery::Not(query) => {
+                let exclude: Vec<FV> = self.range_keys(*query);
+                for k in self.btree.read().iter() {
+                    if !exclude.contains(k) {
+                        results.push(k.clone());
                     }
                 }
             }
@@ -1327,62 +1494,268 @@ mod tests {
         let eggplant = "eggplant".to_string();
 
         // 测试等于查询
-        let query = RangeQuery::Eq(&apple);
+        let query = RangeQuery::Eq(apple.clone());
         let results =
-            index.search_range_with(query, |k, ids| (true, Some((k.clone(), ids.clone()))));
+            index.search_range_with(query, |k, ids| (true, vec![(k.clone(), ids.clone())]));
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, "apple");
 
         // 测试大于查询
-        let query = RangeQuery::Gt(&cherry);
-        let results = index.search_range_with(query, |k, _| (true, Some(k.clone())));
+        let query = RangeQuery::Gt(cherry.clone());
+        let results = index.search_range_with(query, |k, _| (true, vec![k.clone()]));
         assert_eq!(results.len(), 2);
         assert!(results.contains(&"date".to_string()));
         assert!(results.contains(&"eggplant".to_string()));
 
         // 测试大于等于查询
-        let query = RangeQuery::Ge(&cherry);
-        let results = index.search_range_with(query, |k, _| (true, Some(k.clone())));
+        let query = RangeQuery::Ge(cherry.clone());
+        let results = index.search_range_with(query, |k, _| (true, vec![k.clone()]));
         assert_eq!(results.len(), 3);
         assert!(results.contains(&"cherry".to_string()));
 
         // 测试小于查询
-        let query = RangeQuery::Lt(&cherry);
-        let results = index.search_range_with(query, |k, _| (true, Some(k.clone())));
+        let query = RangeQuery::Lt(cherry.clone());
+        let results = index.search_range_with(query, |k, _| (true, vec![k.clone()]));
         assert_eq!(results.len(), 2);
         assert!(results.contains(&apple));
         assert!(results.contains(&banana));
 
         // 测试小于等于查询
-        let query = RangeQuery::Le(&cherry);
-        let results = index.search_range_with(query, |k, _| (true, Some(k.clone())));
+        let query = RangeQuery::Le(cherry.clone());
+        let results = index.search_range_with(query, |k, _| (true, vec![k.clone()]));
         assert_eq!(results.len(), 3);
         assert!(results.contains(&cherry));
 
         // 测试范围查询
-        let query = RangeQuery::Between(&banana, &date);
-        let results = index.search_range_with(query, |k, _| (true, Some(k.clone())));
+        let query = RangeQuery::Between(banana.clone(), date.clone());
+        let results = index.search_range_with(query, |k, _| (true, vec![k.clone()]));
         assert_eq!(results.len(), 3);
         assert!(results.contains(&banana));
         assert!(results.contains(&cherry));
         assert!(results.contains(&date));
 
         // 测试包含查询
-        let mut keys = BTreeSet::new();
-        keys.insert(&apple);
-        keys.insert(&eggplant);
+        let keys = vec![apple.clone(), eggplant.clone()];
         let query = RangeQuery::Include(keys);
-        let results = index.search_range_with(query, |k, _| (true, Some(k.clone())));
+        let results = index.search_range_with(query, |k, _| (true, vec![k.clone()]));
         assert_eq!(results.len(), 2);
         assert!(results.contains(&apple));
         assert!(results.contains(&eggplant));
 
         // 测试提前终止搜索
-        let query = RangeQuery::Ge(&apple);
-        let results = index.search_range_with(query, |k, _| (k != "banana", Some(k.clone())));
+        let query = RangeQuery::Ge(apple.clone());
+        let results = index.search_range_with(query, |k, _| (k != "banana", vec![k.clone()]));
         assert_eq!(results.len(), 2);
         assert_eq!(results[0], "apple");
         assert_eq!(results[1], "banana");
+    }
+
+    #[test]
+    fn test_logical_queries() {
+        let index = create_populated_index();
+
+        // 额外插入一些测试数据以丰富测试用例
+        let _ = index.insert(8, "grape".to_string(), now_ms());
+        let _ = index.insert(9, "fig".to_string(), now_ms());
+        let _ = index.insert(10, "berry".to_string(), now_ms());
+        let _ = index.insert(11, "berry".to_string(), now_ms());
+
+        // 准备常用的查询键
+        let apple = "apple".to_string();
+        let banana = "banana".to_string();
+        let berry = "berry".to_string();
+        let cherry = "cherry".to_string();
+        let date = "date".to_string();
+        let eggplant = "eggplant".to_string();
+        let fig = "fig".to_string();
+        let grape = "grape".to_string();
+
+        // ===== 测试 AND 操作 =====
+        // 测试两个有交集的范围的 AND 操作
+        let query = RangeQuery::And(vec![
+            Box::new(RangeQuery::Le(date.clone())), // <= date (apple, banana, cherry, date)
+            Box::new(RangeQuery::Ge(cherry.clone())), // >= cherry (cherry, date, eggplant, fig, grape)
+        ]);
+
+        let results = index.search_range_with(query, |k, _| (true, vec![k.clone()]));
+        assert_eq!(results.len(), 2);
+        assert!(results.contains(&cherry));
+        assert!(results.contains(&date));
+
+        // 测试空交集的 AND 操作
+        let query = RangeQuery::And(vec![
+            Box::new(RangeQuery::Lt(cherry.clone())), // < cherry (apple, banana)
+            Box::new(RangeQuery::Gt(date.clone())),   // > date (eggplant, fig, grape)
+        ]);
+
+        let results = index.search_range_with(query, |k, _| (true, vec![k.clone()]));
+        assert_eq!(results.len(), 0); // 应该为空集
+
+        // 测试精确匹配和范围查询的 AND 操作
+        let query = RangeQuery::And(vec![
+            Box::new(RangeQuery::Ge(banana.clone())),   // >= banana
+            Box::new(RangeQuery::Lt(eggplant.clone())), // < eggplant
+            Box::new(RangeQuery::Eq(cherry.clone())),   // == cherry
+        ]);
+
+        let results = index.search_range_with(query, |k, _| (true, vec![k.clone()]));
+        assert_eq!(results.len(), 1);
+        assert!(results.contains(&cherry));
+
+        // ===== 测试 OR 操作 =====
+        // 测试两个不相交范围的 OR 操作
+        let query = RangeQuery::Or(vec![
+            Box::new(RangeQuery::Le(banana.clone())), // <= banana (apple, banana)
+            Box::new(RangeQuery::Ge(fig.clone())),    // >= fig (fig, grape)
+        ]);
+
+        let results = index.search_range_with(query, |k, _| (true, vec![k.clone()]));
+        assert_eq!(results.len(), 4);
+        assert!(results.contains(&apple));
+        assert!(results.contains(&banana));
+        assert!(results.contains(&fig));
+        assert!(results.contains(&grape));
+
+        // 测试有重叠的 OR 操作
+        let query = RangeQuery::Or(vec![
+            Box::new(RangeQuery::Between(banana.clone(), date.clone())), // banana到date
+            Box::new(RangeQuery::Between(cherry.clone(), fig.clone())),  // cherry到fig
+        ]);
+
+        let results = index.search_range_with(query, |k, _| (true, vec![k.clone()]));
+        assert_eq!(results.len(), 6);
+        assert!(results.contains(&banana));
+        assert!(results.contains(&berry));
+        assert!(results.contains(&cherry));
+        assert!(results.contains(&date));
+        assert!(results.contains(&eggplant));
+        assert!(results.contains(&fig));
+
+        // ===== 测试 NOT 操作 =====
+        // 测试基本的 NOT 操作
+        let query = RangeQuery::Not(Box::new(RangeQuery::Between(
+            cherry.clone(),
+            eggplant.clone(),
+        )));
+
+        let results = index.search_range_with(query, |k, _| (true, vec![k.clone()]));
+        assert!(results.contains(&apple));
+        assert!(results.contains(&banana));
+        assert!(results.contains(&fig));
+        assert!(results.contains(&grape));
+        assert!(!results.contains(&cherry));
+        assert!(!results.contains(&date));
+        assert!(!results.contains(&eggplant));
+
+        // 测试 NOT + Eq 操作
+        let query = RangeQuery::Not(Box::new(RangeQuery::Eq(apple.clone())));
+
+        let results = index.search_range_with(query, |k, _| (true, vec![k.clone()]));
+        assert!(!results.contains(&apple));
+        assert!(results.contains(&banana));
+        assert!(results.contains(&cherry));
+        // ...验证其它键
+
+        // ===== 测试复合逻辑查询 =====
+        // 测试 AND(OR, OR) 复杂嵌套
+        let query = RangeQuery::And(vec![
+            Box::new(RangeQuery::Or(vec![
+                Box::new(RangeQuery::Le(cherry.clone())), // <= cherry
+                Box::new(RangeQuery::Ge(fig.clone())),    // >= fig
+            ])),
+            Box::new(RangeQuery::Or(vec![
+                Box::new(RangeQuery::Le(banana.clone())),   // <= banana
+                Box::new(RangeQuery::Ge(eggplant.clone())), // >= eggplant
+            ])),
+        ]);
+
+        let results = index.search_range_with(query, |k, _| (true, vec![k.clone()]));
+        assert!(results.contains(&apple));
+        assert!(results.contains(&banana));
+        assert!(results.contains(&fig));
+        assert!(results.contains(&grape));
+        assert!(!results.contains(&cherry));
+        assert!(!results.contains(&date));
+
+        // 测试 OR(NOT, NOT) 复杂嵌套
+        let query = RangeQuery::Or(vec![
+            Box::new(RangeQuery::Not(Box::new(RangeQuery::Ge(date.clone())))), // NOT >= date
+            Box::new(RangeQuery::Not(Box::new(RangeQuery::Le(cherry.clone())))), // NOT <= cherry
+        ]);
+
+        let results = index.search_range_with(query, |k, _| (true, vec![k.clone()]));
+        // 这应该返回所有键，因为每个键要么 < date 要么 > cherry
+        assert_eq!(results.len(), index.len());
+
+        // 测试 NOT(AND) 复合操作
+        let query = RangeQuery::Not(Box::new(RangeQuery::And(vec![
+            Box::new(RangeQuery::Ge(cherry.clone())),   // >= cherry
+            Box::new(RangeQuery::Le(eggplant.clone())), // <= eggplant
+        ])));
+
+        let results = index.search_range_with(query, |k, _| (true, vec![k.clone()]));
+        assert!(results.contains(&apple));
+        assert!(results.contains(&banana));
+        assert!(results.contains(&fig));
+        assert!(results.contains(&grape));
+        assert!(!results.contains(&cherry));
+        assert!(!results.contains(&date));
+        assert!(!results.contains(&eggplant));
+
+        // 测试提前终止功能
+        let query = RangeQuery::Or(vec![
+            Box::new(RangeQuery::Ge(apple.clone())),
+            Box::new(RangeQuery::Le(grape.clone())),
+        ]);
+
+        let mut count = 0;
+        let results = index.search_range_with(query, |_, _| {
+            count += 1;
+            (count < 3, vec![count.to_string()])
+        });
+
+        assert_eq!(results.len(), 3);
+        assert_eq!(count, 3); // 确认查询在第三项后停止
+    }
+
+    #[test]
+    fn test_range_keys() {
+        let index = create_populated_index();
+
+        // 测试 search_range_keys 方法处理 And 逻辑
+        let apple = "apple".to_string();
+        let banana = "banana".to_string();
+        let cherry = "cherry".to_string();
+        let eggplant = "eggplant".to_string();
+
+        let query = RangeQuery::And(vec![
+            Box::new(RangeQuery::Ge(banana.clone())),
+            Box::new(RangeQuery::Le(cherry.clone())),
+        ]);
+
+        let keys = index.range_keys(query);
+        assert_eq!(keys.len(), 2);
+        assert!(keys.contains(&banana));
+        assert!(keys.contains(&cherry));
+
+        // 测试 search_range_keys 方法处理 Or 逻辑
+        let query = RangeQuery::Or(vec![
+            Box::new(RangeQuery::Eq(apple.clone())),
+            Box::new(RangeQuery::Eq(eggplant.clone())),
+        ]);
+
+        let keys = index.range_keys(query);
+        assert_eq!(keys.len(), 2);
+        assert!(keys.contains(&apple));
+        assert!(keys.contains(&eggplant));
+
+        // 测试 search_range_keys 方法处理 Not 逻辑
+        let query = RangeQuery::Not(Box::new(RangeQuery::Eq(apple.clone())));
+
+        let keys = index.range_keys(query);
+        assert!(!keys.contains(&apple));
+        assert!(keys.contains(&banana));
+        assert!(keys.contains(&cherry));
     }
 
     #[test]
@@ -1579,7 +1952,8 @@ mod tests {
 
         // 执行一些搜索
         let _ = index.search_with(&"apple".to_string(), |_| Some(()));
-        let _ = index.search_range_with(RangeQuery::Ge(&"a".to_string()), |_, _| (true, Some(())));
+        let _: Vec<()> =
+            index.search_range_with(RangeQuery::Ge("a".to_string()), |_, _| (true, vec![]));
 
         // 检查搜索后的统计信息
         let stats = index.stats();

@@ -1214,6 +1214,7 @@ impl HnswIndex {
                     }
                     Err(err) => {
                         // refund the unprocessed dirty nodes
+                        dirty_nodes.insert(id);
                         self.dirty_nodes.write().append(&mut dirty_nodes);
                         return Err(HnswError::Generic {
                             name: self.name.clone(),

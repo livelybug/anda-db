@@ -17,6 +17,7 @@ anda_db_tfs = { path = "../anda_db_tfs", version = "0.4", features = ["full"] }
 async-trait = { workspace = true }
 bytes = { workspace = true }
 ciborium = { workspace = true }
+croaring = { workspace = true }
 dashmap = { workspace = true, features = ["serde"] }
 futures = { workspace = true }
 half = { workspace = true }

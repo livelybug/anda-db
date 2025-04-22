@@ -8,11 +8,11 @@ pub use anda_db_tfs::{
 
 use crate::{
     error::DBError,
-    schema::Fe,
+    schema::{Fe, SegmentId},
     storage::{PutMode, Storage},
 };
 
-pub(crate) struct BM25 {
+pub struct BM25 {
     name: String,
     field: Fe,
     index: BM25Index<TokenizerChain>,
@@ -148,10 +148,6 @@ impl BM25 {
         self.field.name()
     }
 
-    pub fn len(&self) -> usize {
-        self.index.len()
-    }
-
     pub fn stats(&self) -> BM25Stats {
         self.index.stats()
     }
@@ -160,12 +156,12 @@ impl BM25 {
         self.index.metadata()
     }
 
-    pub fn insert(&self, id: u64, text: &str, now_ms: u64) -> Result<(), DBError> {
+    pub fn insert(&self, id: SegmentId, text: &str, now_ms: u64) -> Result<(), DBError> {
         self.index.insert(id, text, now_ms)?;
         Ok(())
     }
 
-    pub fn remove(&self, id: u64, text: &str, now_ms: u64) -> bool {
+    pub fn remove(&self, id: SegmentId, text: &str, now_ms: u64) -> bool {
         self.index.remove(id, text, now_ms)
     }
 

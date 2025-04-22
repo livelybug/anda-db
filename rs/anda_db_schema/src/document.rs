@@ -2,25 +2,23 @@ use ciborium::Value;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::sync::Arc;
 
-pub use ic_auth_types::Xid;
+use super::{Cbor, Fv, IndexedFieldValues, Schema, SchemaError};
 
-use super::{Cbor, Ft, Fv, IndexedFieldValues, Schema, SchemaError};
+/// Type alias for a document identifier.
+pub type DocumentId = u64;
 
 /// Document represents a single document in the Anda DB.
-/// It contains an ID, a set of fields, and a reference to its schema.
 #[derive(Clone, Debug)]
 pub struct Document {
-    /// Unique identifier for the document
-    pub id: Xid,
     /// Collection of field values indexed by their position in the schema
-    pub fields: IndexedFieldValues,
+    fields: IndexedFieldValues,
     /// Reference to the schema that defines the document structure
     schema: Arc<Schema>,
 }
 
 /// DocumentOwned represents a standalone document without schema reference.
 /// It can be serialized and deserialized for storage or transmission.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct DocumentOwned {
     /// Collection of field values indexed by their position in the schema.
     /// It should include the ID field.
@@ -32,94 +30,6 @@ pub struct DocumentOwned {
 struct DocumentRef<'a> {
     #[serde(rename = "f")]
     pub fields: &'a IndexedFieldValues,
-}
-
-impl Default for DocumentOwned {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl DocumentOwned {
-    /// Creates a new empty DocumentOwned instance.
-    ///
-    /// # Returns
-    /// A new DocumentOwned with empty fields.
-    pub fn new() -> Self {
-        Self {
-            fields: IndexedFieldValues::new(),
-        }
-    }
-
-    /// Creates a new DocumentOwned instance with the specified ID.
-    ///
-    /// # Arguments
-    /// * `id` - The unique identifier for the document
-    ///
-    /// # Returns
-    /// A new DocumentOwned with the ID field set.
-    pub fn with_id(id: Xid) -> Self {
-        Self {
-            fields: IndexedFieldValues::from([(0, Fv::Bytes((*id).into()))]),
-        }
-    }
-
-    /// Gets a field value by index or returns an error if it doesn't exist.
-    ///
-    /// # Arguments
-    /// * `idx` - The index of the field to retrieve
-    ///
-    /// # Returns
-    /// * `Result<&Fv, SchemaError>` - The field value or an error if not found
-    pub fn get_field_or_err(&self, idx: usize) -> Result<&Fv, SchemaError> {
-        self.fields.get(&idx).ok_or_else(|| {
-            SchemaError::Validation(format!("field at {:?} not found in document", idx))
-        })
-    }
-
-    /// Gets a field value by index and deserializes it to the specified type.
-    ///
-    /// # Arguments
-    /// * `idx` - The index of the field to retrieve
-    ///
-    /// # Returns
-    /// * `Result<T, SchemaError>` - The deserialized value or an error
-    ///
-    /// # Type Parameters
-    /// * `T` - The type to deserialize the field value to
-    pub fn get_field_as<T>(&self, idx: usize) -> Result<T, SchemaError>
-    where
-        T: DeserializeOwned,
-    {
-        let value = self.get_field_or_err(idx)?;
-        value.to_owned().deserialized()
-    }
-
-    /// Sets a field value by serializing the provided value.
-    ///
-    /// # Arguments
-    /// * `idx` - The index of the field to set
-    /// * `value` - The value to serialize and store
-    /// * `ft` - Optional field type for validation during serialization
-    ///
-    /// # Returns
-    /// * `Result<(), SchemaError>` - Success or an error
-    ///
-    /// # Type Parameters
-    /// * `T` - The type of the value to serialize
-    pub fn set_field_as<T>(
-        &mut self,
-        idx: usize,
-        value: &T,
-        ft: Option<&Ft>,
-    ) -> Result<(), SchemaError>
-    where
-        T: Serialize,
-    {
-        let value = Fv::serialized(&value, ft)?;
-        self.fields.insert(idx, value);
-        Ok(())
-    }
 }
 
 impl From<Document> for DocumentOwned {
@@ -144,11 +54,9 @@ impl Document {
     ///
     /// # Returns
     /// A new Document instance
-    pub fn with_id(schema: Arc<Schema>, id: Xid) -> Self {
-        let doc = DocumentOwned::with_id(id.clone());
+    pub fn new(schema: Arc<Schema>) -> Self {
         Self {
-            id: id.clone(),
-            fields: doc.fields,
+            fields: IndexedFieldValues::new(),
             schema,
         }
     }
@@ -161,12 +69,10 @@ impl Document {
     ///
     /// # Returns
     /// * `Result<Self, SchemaError>` - The validated Document or an error
-    pub fn try_with_doc(schema: Arc<Schema>, doc: DocumentOwned) -> Result<Self, SchemaError> {
+    pub fn try_from_doc(schema: Arc<Schema>, doc: DocumentOwned) -> Result<Self, SchemaError> {
         schema.validate(&doc.fields)?;
-        let id: Xid = doc.get_field_as(0)?;
 
         Ok(Self {
-            id,
             fields: doc.fields,
             schema,
         })
@@ -196,7 +102,7 @@ impl Document {
             ))
         })?;
 
-        let mut doc_owned = DocumentOwned::new();
+        let mut doc_owned = DocumentOwned::default();
         for (k, v) in doc {
             let k = k.into_text().map_err(|err| {
                 SchemaError::Validation(format!(
@@ -209,12 +115,7 @@ impl Document {
             doc_owned.fields.insert(field.idx(), value);
         }
 
-        schema.validate(&doc_owned.fields)?;
-        Ok(Self {
-            id: doc_owned.get_field_as(0)?,
-            fields: doc_owned.fields,
-            schema,
-        })
+        Self::try_from_doc(schema, doc_owned)
     }
 
     /// Deserializes the document into the specified type.
@@ -224,27 +125,20 @@ impl Document {
     ///
     /// # Type Parameters
     /// * `T` - The type to deserialize the document to
-    pub fn try_as<T>(&self) -> Result<T, SchemaError>
+    pub fn try_into<T>(mut self) -> Result<T, SchemaError>
     where
         T: DeserializeOwned,
     {
-        let mut doc: Vec<(Cbor, Cbor)> = Vec::with_capacity(self.schema.len() + 1);
+        let mut doc: Vec<(Cbor, Cbor)> = Vec::with_capacity(self.schema.len());
         for field in self.schema.iter() {
-            if let Some(value) = self.fields.get(&field.idx()) {
-                doc.push((field.name().into(), value.clone().into()));
+            if let Some(value) = self.fields.remove(&field.idx()) {
+                doc.push((field.name().into(), value.into()));
             } else if field.required() {
                 return Err(SchemaError::Validation(format!(
                     "field {:?} is required",
                     field.name()
                 )));
             }
-        }
-
-        if self.schema.get_field("id").is_none() {
-            doc.push((
-                "id".to_string().into(),
-                Cbor::serialized(&self.id).expect("Xid should be serializable"),
-            ));
         }
 
         Cbor::Map(doc)
@@ -256,8 +150,17 @@ impl Document {
     ///
     /// # Returns
     /// A reference to the document's ID
-    pub fn id(&self) -> &Xid {
-        &self.id
+    pub fn id(&self) -> DocumentId {
+        match self.fields.get(&0) {
+            Some(Fv::U64(id)) => *id,
+            _ => 0,
+        }
+    }
+
+    /// Sets the document's unique identifier.
+    pub fn set_id(&mut self, id: DocumentId) -> &mut Self {
+        self.fields.insert(0, Fv::U64(id));
+        self
     }
 
     /// Gets the fields of the document.
@@ -325,21 +228,6 @@ impl Document {
         )))
     }
 
-    /// Sets multiple field values at once.
-    ///
-    /// # Arguments
-    /// * `fields` - The field values to set, indexed by their position
-    ///
-    /// # Returns
-    /// * `Result<(), SchemaError>` - Success or an error
-    pub fn set_fields(&mut self, fields: IndexedFieldValues) -> Result<(), SchemaError> {
-        for (idx, field) in fields {
-            self.fields.insert(idx, field);
-        }
-        self.schema.validate(&self.fields)?;
-        Ok(())
-    }
-
     /// Gets a field value by name and deserializes it to the specified type.
     ///
     /// # Arguments
@@ -401,7 +289,6 @@ impl Document {
     /// * `Result<(), SchemaError>` - Success or an error
     pub fn set_doc(&mut self, doc: DocumentOwned) -> Result<(), SchemaError> {
         self.schema.validate(&doc.fields)?;
-        self.id = doc.get_field_as(0)?;
         self.fields = doc.fields;
 
         Ok(())
@@ -425,11 +312,11 @@ mod tests {
     use super::*;
     use crate::{Fe, Ft, Fv};
     use serde::{Deserialize, Serialize};
-    use std::{collections::BTreeMap, str::FromStr};
+    use std::collections::BTreeMap;
 
     #[derive(Debug, Serialize, Deserialize, PartialEq)]
     struct TestUser {
-        id: Xid, // 9m4e2mr0ui3e8a215n4g
+        id: u64, // 9m4e2mr0ui3e8a215n4g
         name: String,
         age: u64,
         active: bool,
@@ -439,10 +326,6 @@ mod tests {
 
     fn create_test_schema() -> Arc<Schema> {
         let mut builder = Schema::builder();
-
-        // 添加 ID 字段
-        let id_field = Fe::new("id".to_string(), Ft::Bytes).unwrap();
-        builder.add_field(id_field).unwrap();
 
         // 添加必填字段
         let name_field = Fe::new("name".to_string(), Ft::Text)
@@ -476,19 +359,19 @@ mod tests {
     #[test]
     fn test_document_with_id() {
         let schema = create_test_schema();
-        let id = Xid::from_str("9m4e2mr0ui3e8a215n4g").unwrap();
+        let id = 99u64;
 
-        let doc = Document::with_id(schema.clone(), id.clone());
-
-        assert_eq!(doc.id(), &id);
-        assert!(doc.fields.len() == 1);
-        assert_eq!(doc.get_field("id").unwrap(), &Fv::Bytes((*id).into()));
+        let mut doc = Document::new(schema.clone());
+        assert!(doc.fields.is_empty());
+        assert_eq!(doc.id(), 0);
+        doc.set_id(id);
+        assert_eq!(doc.id(), id);
     }
 
     #[test]
-    fn test_document_try_with_doc() {
+    fn test_document_try_from_doc() {
         let schema = create_test_schema();
-        let id = Xid::from_str("9m4e2mr0ui3e8a215n4g").unwrap();
+        let id = 99u64;
 
         // 创建有效的字段值
         let mut fields = IndexedFieldValues::new();
@@ -497,11 +380,11 @@ mod tests {
 
         let mut owned_doc = DocumentOwned { fields };
 
-        assert!(Document::try_with_doc(schema.clone(), owned_doc.clone()).is_err());
-        owned_doc.set_field_as(0, &id, Some(&Ft::Bytes)).unwrap();
+        assert!(Document::try_from_doc(schema.clone(), owned_doc.clone()).is_err());
+        owned_doc.fields.insert(0, Fv::U64(id));
 
-        let doc = Document::try_with_doc(schema.clone(), owned_doc).unwrap();
-        assert_eq!(doc.id(), &id);
+        let doc = Document::try_from_doc(schema.clone(), owned_doc).unwrap();
+        assert_eq!(doc.id(), id);
         assert_eq!(doc.fields.len(), 3);
         assert_eq!(doc.get_field("age").unwrap(), &Fv::U64(30));
     }
@@ -511,7 +394,7 @@ mod tests {
         let schema = create_test_schema();
 
         let test_user = TestUser {
-            id: Xid::from_str("9m4e2mr0ui3e8a215n4g").unwrap(),
+            id: 99,
             name: "John Doe".to_string(),
             age: 30,
             active: true,
@@ -524,7 +407,7 @@ mod tests {
 
         let doc = Document::try_from(schema.clone(), &test_user).unwrap();
 
-        assert_eq!(doc.id().to_string(), "9m4e2mr0ui3e8a215n4g");
+        assert_eq!(doc.id(), 99);
         assert_eq!(
             doc.get_field("name").unwrap(),
             &Fv::Text("John Doe".to_string())
@@ -556,7 +439,7 @@ mod tests {
         let schema = create_test_schema();
 
         let test_user = TestUser {
-            id: Xid::from_str("9m4e2mr0ui3e8a215n4g").unwrap(),
+            id: 99,
             name: "John Doe".to_string(),
             age: 30,
             active: true,
@@ -570,7 +453,7 @@ mod tests {
         let doc = Document::try_from(schema.clone(), &test_user).unwrap();
 
         // 测试反序列化回原始结构体
-        let deserialized: TestUser = doc.try_as().unwrap();
+        let deserialized: TestUser = doc.try_into().unwrap();
 
         assert_eq!(deserialized, test_user);
     }
@@ -578,9 +461,7 @@ mod tests {
     #[test]
     fn test_document_get_set_field() {
         let schema = create_test_schema();
-        let id = Xid::from_str("9m4e2mr0ui3e8a215n4g").unwrap();
-
-        let mut doc = Document::with_id(schema.clone(), id);
+        let mut doc = Document::new(schema.clone());
 
         // 测试设置字段
         doc.set_field("name", Fv::Text("John Doe".to_string()))
@@ -608,9 +489,8 @@ mod tests {
     #[test]
     fn test_document_get_set_field_as() {
         let schema = create_test_schema();
-        let id = Xid::from_str("9m4e2mr0ui3e8a215n4g").unwrap();
 
-        let mut doc = Document::with_id(schema.clone(), id);
+        let mut doc = Document::new(schema.clone());
 
         // 测试设置字段（使用序列化）
         doc.set_field_as("name", &"John Doe".to_string()).unwrap();
@@ -635,42 +515,10 @@ mod tests {
     }
 
     #[test]
-    fn test_document_set_fields() {
-        let schema = create_test_schema();
-        let id = Xid::from_str("9m4e2mr0ui3e8a215n4g").unwrap();
-
-        let mut doc = Document::with_id(schema.clone(), id.clone());
-
-        // 创建字段集合
-        let mut fields = IndexedFieldValues::new();
-        fields.insert(1, Fv::Text("John Doe".to_string())); // name
-        fields.insert(2, Fv::U64(30)); // age
-
-        // 设置字段集合
-        doc.set_fields(fields.clone()).unwrap();
-
-        // 验证字段是否正确设置
-        assert_eq!(doc.fields.len(), 3);
-        assert_eq!(
-            doc.get_field("name").unwrap(),
-            &Fv::Text("John Doe".to_string())
-        );
-        assert_eq!(doc.get_field("age").unwrap(), &Fv::U64(30));
-
-        // 测试设置无效的字段集合（缺少必填字段）
-        let mut invalid_fields = IndexedFieldValues::new();
-        invalid_fields.insert(1, Fv::Text("John Doe".to_string())); // name，缺少 age
-
-        let mut doc2 = Document::with_id(schema.clone(), id);
-        assert!(doc2.set_fields(invalid_fields).is_err());
-    }
-
-    #[test]
     fn test_document_set_doc() {
         let schema = create_test_schema();
-        let id = Xid::from_str("9m4e2mr0ui3e8a215n4g").unwrap();
 
-        let mut doc = Document::with_id(schema.clone(), id.clone());
+        let mut doc = Document::new(schema.clone());
 
         // 创建有效的字段值
         let mut fields = IndexedFieldValues::new();
@@ -682,12 +530,12 @@ mod tests {
         assert!(doc.set_doc(owned_doc.clone()).is_err());
         owned_doc.fields.insert(
             0,
-            Fv::Bytes((*Xid::from_str("9m5e2mr0ui3e8a215n4g").unwrap()).into()),
+            Fv::U64(99), // id
         ); // id
         doc.set_doc(owned_doc).unwrap();
 
         // 验证文档是否正确设置
-        assert_eq!(doc.id().to_string(), "9m5e2mr0ui3e8a215n4g");
+        assert_eq!(doc.id(), 99);
         assert_eq!(doc.fields.len(), 3);
         assert_eq!(
             doc.get_field("name").unwrap(),
@@ -699,9 +547,9 @@ mod tests {
     #[test]
     fn test_document_from_to_owned() {
         let schema = create_test_schema();
-        let id = Xid::from_str("9m4e2mr0ui3e8a215n4g").unwrap();
 
-        let mut doc = Document::with_id(schema.clone(), id.clone());
+        let mut doc = Document::new(schema.clone());
+        doc.set_id(99);
         doc.set_field("name", Fv::Text("John Doe".to_string()))
             .unwrap();
         doc.set_field("age", Fv::U64(30)).unwrap();
@@ -713,10 +561,10 @@ mod tests {
         assert_eq!(owned.fields.len(), 3);
 
         // 转换回 Document
-        let doc2 = Document::try_with_doc(schema.clone(), owned).unwrap();
+        let doc2 = Document::try_from_doc(schema.clone(), owned).unwrap();
 
         // 验证转换是否正确
-        assert_eq!(doc2.id(), &id);
+        assert_eq!(doc2.id(), 99);
         assert_eq!(doc2.fields.len(), 3);
         assert_eq!(
             doc2.get_field("name").unwrap(),

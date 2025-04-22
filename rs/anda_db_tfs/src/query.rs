@@ -13,10 +13,13 @@
 pub enum QueryType {
     /// A simple term query that matches a single word or phrase
     Term(String),
+
     /// A logical OR query that requires at least one subquery to match
     Or(Vec<Box<QueryType>>),
+
     /// A logical AND query that requires all subqueries to match
     And(Vec<Box<QueryType>>),
+
     /// A logical NOT query that negates the result of its subquery
     Not(Box<QueryType>),
 }

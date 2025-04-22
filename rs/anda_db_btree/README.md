@@ -67,10 +67,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Documents with 'apple': {:?}", result.unwrap());
 
     // Range queries
-    let query = RangeQuery::Between(&banana, &date);
+    let query = RangeQuery::Between(banana.clone(), date.clone());
     let results = index.search_range_with(query, |k, ids| {
         println!("Key: {}, IDs: {:?}", k, ids);
-        (true, Some(k.clone()))
+        (true, vec![k.clone()])
     });
     println!("Keys in range: {:?}", results);
 

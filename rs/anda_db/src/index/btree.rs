@@ -7,11 +7,11 @@ pub use anda_db_btree::{BTreeConfig, BTreeError, BTreeMetadata, BTreeStats, Rang
 
 use crate::{
     error::DBError,
-    schema::{Fe, Ft, Fv, Xid},
+    schema::{DocumentId, Fe, Ft, Fv},
     storage::{PutMode, Storage},
 };
 
-pub(crate) enum BTree {
+pub enum BTree {
     U64(InnerBTree<u64>),
     I64(InnerBTree<i64>),
     String(InnerBTree<String>),
@@ -53,13 +53,13 @@ impl Hash for &BTree {
     }
 }
 
-pub(crate) struct InnerBTree<FV>
+pub struct InnerBTree<FV>
 where
     FV: Eq + Ord + Hash + Debug + Clone + Serialize + DeserializeOwned,
 {
     name: String,
     field: Fe,
-    index: BTreeIndex<Xid, FV>,
+    index: BTreeIndex<u64, FV>,
     storage: Storage, // 与 Collection 共享同一个 Storage 实例
 }
 
@@ -141,15 +141,6 @@ impl BTree {
         }
     }
 
-    pub fn len(&self) -> usize {
-        match self {
-            BTree::I64(btree) => btree.index.len(),
-            BTree::U64(btree) => btree.index.len(),
-            BTree::String(btree) => btree.index.len(),
-            BTree::Bytes(btree) => btree.index.len(),
-        }
-    }
-
     pub fn stats(&self) -> BTreeStats {
         match self {
             BTree::I64(btree) => btree.index.stats(),
@@ -168,23 +159,28 @@ impl BTree {
         }
     }
 
-    pub fn insert(&self, doc_id: &Xid, field_value: &Fv, now_ms: u64) -> Result<bool, DBError> {
+    pub fn insert(
+        &self,
+        doc_id: DocumentId,
+        field_value: &Fv,
+        now_ms: u64,
+    ) -> Result<bool, DBError> {
         match (&self, field_value) {
             (BTree::I64(btree), Fv::I64(val)) => btree
                 .index
-                .insert(doc_id.clone(), *val, now_ms)
+                .insert(doc_id, *val, now_ms)
                 .map_err(DBError::from),
             (BTree::U64(btree), Fv::U64(val)) => btree
                 .index
-                .insert(doc_id.clone(), *val, now_ms)
+                .insert(doc_id, *val, now_ms)
                 .map_err(DBError::from),
             (BTree::String(btree), Fv::Text(val)) => btree
                 .index
-                .insert(doc_id.clone(), val.clone(), now_ms)
+                .insert(doc_id, val.clone(), now_ms)
                 .map_err(DBError::from),
             (BTree::Bytes(btree), Fv::Bytes(val)) => btree
                 .index
-                .insert(doc_id.clone(), val.clone(), now_ms)
+                .insert(doc_id, val.clone(), now_ms)
                 .map_err(DBError::from),
             _ => Err(DBError::Index {
                 name: self.name().to_string(),
@@ -200,7 +196,7 @@ impl BTree {
 
     pub fn batch_insert<I>(&self, items: I, now_ms: u64) -> Result<usize, DBError>
     where
-        I: IntoIterator<Item = (Xid, Fv)>,
+        I: IntoIterator<Item = (DocumentId, Fv)>,
     {
         match &self {
             BTree::I64(btree) => btree
@@ -242,15 +238,15 @@ impl BTree {
         }
     }
 
-    pub fn remove(&self, doc_id: &Xid, field_value: &Fv, now_ms: u64) -> bool {
+    pub fn remove(&self, doc_id: DocumentId, field_value: &Fv, now_ms: u64) -> bool {
         match (&self, field_value) {
-            (BTree::I64(btree), Fv::I64(val)) => btree.index.remove(doc_id.clone(), *val, now_ms),
-            (BTree::U64(btree), Fv::U64(val)) => btree.index.remove(doc_id.clone(), *val, now_ms),
+            (BTree::I64(btree), Fv::I64(val)) => btree.index.remove(doc_id, *val, now_ms),
+            (BTree::U64(btree), Fv::U64(val)) => btree.index.remove(doc_id, *val, now_ms),
             (BTree::String(btree), Fv::Text(val)) => {
-                btree.index.remove(doc_id.clone(), val.clone(), now_ms)
+                btree.index.remove(doc_id, val.clone(), now_ms)
             }
             (BTree::Bytes(btree), Fv::Bytes(val)) => {
-                btree.index.remove(doc_id.clone(), val.clone(), now_ms)
+                btree.index.remove(doc_id, val.clone(), now_ms)
             }
             _ => false,
         }
@@ -258,7 +254,7 @@ impl BTree {
 
     pub fn search_with<F, R>(&self, field_value: &Fv, f: F) -> Option<R>
     where
-        F: FnOnce(&Vec<Xid>) -> Option<R>,
+        F: FnOnce(&Vec<DocumentId>) -> Option<R>,
     {
         match (self, field_value) {
             (BTree::I64(btree), Fv::I64(val)) => btree.index.search_with(val, f),
@@ -269,12 +265,12 @@ impl BTree {
         }
     }
 
-    pub fn search_range_with<'a, F, R>(&'a self, query: RangeQuery<'a, Fv>, mut f: F) -> Vec<R>
+    pub fn search_range_with<F, R>(&self, query: RangeQuery<Fv>, mut f: F) -> Vec<R>
     where
-        F: FnMut(Fv, &Vec<Xid>) -> (bool, Option<R>),
+        F: FnMut(Fv, &Vec<DocumentId>) -> (bool, Vec<R>),
     {
         match self {
-            BTree::I64(btree) => match RangeQuery::<'a, i64>::try_convert_from(query) {
+            BTree::I64(btree) => match RangeQuery::<i64>::try_convert_from(query) {
                 Ok(q) => btree
                     .index
                     .search_range_with(q, |fv, pks| f(Fv::I64(*fv), pks)),
@@ -282,7 +278,7 @@ impl BTree {
                     vec![]
                 }
             },
-            BTree::U64(btree) => match RangeQuery::<'a, u64>::try_convert_from(query) {
+            BTree::U64(btree) => match RangeQuery::<u64>::try_convert_from(query) {
                 Ok(q) => btree
                     .index
                     .search_range_with(q, |fv, pks| f(Fv::U64(*fv), pks)),
@@ -290,7 +286,7 @@ impl BTree {
                     vec![]
                 }
             },
-            BTree::String(btree) => match RangeQuery::<'a, String>::try_convert_from(query) {
+            BTree::String(btree) => match RangeQuery::<String>::try_convert_from(query) {
                 Ok(q) => btree
                     .index
                     .search_range_with(q, |fv, pks| f(Fv::Text(fv.to_owned()), pks)),
@@ -298,7 +294,7 @@ impl BTree {
                     vec![]
                 }
             },
-            BTree::Bytes(btree) => match RangeQuery::<'a, Vec<u8>>::try_convert_from(query) {
+            BTree::Bytes(btree) => match RangeQuery::<Vec<u8>>::try_convert_from(query) {
                 Ok(q) => btree
                     .index
                     .search_range_with(q, |fv, pks| f(Fv::Bytes(fv.clone()), pks)),
@@ -348,7 +344,7 @@ where
     async fn bootstrap(name: String, field: Fe, storage: Storage) -> Result<Self, DBError> {
         let path = BTree::metadata_path(&name);
         let (metadata, _) = storage.fetch_raw(&path).await?;
-        let index = BTreeIndex::<Xid, FV>::load_all(&metadata[..], async |id: u32| {
+        let index = BTreeIndex::<DocumentId, FV>::load_all(&metadata[..], async |id: u32| {
             let path = BTree::posting_path(&name, id);
             let (data, _) = storage.fetch_raw(&path).await?;
             Ok(data.into())
