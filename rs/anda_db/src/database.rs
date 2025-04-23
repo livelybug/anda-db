@@ -1,9 +1,13 @@
-use futures::try_join;
+use futures::{future::JoinAll, try_join};
 use object_store::ObjectStore;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+use std::time::Instant;
 
 use crate::{
     collection::{Collection, CollectionConfig},
@@ -20,6 +24,7 @@ pub struct AndaDB {
     storage: Storage,
     metadata: RwLock<DBMetadata>,
     collections: RwLock<BTreeMap<String, Arc<Collection>>>,
+    read_only: AtomicBool,
 }
 
 /// Collection configuration parameters.
@@ -80,7 +85,7 @@ impl AndaDB {
         match storage.create(Self::METADATA_PATH, &metadata).await {
             Ok(_) => {
                 // DB created successfully, and store storage metadata
-                storage.store(unix_ms()).await?;
+                storage.store_metadata(unix_ms()).await?;
             }
             Err(err) => return Err(err),
         }
@@ -91,6 +96,7 @@ impl AndaDB {
             storage,
             metadata: RwLock::new(metadata),
             collections: RwLock::new(BTreeMap::new()),
+            read_only: AtomicBool::new(false),
         })
     }
 
@@ -114,6 +120,7 @@ impl AndaDB {
                 storage,
                 metadata: RwLock::new(metadata),
                 collections: RwLock::new(BTreeMap::new()),
+                read_only: AtomicBool::new(false),
             }),
             Err(DBError::NotFound { .. }) => {
                 let metadata = DBMetadata {
@@ -124,7 +131,7 @@ impl AndaDB {
                 match storage.create(Self::METADATA_PATH, &metadata).await {
                     Ok(_) => {
                         // DB created successfully, and store storage metadata
-                        storage.store(unix_ms()).await?;
+                        storage.store_metadata(unix_ms()).await?;
                     }
                     Err(err) => return Err(err),
                 }
@@ -135,6 +142,7 @@ impl AndaDB {
                     storage,
                     metadata: RwLock::new(metadata),
                     collections: RwLock::new(BTreeMap::new()),
+                    read_only: AtomicBool::new(false),
                 })
             }
             Err(err) => Err(err),
@@ -149,6 +157,54 @@ impl AndaDB {
         self.metadata.read().clone()
     }
 
+    pub fn set_read_only(&self, read_only: bool) {
+        self.read_only.store(read_only, Ordering::Release);
+        log::info!(
+            action = "set_read_only",
+            database = self.name;
+            "Database is set to read-only: {}",
+            read_only
+        );
+
+        for collection in self.collections.read().values() {
+            collection.set_read_only(read_only);
+        }
+    }
+
+    pub async fn close(&self) -> Result<(), DBError> {
+        self.set_read_only(true);
+        let collections = self
+            .collections
+            .read()
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        let _rt = JoinAll::from_iter(collections.iter().map(|collection| collection.close())).await;
+        let start = Instant::now();
+        match self.store_metadata(unix_ms()).await {
+            Ok(_) => {
+                let elapsed = start.elapsed();
+                log::info!(
+                    action = "close",
+                    database = self.name,
+                    elapsed = elapsed.as_millis();
+                    "Database closed successfully in {elapsed:?}",
+                );
+            }
+            Err(err) => {
+                let elapsed = start.elapsed();
+                log::error!(
+                    action = "close",
+                    database = self.name,
+                    elapsed = elapsed.as_millis();
+                    "Failed to close database: {err:?}",
+                );
+                return Err(err);
+            }
+        }
+        Ok(())
+    }
+
     pub async fn create_collection<F>(
         &self,
         schema: Schema,
@@ -158,6 +214,13 @@ impl AndaDB {
     where
         F: AsyncFnMut(&mut Collection) -> Result<(), BoxError>,
     {
+        if self.read_only.load(Ordering::Relaxed) {
+            return Err(DBError::Generic {
+                name: self.name.clone(),
+                source: "database is read-only".into(),
+            });
+        }
+
         {
             if self.collections.read().contains_key(&config.name) {
                 return Err(DBError::AlreadyExists {
@@ -168,6 +231,7 @@ impl AndaDB {
             }
         }
 
+        let start = Instant::now();
         // self.metadata.collections will check it exists again in Collection::create
         let mut collection = Collection::create(self, schema, config).await?;
         f(&mut collection)
@@ -186,7 +250,15 @@ impl AndaDB {
                 .insert(collection.name().to_string());
         }
 
-        self.store().await?;
+        self.store_metadata(unix_ms()).await?;
+        let elapsed = start.elapsed();
+        log::info!(
+            action = "create_collection",
+            database = self.name,
+            collection = collection.name(),
+            elapsed = elapsed.as_millis();
+            "Create a collection successfully in {elapsed:?}",
+        );
         Ok(collection)
     }
 
@@ -199,11 +271,19 @@ impl AndaDB {
     where
         F: AsyncFnMut(&mut Collection) -> Result<(), BoxError>,
     {
+        if self.read_only.load(Ordering::Relaxed) {
+            return Err(DBError::Generic {
+                name: self.name.clone(),
+                source: "database is read-only".into(),
+            });
+        }
+
         {
             if let Some(collection) = self.collections.read().get(&config.name) {
                 return Ok(collection.clone());
             }
         }
+
         {
             if !self.metadata.read().collections.contains(&config.name) {
                 return self.create_collection(schema, config, f).await;
@@ -259,12 +339,12 @@ impl AndaDB {
         Ok(collection)
     }
 
-    async fn store(&self) -> Result<(), DBError> {
+    async fn store_metadata(&self, now_ms: u64) -> Result<(), DBError> {
         let metadata = self.metadata();
 
         try_join!(
             self.storage.put(Self::METADATA_PATH, &metadata, None),
-            self.storage.store(unix_ms())
+            self.storage.store_metadata(now_ms)
         )?;
 
         Ok(())

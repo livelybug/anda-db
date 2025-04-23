@@ -1,6 +1,7 @@
 use anda_db_derive::FieldTyped;
-use anda_db_schema::{FieldType, Xid};
+use anda_db_schema::FieldType;
 use half::bf16;
+use ic_auth_types::Xid;
 use serde::{Deserialize, Serialize};
 use serde_bytes::{ByteArray, ByteBuf};
 use std::collections::{BTreeMap, HashMap};

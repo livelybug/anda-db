@@ -15,8 +15,8 @@ mod field_typed;
 /// # Example
 ///
 /// ```rust
-/// use anda_db_derive::FieldTyped;
-/// use anda_db_schema::{FieldType, Xid};
+/// use anda_db_schema::{FieldType, FieldTyped};
+/// use ic_auth_types::Xid;
 ///
 /// #[derive(FieldTyped)]
 /// struct User {

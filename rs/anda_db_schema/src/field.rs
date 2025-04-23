@@ -10,7 +10,7 @@
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{collections::BTreeMap, fmt};
 
-use crate::{BoxError, SchemaError, Xid, validate_field_name};
+use crate::{BoxError, SchemaError, validate_field_name};
 
 /// Re-export bf16 from half crate
 pub use half::bf16;
@@ -432,15 +432,6 @@ impl<const N: usize> TryFrom<FieldValue> for [u8; N] {
             })?),
             _ => Err(SchemaError::FieldValue(format!("expected Bytes, got {value:?}")).into()),
         }
-    }
-}
-
-impl TryFrom<FieldValue> for Xid {
-    type Error = BoxError;
-
-    fn try_from(value: FieldValue) -> Result<Self, Self::Error> {
-        let xid: [u8; 12] = value.try_into()?;
-        Ok(Xid(xid))
     }
 }
 

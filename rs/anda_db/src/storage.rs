@@ -201,7 +201,7 @@ impl Storage {
         }
     }
 
-    pub async fn store(&self, now_ms: u64) -> Result<(), DBError> {
+    pub async fn store_metadata(&self, now_ms: u64) -> Result<(), DBError> {
         let prev = self.inner.stats.last_saved.load(Ordering::Acquire);
         if prev >= now_ms {
             // Don't save if the last saved time is greater than now
@@ -211,15 +211,7 @@ impl Storage {
         let mut metadata = self.metadata();
         metadata.stats.last_saved = now_ms;
 
-        let mut buf: Vec<u8> = Vec::new();
-
-        into_writer(&metadata, &mut buf).map_err(|err| DBError::Serialization {
-            name: self.inner.base_path.to_string(),
-            source: err.into(),
-        })?;
-
         self.put(Storage::METADATA_PATH, &metadata, None).await?;
-
         self.inner.stats.version.fetch_add(1, Ordering::Relaxed);
         self.inner
             .stats
@@ -279,6 +271,7 @@ impl Storage {
         (&self.inner.stats).into()
     }
 
+    // fetch will not cache the data
     pub async fn fetch<T>(&self, doc_path: &str) -> Result<(T, ObjectVersion), DBError>
     where
         T: DeserializeOwned,
@@ -290,15 +283,6 @@ impl Storage {
             name: self.inner.base_path.to_string(),
             source: err.into(),
         })?;
-
-        if let Some(cache) = &self.inner.cache {
-            if bytes.len() < self.inner.max_small_object_size {
-                // Cache the document if it is small enough
-                cache
-                    .insert(path.clone(), Arc::new((bytes, version.clone())))
-                    .await;
-            }
-        }
 
         Ok((doc, version))
     }
@@ -343,6 +327,7 @@ impl Storage {
         Ok((bytes, version))
     }
 
+    // get will cache the data if it is small enough and the cache is enabled.
     pub async fn get<T>(&self, doc_path: &str) -> Result<(T, ObjectVersion), DBError>
     where
         T: DeserializeOwned,

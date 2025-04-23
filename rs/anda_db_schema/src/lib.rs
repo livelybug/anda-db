@@ -7,7 +7,6 @@ mod segment;
 mod value_serde;
 
 pub use anda_db_derive::FieldTyped;
-pub use ic_auth_types::{EMPTY_XID, Xid};
 
 pub use document::*;
 pub use error::*;

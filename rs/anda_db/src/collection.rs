@@ -8,8 +8,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{
     Arc,
-    atomic::{AtomicU64, Ordering as AtomicOrdering},
+    atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering},
 };
+use std::time::Instant;
 
 use crate::{
     database::AndaDB, error::DBError, index::*, query::*, schema::*, storage::Storage, unix_ms,
@@ -40,6 +41,7 @@ pub struct Collection {
     bucket_overload_size: usize,
     current_bucket: RwLock<(BucketId, usize)>,
     dirty_buckets: RwLock<BTreeMap<BucketId, DocSegmentsBucket>>,
+    read_only: AtomicBool,
 }
 
 type BucketId = u32;
@@ -105,6 +107,8 @@ pub struct CollectionStats {
 
     /// Number of delete operations performed.
     pub delete_count: u64,
+
+    pub read_only: bool,
 }
 
 impl Collection {
@@ -153,7 +157,7 @@ impl Collection {
         match storage.create(Self::METADATA_PATH, &metadata).await {
             Ok(_) => {
                 // created successfully, and store storage metadata
-                storage.store(unix_ms()).await?;
+                storage.store_metadata(unix_ms()).await?;
             }
             Err(err) => return Err(err),
         }
@@ -177,6 +181,7 @@ impl Collection {
             current_bucket: RwLock::new((0, 0)),
             dirty_buckets: RwLock::new(BTreeMap::new()),
             metadata: RwLock::new(metadata),
+            read_only: AtomicBool::new(false),
         })
     }
 
@@ -214,6 +219,7 @@ impl Collection {
             current_bucket: RwLock::new((metadata.stats.max_bucket_id, 0)),
             dirty_buckets: RwLock::new(BTreeMap::new()),
             metadata: RwLock::new(metadata),
+            read_only: AtomicBool::new(false),
         };
 
         collection.load_ids().await?;
@@ -303,6 +309,41 @@ impl Collection {
         Ok(())
     }
 
+    pub fn set_read_only(&self, read_only: bool) {
+        self.read_only.store(read_only, AtomicOrdering::Release);
+        log::info!(
+            action = "set_read_only",
+            collection = self.name;
+            "Collection is set to read-only: {read_only}",
+        );
+    }
+
+    pub async fn close(&self) -> Result<(), DBError> {
+        let start = Instant::now();
+        match self.store_all(unix_ms()).await {
+            Ok(_) => {
+                let elapsed = start.elapsed();
+                log::info!(
+                    action = "close",
+                    collection = self.name,
+                    elapsed = elapsed.as_millis();
+                    "Collection closed successfully in {elapsed:?}",
+                );
+            }
+            Err(err) => {
+                let elapsed = start.elapsed();
+                log::error!(
+                    action = "close",
+                    collection = self.name,
+                    elapsed = elapsed.as_millis();
+                    "Failed to close collection: {err:?}",
+                );
+                return Err(err);
+            }
+        }
+        Ok(())
+    }
+
     pub async fn store_all(&self, now_ms: u64) -> Result<(), DBError> {
         try_join!(
             self.store_metadata(now_ms),
@@ -319,7 +360,7 @@ impl Collection {
         meta.stats.last_saved = now_ms.max(meta.stats.last_saved);
         try_join!(
             self.storage.put(Self::METADATA_PATH, &meta, None),
-            self.storage.store(now_ms),
+            self.storage.store_metadata(now_ms),
         )?;
 
         self.update_metadata(|m| {
@@ -399,6 +440,7 @@ impl Collection {
         metadata.stats.max_bucket_id = self.current_bucket.read().0;
         metadata.stats.search_count = self.search_count.load(AtomicOrdering::Relaxed);
         metadata.stats.get_count = self.get_count.load(AtomicOrdering::Relaxed);
+        metadata.stats.read_only = self.read_only.load(AtomicOrdering::Relaxed);
         metadata
     }
 
@@ -411,6 +453,7 @@ impl Collection {
         stats.num_documents = self.doc_segments.read().len() as u64;
         stats.search_count = self.search_count.load(AtomicOrdering::Relaxed);
         stats.get_count = self.get_count.load(AtomicOrdering::Relaxed);
+        stats.read_only = self.read_only.load(AtomicOrdering::Relaxed);
 
         stats
     }
@@ -542,6 +585,13 @@ impl Collection {
     }
 
     pub async fn add(&self, mut doc: Document) -> Result<DocumentId, DBError> {
+        if self.read_only.load(AtomicOrdering::Relaxed) {
+            return Err(DBError::Generic {
+                name: self.name.clone(),
+                source: "Collection is read-only".into(),
+            });
+        }
+
         let id = self.max_document_id.fetch_add(1, AtomicOrdering::Acquire) + 1;
         doc.set_id(id);
         self.schema.validate(doc.fields())?;
@@ -641,6 +691,13 @@ impl Collection {
     }
 
     pub async fn remove(&self, id: DocumentId) -> Result<(), DBError> {
+        if self.read_only.load(AtomicOrdering::Relaxed) {
+            return Err(DBError::Generic {
+                name: self.name.clone(),
+                source: "Collection is read-only".into(),
+            });
+        }
+
         let now_ms = unix_ms();
         {
             if !self.doc_ids.write().remove_checked(id) {

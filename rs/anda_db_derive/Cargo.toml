@@ -22,3 +22,4 @@ anda_db_schema = { path = "../anda_db_schema" }
 half = { workspace = true }
 serde = { workspace = true }
 serde_bytes = { workspace = true }
+ic_auth_types = { workspace = true }
