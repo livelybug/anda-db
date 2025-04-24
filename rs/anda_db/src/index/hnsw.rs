@@ -76,8 +76,11 @@ impl Hnsw {
         let (ids, _) = storage.fetch_raw(&Hnsw::ids_path(&name)).await?;
         let index = HnswIndex::load_all(&metadata[..], &ids[..], async |id: u64| {
             let path = Hnsw::node_path(&name, id);
-            let (data, _) = storage.fetch_raw(&path).await?;
-            Ok(data.into())
+            match storage.fetch_raw(&path).await {
+                Ok((data, _)) => Ok(Some(data.into())),
+                Err(DBError::NotFound { .. }) => Ok(None),
+                Err(e) => Err(e.into()),
+            }
         })
         .await?;
 
@@ -90,14 +93,19 @@ impl Hnsw {
     }
 
     pub async fn flush(&self, now_ms: u64) -> Result<(), DBError> {
-        let path = Hnsw::metadata_path(&self.name);
         let mut data = Vec::new();
         self.index.store_metadata(&mut data, now_ms)?;
+        let path = Hnsw::metadata_path(&self.name);
         self.storage
             .put_bytes(&path, Bytes::copy_from_slice(&data[..]), PutMode::Overwrite)
             .await?;
+
         data.clear();
-        self.index.store_ids(data)?;
+        self.index.store_ids(&mut data)?;
+        let path = Hnsw::ids_path(&self.name);
+        self.storage
+            .put_bytes(&path, Bytes::copy_from_slice(&data[..]), PutMode::Overwrite)
+            .await?;
         self.index
             .store_dirty_nodes(async |id, data| {
                 let path = Hnsw::node_path(&self.name, id);

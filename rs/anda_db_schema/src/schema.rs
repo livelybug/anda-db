@@ -189,20 +189,27 @@ impl SchemaBuilder {
         }
     }
 
-    pub fn with_xid(&mut self, field: &str) -> Result<&mut Self, SchemaError> {
-        let entry = FieldEntry::new(field.to_string(), FieldType::Bytes)?
-            .with_unique()
+    pub fn with_xid(&mut self, field: &str, unique: bool) -> Result<&mut Self, SchemaError> {
+        let mut entry = FieldEntry::new(field.to_string(), FieldType::Bytes)?
             .with_required()
             .with_description(format!(
                 "{:?} is a field of type Xid, used as an unique identifier",
                 field
             ));
+        if unique {
+            entry = entry.with_unique();
+        }
 
         self.add_field(entry)
     }
 
     pub fn with_segments(&mut self, field: &str, required: bool) -> Result<&mut Self, SchemaError> {
         let ft = Segment::field_type();
+        let ft = if required {
+            ft
+        } else {
+            FieldType::Option(Box::new(ft))
+        };
         let mut entry = FieldEntry::new(field.to_string(), FieldType::Array(vec![ft]))?
             .with_description(format!(
                 "{:?} is a field of type Segment, used to store segments",
@@ -216,6 +223,11 @@ impl SchemaBuilder {
 
     pub fn with_resource(&mut self, field: &str, required: bool) -> Result<&mut Self, SchemaError> {
         let ft = Resource::field_type();
+        let ft = if required {
+            ft
+        } else {
+            FieldType::Option(Box::new(ft))
+        };
         let mut entry = FieldEntry::new(field.to_string(), ft)?.with_description(format!(
             "{:?} is a field of type Resource, used to store resources",
             field

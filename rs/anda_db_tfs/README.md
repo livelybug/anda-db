@@ -59,7 +59,7 @@ index.remove(3, "The lazy dog sleeps all day", now_ms);
 {
     let metadata = std::fs::File::create("tfs_demo/metadata.cbor")?;
     index
-        .store_all(
+        .flush(
             metadata,
             0,
             async |id, data| {
@@ -86,13 +86,13 @@ let loaded_index = BM25Index::load_all(
         let mut node = std::fs::File::open(format!("tfs_demo/seg_{id}.cbor"))?;
         let mut buf = Vec::new();
         node.read_to_end(&mut buf)?;
-        Ok(buf)
+        Ok(Some(buf))
     },
     async |id| {
         let mut node = std::fs::File::open(format!("tfs_demo/posting_{id}.cbor"))?;
         let mut buf = Vec::new();
         node.read_to_end(&mut buf)?;
-        Ok(buf)
+        Ok(Some(buf))
     },
 )
 .await?;

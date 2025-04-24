@@ -222,7 +222,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let ids = std::fs::File::create("debug/hnsw_demo/ids.cbor")?;
         let store_start = time::Instant::now();
         index
-            .store_all(metadata, ids, 0, async |id, data| {
+            .flush(metadata, ids, 0, async |id, data| {
                 let mut node = std::fs::File::create(format!("debug/hnsw_demo/node_{id}.cbor"))?;
                 node.write_all(data)?;
                 Ok(true)
@@ -241,7 +241,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut node = std::fs::File::open(format!("debug/hnsw_demo/node_{id}.cbor"))?;
         let mut buf = Vec::new();
         node.read_to_end(&mut buf)?;
-        Ok(buf)
+        Ok(Some(buf))
     })
     .await?;
 

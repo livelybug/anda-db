@@ -37,9 +37,6 @@ pub struct DBConfig {
     pub description: String,
 
     pub storage: StorageConfig,
-
-    /// Auto-commit interval in seconds (if enabled)
-    pub auto_commit_interval: Option<u64>,
 }
 
 impl Default for DBConfig {
@@ -48,7 +45,6 @@ impl Default for DBConfig {
             name: "anda_db".to_string(),
             description: "Anda DB".to_string(),
             storage: StorageConfig::default(),
-            auto_commit_interval: None,
         }
     }
 }
@@ -181,7 +177,7 @@ impl AndaDB {
             .collect::<Vec<_>>();
         let _rt = JoinAll::from_iter(collections.iter().map(|collection| collection.close())).await;
         let start = Instant::now();
-        match self.store_metadata(unix_ms()).await {
+        match self.flush(unix_ms()).await {
             Ok(_) => {
                 let elapsed = start.elapsed();
                 log::info!(
@@ -209,10 +205,10 @@ impl AndaDB {
         &self,
         schema: Schema,
         config: CollectionConfig,
-        mut f: F,
+        f: F,
     ) -> Result<Arc<Collection>, DBError>
     where
-        F: AsyncFnMut(&mut Collection) -> Result<(), BoxError>,
+        F: AsyncFnOnce(&mut Collection) -> Result<(), DBError>,
     {
         if self.read_only.load(Ordering::Relaxed) {
             return Err(DBError::Generic {
@@ -234,12 +230,7 @@ impl AndaDB {
         let start = Instant::now();
         // self.metadata.collections will check it exists again in Collection::create
         let mut collection = Collection::create(self, schema, config).await?;
-        f(&mut collection)
-            .await
-            .map_err(|err| DBError::Collection {
-                name: collection.name().to_string(),
-                source: err,
-            })?;
+        f(&mut collection).await?;
         let collection = Arc::new(collection);
         {
             let mut collections = self.collections.write();
@@ -250,7 +241,9 @@ impl AndaDB {
                 .insert(collection.name().to_string());
         }
 
-        self.store_metadata(unix_ms()).await?;
+        let now = unix_ms();
+        collection.flush(now).await?;
+        self.flush(now).await?;
         let elapsed = start.elapsed();
         log::info!(
             action = "create_collection",
@@ -266,10 +259,10 @@ impl AndaDB {
         &self,
         schema: Schema,
         config: CollectionConfig,
-        mut f: F,
+        f: F,
     ) -> Result<Arc<Collection>, DBError>
     where
-        F: AsyncFnMut(&mut Collection) -> Result<(), BoxError>,
+        F: AsyncFnOnce(&mut Collection) -> Result<(), DBError>,
     {
         if self.read_only.load(Ordering::Relaxed) {
             return Err(DBError::Generic {
@@ -290,26 +283,16 @@ impl AndaDB {
             }
         }
 
-        let mut collection = Collection::open(self, config.name).await?;
-        f(&mut collection)
-            .await
-            .map_err(|err| DBError::Collection {
-                name: collection.name().to_string(),
-                source: err,
-            })?;
+        let collection = Collection::open(self, config.name, f).await?;
         let collection = Arc::new(collection);
         let mut collections = self.collections.write();
         collections.insert(collection.name().to_string(), collection.clone());
         Ok(collection)
     }
 
-    pub async fn open_collection<F>(
-        &self,
-        name: String,
-        mut f: F,
-    ) -> Result<Arc<Collection>, DBError>
+    pub async fn open_collection<F>(&self, name: String, f: F) -> Result<Arc<Collection>, DBError>
     where
-        F: AsyncFnMut(&mut Collection) -> Result<(), BoxError>,
+        F: AsyncFnOnce(&mut Collection) -> Result<(), DBError>,
     {
         {
             if let Some(collection) = self.collections.read().get(&name) {
@@ -326,20 +309,14 @@ impl AndaDB {
             }
         }
 
-        let mut collection = Collection::open(self, name).await?;
-        f(&mut collection)
-            .await
-            .map_err(|err| DBError::Collection {
-                name: collection.name().to_string(),
-                source: err,
-            })?;
+        let collection = Collection::open(self, name, f).await?;
         let collection = Arc::new(collection);
         let mut collections = self.collections.write();
         collections.insert(collection.name().to_string(), collection.clone());
         Ok(collection)
     }
 
-    async fn store_metadata(&self, now_ms: u64) -> Result<(), DBError> {
+    async fn flush(&self, now_ms: u64) -> Result<(), DBError> {
         let metadata = self.metadata();
 
         try_join!(

@@ -28,7 +28,7 @@ use zstd_safe::{compress, decompress};
 
 pub use object_store::PutMode;
 
-use crate::{error::DBError, schema::validate_field_name};
+use crate::error::DBError;
 
 /// 基于 object_store 实现的 Anda DB 存储层
 #[derive(Clone)]
@@ -76,7 +76,7 @@ impl Default for StorageConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageMetadata {
-    pub name: String,
+    pub path: String,
 
     /// Storage configuration.
     pub config: StorageConfig,
@@ -179,16 +179,18 @@ impl From<&ObjectMeta> for ObjectVersion {
 impl Storage {
     const METADATA_PATH: &'static str = "storage_meta.cbor";
 
+    fn full_path(&self, path: &str) -> Path {
+        Path::from(format!("{}/{}", self.inner.base_path, path))
+    }
+
     pub async fn connect(
-        name: String,
+        path: String,
         object_store: Arc<dyn ObjectStore>,
         config: StorageConfig,
     ) -> Result<Storage, DBError> {
-        validate_field_name(name.as_str())?;
-
         let stats = StorageStats::default();
         let metadata = StorageMetadata {
-            name,
+            path,
             config,
             stats,
         };
@@ -225,7 +227,6 @@ impl Storage {
         object_store: Arc<dyn ObjectStore>,
         metadata: StorageMetadata,
     ) -> Result<Storage, DBError> {
-        validate_field_name(metadata.name.as_str())?;
         // Create a cache with a size limit
         let cache = if metadata.config.cache_max_capacity > 0 {
             Some(
@@ -240,7 +241,7 @@ impl Storage {
         Ok(Storage {
             inner: Arc::new(InnerStorage {
                 object_store,
-                base_path: Path::from(metadata.name.as_str()),
+                base_path: Path::from(metadata.path.as_str()),
                 compress_level: metadata.config.compress_level,
                 object_chunk_size: metadata.config.object_chunk_size,
                 max_small_object_size: metadata.config.max_small_object_size,
@@ -253,7 +254,7 @@ impl Storage {
 
     pub fn metadata(&self) -> StorageMetadata {
         StorageMetadata {
-            name: self.inner.metadata.name.clone(),
+            path: self.inner.metadata.path.clone(),
             config: self.inner.metadata.config.clone(),
             stats: self.stats(),
         }
@@ -276,7 +277,7 @@ impl Storage {
     where
         T: DeserializeOwned,
     {
-        let path = self.inner.base_path.child(doc_path);
+        let path = self.full_path(doc_path);
         // Try to get the document
         let (bytes, version) = self.inner_fetch(&path).await?;
         let doc: T = from_reader(&bytes[..]).map_err(|err| DBError::Serialization {
@@ -288,7 +289,7 @@ impl Storage {
     }
 
     pub async fn fetch_raw(&self, doc_path: &str) -> Result<(Bytes, ObjectVersion), DBError> {
-        let path = self.inner.base_path.child(doc_path);
+        let path = self.full_path(doc_path);
         // Try to get the document
         self.inner_fetch(&path).await
     }
@@ -332,7 +333,7 @@ impl Storage {
     where
         T: DeserializeOwned,
     {
-        let path = self.inner.base_path.child(doc_path);
+        let path = self.full_path(doc_path);
 
         self.inner_get(&path).await
     }
@@ -374,7 +375,7 @@ impl Storage {
     }
 
     pub async fn stream_reader(&self, doc_path: &str) -> Result<StreamReader, DBError> {
-        let path = self.inner.base_path.child(doc_path);
+        let path = self.full_path(doc_path);
         let meta = self
             .inner
             .object_store
@@ -410,7 +411,7 @@ impl Storage {
     where
         T: Serialize,
     {
-        let path = self.inner.base_path.child(doc_path);
+        let path = self.full_path(doc_path);
         let mut buf: Vec<u8> = Vec::new();
 
         into_writer(doc, &mut buf).map_err(|err| DBError::Serialization {
@@ -436,7 +437,7 @@ impl Storage {
             name: self.inner.base_path.to_string(),
             source: err.into(),
         })?;
-        let path = self.inner.base_path.child(doc_path);
+        let path = self.full_path(doc_path);
         let mode = if let Some(version) = version {
             PutMode::Update(version.into())
         } else {
@@ -451,12 +452,12 @@ impl Storage {
         data: Bytes,
         mode: PutMode,
     ) -> Result<ObjectVersion, DBError> {
-        let path = self.inner.base_path.child(doc_path);
+        let path = self.full_path(doc_path);
         self.inner.put(path, data, mode).await
     }
 
     pub fn to_writer(&self, doc_path: &str, mode: PutMode) -> SingleWriter {
-        let path = self.inner.base_path.child(doc_path);
+        let path = self.full_path(doc_path);
         SingleWriter {
             inner: self.inner.clone(),
             path,
@@ -467,7 +468,7 @@ impl Storage {
     }
 
     pub fn stream_writer(&self, doc_path: &str) -> StreamWriter {
-        let path = self.inner.base_path.child(doc_path);
+        let path = self.full_path(doc_path);
         let writer = BufWriter::with_capacity(
             self.inner.object_store.clone(),
             path.clone(),
@@ -498,7 +499,7 @@ impl Storage {
     }
 
     pub async fn delete(&self, doc_path: &str) -> Result<(), DBError> {
-        let path = self.inner.base_path.child(doc_path);
+        let path = self.full_path(doc_path);
 
         self.inner
             .object_store
@@ -526,12 +527,12 @@ impl Storage {
         T: DeserializeOwned + Send,
     {
         let path_prefix = if let Some(p) = prefix {
-            self.inner.base_path.child(p)
+            self.full_path(p)
         } else {
             self.inner.base_path.clone()
         };
 
-        let offset = offset.map(|o| self.inner.base_path.child(o));
+        let offset = offset.map(|o| self.full_path(o));
 
         let stream = if let Some(offset) = offset {
             self.inner

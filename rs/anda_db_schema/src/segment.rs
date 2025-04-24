@@ -36,12 +36,8 @@ pub struct Segment {
 impl Segment {
     /// Creates a new Segment with the given text.
     /// The id is initialized to 0 and the vector is set to None.
-    pub fn new(text: String) -> Self {
-        Self {
-            id: 0,
-            text,
-            vec: None,
-        }
+    pub fn new(text: String, vec: Option<Vector>) -> Self {
+        Self { id: 0, text, vec }
     }
 
     /// Returns the id of the segment.
@@ -59,16 +55,26 @@ impl Segment {
         self.vec.as_ref()
     }
 
-    /// Sets the id of the segment and returns a mutable reference to self.
-    pub fn set_id(&mut self, id: SegmentId) -> &mut Self {
-        self.id = id;
-        self
+    pub fn with_id(self, id: SegmentId) -> Self {
+        Self { id, ..self }
     }
 
-    /// Sets the embedding vector of the segment and returns a mutable reference to self.
-    pub fn set_vec(&mut self, vec: Vector) -> &mut Self {
-        self.vec = Some(vec);
-        self
+    pub fn with_vec(self, vec: Vector) -> Self {
+        Self {
+            vec: Some(vec),
+            ..self
+        }
+    }
+
+    pub fn with_vec_f32(self, vec: Vec<f32>) -> Self {
+        Self {
+            vec: Some(
+                vec.into_iter()
+                    .map(bf16::from_f32)
+                    .collect::<Vec<bf16>>(),
+            ),
+            ..self
+        }
     }
 
     pub fn id_from(fv: &Fv) -> Option<&SegmentId> {

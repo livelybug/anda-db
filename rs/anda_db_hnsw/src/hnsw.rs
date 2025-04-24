@@ -254,7 +254,7 @@ impl HnswIndex {
     /// * `Result<Self, HnswError>` - Loaded index or error.
     pub async fn load_all<R: Read, F>(metadata: R, ids: R, f: F) -> Result<Self, HnswError>
     where
-        F: AsyncFnMut(u64) -> Result<Vec<u8>, BoxError>,
+        F: AsyncFnMut(u64) -> Result<Option<Vec<u8>>, BoxError>,
     {
         let mut index = Self::load_metadata(metadata)?;
         index.load_ids(ids)?;
@@ -332,22 +332,24 @@ impl HnswIndex {
     /// * `Result<(), HnswError>` - Ok(()) if successful, or an error.
     pub async fn load_nodes<F>(&mut self, mut f: F) -> Result<(), HnswError>
     where
-        F: AsyncFnMut(u64) -> Result<Vec<u8>, BoxError>,
+        F: AsyncFnMut(u64) -> Result<Option<Vec<u8>>, BoxError>,
     {
         // TODO: concurrent loading
         let ids = self.ids.read().clone();
         for id in ids.iter() {
-            let node = f(id).await.map_err(|err| HnswError::Generic {
+            let data = f(id).await.map_err(|err| HnswError::Generic {
                 name: self.name.clone(),
                 source: err,
             })?;
-            let node: HnswNode =
-                ciborium::from_reader(&node[..]).map_err(|err| HnswError::Serialization {
-                    name: self.name.clone(),
-                    source: err.into(),
-                })?;
+            if let Some(data) = data {
+                let node: HnswNode =
+                    ciborium::from_reader(&data[..]).map_err(|err| HnswError::Serialization {
+                        name: self.name.clone(),
+                        source: err.into(),
+                    })?;
 
-            self.nodes.insert(id, node);
+                self.nodes.insert(id, node);
+            }
         }
         Ok(())
     }
@@ -1102,7 +1104,7 @@ impl HnswIndex {
     }
 
     /// Stores the index metadata, IDs and nodes to persistent storage.
-    pub async fn store_all<W: Write, F>(
+    pub async fn flush<W: Write, F>(
         &self,
         metadata: W,
         ids: W,
@@ -1332,7 +1334,7 @@ mod tests {
         let mut ids = Vec::new();
         let mut nodes: HashMap<u64, Vec<u8>> = HashMap::new();
         index
-            .store_all(&mut metadata, &mut ids, 0, async |id, data| {
+            .flush(&mut metadata, &mut ids, 0, async |id, data| {
                 nodes.insert(id, data.to_vec());
                 Ok(true)
             })
@@ -1340,7 +1342,7 @@ mod tests {
             .unwrap();
 
         let loaded_index = HnswIndex::load_all(&metadata[..], &ids[..], async |id| {
-            Ok(nodes.get(&id).unwrap().to_vec())
+            Ok(nodes.get(&id).map(|v| v.to_vec()))
         })
         .await
         .unwrap();
@@ -1547,7 +1549,7 @@ mod tests {
             }
 
             index
-                .store_all(&mut metadata, &mut ids, 0, async |id, data| {
+                .flush(&mut metadata, &mut ids, 0, async |id, data| {
                     nodes.insert(id, data.to_vec());
                     Ok(true)
                 })
@@ -1557,7 +1559,7 @@ mod tests {
 
         {
             let loaded_index = HnswIndex::load_all(&metadata[..], &ids[..], async |id| {
-                Ok(nodes.get(&id).unwrap().to_vec())
+                Ok(nodes.get(&id).map(|v| v.to_vec()))
             })
             .await
             .unwrap();

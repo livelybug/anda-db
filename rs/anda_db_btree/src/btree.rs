@@ -300,7 +300,7 @@ where
     /// * `Result<Self, BTreeError>` - Loaded index or error.
     pub async fn load_all<R: Read, F>(metadata: R, f: F) -> Result<Self, BTreeError>
     where
-        F: AsyncFnMut(u32) -> Result<Vec<u8>, BoxError>,
+        F: AsyncFnMut(u32) -> Result<Option<Vec<u8>>, BoxError>,
     {
         let mut index = Self::load_metadata(metadata)?;
         index.load_postings(f).await?;
@@ -358,24 +358,26 @@ where
     /// * `Result<(), BTreeError>` - Success or error
     pub async fn load_postings<F>(&mut self, mut f: F) -> Result<(), BTreeError>
     where
-        F: AsyncFnMut(u32) -> Result<Vec<u8>, BoxError>,
+        F: AsyncFnMut(u32) -> Result<Option<Vec<u8>>, BoxError>,
     {
         for i in 0..=self.max_bucket_id.load(AtomicOrdering::Relaxed) {
             let data = f(i).await.map_err(|err| BTreeError::Generic {
                 name: self.name.clone(),
                 source: err,
             })?;
-            let postings: HashMap<FV, PostingValue<PK>> = ciborium::from_reader(&data[..])
-                .map_err(|err| BTreeError::Serialization {
-                    name: self.name.clone(),
-                    source: err.into(),
-                })?;
-            let bks = postings.keys().cloned().collect::<Vec<_>>();
-            self.btree.write().extend(bks.iter().cloned());
-            // Update bucket information
-            // Larger buckets have the most recent state and can override smaller buckets
-            self.buckets.insert(i, (data.len() as u32, false, bks));
-            self.postings.extend(postings);
+            if let Some(data) = data {
+                let postings: HashMap<FV, PostingValue<PK>> = ciborium::from_reader(&data[..])
+                    .map_err(|err| BTreeError::Serialization {
+                        name: self.name.clone(),
+                        source: err.into(),
+                    })?;
+                let bks = postings.keys().cloned().collect::<Vec<_>>();
+                self.btree.write().extend(bks.iter().cloned());
+                // Update bucket information
+                // Larger buckets have the most recent state and can override smaller buckets
+                self.buckets.insert(i, (data.len() as u32, false, bks));
+                self.postings.extend(postings);
+            }
         }
 
         Ok(())
@@ -1095,12 +1097,7 @@ where
     }
 
     /// Stores the index metadata and dirty buckets to persistent storage.
-    pub async fn store_all<W: Write, F>(
-        &self,
-        metadata: W,
-        now_ms: u64,
-        f: F,
-    ) -> Result<(), BTreeError>
+    pub async fn flush<W: Write, F>(&self, metadata: W, now_ms: u64, f: F) -> Result<(), BTreeError>
     where
         F: AsyncFnMut(u32, &[u8]) -> Result<bool, BoxError>,
     {
@@ -1831,7 +1828,7 @@ mod tests {
                         }
                         .into());
                     }
-                    Ok(guard[bucket_id as usize].clone())
+                    Ok(Some(guard[bucket_id as usize].clone()))
                 })
                 .await;
             assert!(result.is_ok());

@@ -3,7 +3,7 @@ use bytes::Bytes;
 use std::{fmt::Debug, hash::Hash};
 
 pub use anda_db_tfs::{
-    BM25Config, BM25Error, BM25Metadata, BM25Params, BM25Stats, TokenizerChain, jieba_tokenizer,
+    BM25Config, BM25Error, BM25Metadata, BM25Params, BM25Stats, TokenizerChain, default_tokenizer,
 };
 
 use crate::{
@@ -90,13 +90,19 @@ impl BM25 {
             &metadata[..],
             async |id: u32| {
                 let path = BM25::segment_path(&name, id);
-                let (data, _) = storage.fetch_raw(&path).await?;
-                Ok(data.into())
+                match storage.fetch_raw(&path).await {
+                    Ok((data, _)) => Ok(Some(data.into())),
+                    Err(DBError::NotFound { .. }) => Ok(None),
+                    Err(e) => Err(e.into()),
+                }
             },
             async |id: u32| {
                 let path = BM25::posting_path(&name, id);
-                let (data, _) = storage.fetch_raw(&path).await?;
-                Ok(data.into())
+                match storage.fetch_raw(&path).await {
+                    Ok((data, _)) => Ok(Some(data.into())),
+                    Err(DBError::NotFound { .. }) => Ok(None),
+                    Err(e) => Err(e.into()),
+                }
             },
         )
         .await?;
@@ -110,9 +116,9 @@ impl BM25 {
     }
 
     pub async fn flush(&self, now_ms: u64) -> Result<(), DBError> {
-        let path = BM25::metadata_path(&self.name);
         let mut data = Vec::new();
         self.index.store_metadata(&mut data, now_ms)?;
+        let path = BM25::metadata_path(&self.name);
         self.storage
             .put_bytes(&path, data.into(), PutMode::Overwrite)
             .await?;

@@ -229,8 +229,8 @@ where
         postings_fn: F2,
     ) -> Result<Self, BM25Error>
     where
-        F1: AsyncFnMut(u32) -> Result<Vec<u8>, BoxError>,
-        F2: AsyncFnMut(u32) -> Result<Vec<u8>, BoxError>,
+        F1: AsyncFnMut(u32) -> Result<Option<Vec<u8>>, BoxError>,
+        F2: AsyncFnMut(u32) -> Result<Option<Vec<u8>>, BoxError>,
     {
         let mut index = Self::load_metadata(tokenizer, metadata)?;
         index.load_segments(segments_fn).await?;
@@ -294,20 +294,22 @@ where
     /// * `Result<(), BTreeError>` - Success or error
     pub async fn load_segments<F>(&mut self, mut f: F) -> Result<(), BM25Error>
     where
-        F: AsyncFnMut(u32) -> Result<Vec<u8>, BoxError>,
+        F: AsyncFnMut(u32) -> Result<Option<Vec<u8>>, BoxError>,
     {
         for i in 0..=self.max_segment_id.load(Ordering::Relaxed) / SEGMENTS_BUCKET_SIZE {
             let data = f(i as u32).await.map_err(|err| BM25Error::Generic {
                 name: self.name.clone(),
                 source: err,
             })?;
-            let segments: HashMap<u64, usize> =
-                ciborium::from_reader(&data[..]).map_err(|err| BM25Error::Serialization {
-                    name: self.name.clone(),
-                    source: err.into(),
-                })?;
+            if let Some(data) = data {
+                let segments: HashMap<u64, usize> =
+                    ciborium::from_reader(&data[..]).map_err(|err| BM25Error::Serialization {
+                        name: self.name.clone(),
+                        source: err.into(),
+                    })?;
 
-            self.seg_tokens.extend(segments);
+                self.seg_tokens.extend(segments);
+            }
         }
 
         Ok(())
@@ -320,7 +322,7 @@ where
     /// # Arguments
     ///
     /// * `f` - Async function that reads posting data from a specified bucket.
-    ///   `F: AsyncFn(u32) -> Result<Vec<u8>, BTreeError>`
+    ///   `F: AsyncFn(u32) -> Result<Option<Vec<u8>>, BTreeError>`
     ///   The function should take a bucket ID as input and return a vector of bytes
     ///   containing the serialized posting data.
     ///
@@ -329,23 +331,25 @@ where
     /// * `Result<(), BTreeError>` - Success or error
     pub async fn load_postings<F>(&mut self, mut f: F) -> Result<(), BM25Error>
     where
-        F: AsyncFnMut(u32) -> Result<Vec<u8>, BoxError>,
+        F: AsyncFnMut(u32) -> Result<Option<Vec<u8>>, BoxError>,
     {
         for i in 0..=self.max_bucket_id.load(Ordering::Relaxed) {
             let data = f(i).await.map_err(|err| BM25Error::Generic {
                 name: self.name.clone(),
                 source: err,
             })?;
-            let postings: HashMap<String, PostingValue> = ciborium::from_reader(&data[..])
-                .map_err(|err| BM25Error::Serialization {
-                    name: self.name.clone(),
-                    source: err.into(),
-                })?;
-            let bks = postings.keys().cloned().collect::<Vec<_>>();
-            // Update bucket information
-            // Larger buckets have the most recent state and can override smaller buckets
-            self.buckets.insert(i, (data.len() as u32, false, bks));
-            self.postings.extend(postings);
+            if let Some(data) = data {
+                let postings: HashMap<String, PostingValue> = ciborium::from_reader(&data[..])
+                    .map_err(|err| BM25Error::Serialization {
+                        name: self.name.clone(),
+                        source: err.into(),
+                    })?;
+                let bks = postings.keys().cloned().collect::<Vec<_>>();
+                // Update bucket information
+                // Larger buckets have the most recent state and can override smaller buckets
+                self.buckets.insert(i, (data.len() as u32, false, bks));
+                self.postings.extend(postings);
+            }
         }
 
         Ok(())
@@ -831,7 +835,7 @@ where
     }
 
     /// Stores the index metadata, IDs and nodes to persistent storage.
-    pub async fn store_all<W: Write, F1, F2>(
+    pub async fn flush<W: Write, F1, F2>(
         &self,
         metadata: W,
         now_ms: u64,
@@ -1170,7 +1174,7 @@ mod tests {
 
         // 保存索引
         index
-            .store_all(
+            .flush(
                 &mut metadata,
                 0,
                 async |id: u32, data: &[u8]| {
@@ -1190,8 +1194,8 @@ mod tests {
         let loaded_index = BM25Index::load_all(
             tokenizer,
             &metadata[..],
-            async |id| Ok(segments.get(&id).cloned().unwrap()),
-            async |id| Ok(postings.get(&id).cloned().unwrap()),
+            async |id| Ok(segments.get(&id).cloned()),
+            async |id| Ok(postings.get(&id).cloned()),
         )
         .await
         .unwrap();

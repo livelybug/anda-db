@@ -83,7 +83,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let metadata = std::fs::File::create("debug/btree_demo/metadata.cbor")?;
         index
-            .store_all(metadata, now_ms, async |id, data| {
+            .flush(metadata, now_ms, async |id, data| {
                 let mut bucket =
                     std::fs::File::create(format!("debug/btree_demo/bucket_{id}.cbor"))?;
                 bucket.write_all(data)?;
@@ -106,7 +106,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut file = std::fs::File::open(format!("debug/btree_demo/bucket_{id}.cbor"))?;
             let mut data = Vec::new();
             file.read_to_end(&mut data)?;
-            Ok(data)
+            Ok(Some(data))
         })
         .await?;
 

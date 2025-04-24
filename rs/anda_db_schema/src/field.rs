@@ -137,6 +137,14 @@ impl FieldType {
             (FieldType::Text, FieldValue::Text(_)) => Ok(()),
             (FieldType::Json, FieldValue::Json(_)) => Ok(()),
             (FieldType::Vector, FieldValue::Vector(_)) => Ok(()),
+            (FieldType::Vector, FieldValue::Array(values)) => {
+                if let Some(FieldValue::U64(_)) = values.iter().next() {
+                    return Ok(());
+                }
+                Err(SchemaError::FieldValue(format!(
+                    "expected Vector, got {values:?}"
+                )))
+            }
             (FieldType::Array(types), FieldValue::Array(values)) => match types.len() {
                 0 => Ok(()),
                 1 => {
@@ -168,22 +176,32 @@ impl FieldType {
                     Ok(())
                 }
             },
-            (FieldType::Map(types), FieldValue::Map(values)) => {
-                if let Some(k) = values.keys().find(|k| !types.contains_key(*k)) {
-                    return Err(SchemaError::FieldValue(format!("invalid map key {:?}", k)));
+            (FieldType::Map(types), FieldValue::Map(values)) => match types.len() {
+                0 => Ok(()),
+                1 => {
+                    let ft = types.values().next().unwrap();
+                    for fv in values.iter() {
+                        ft.validate(fv.1)?;
+                    }
+                    Ok(())
                 }
+                _ => {
+                    if let Some(k) = values.keys().find(|k| !types.contains_key(*k)) {
+                        return Err(SchemaError::FieldValue(format!("invalid map key {:?}", k)));
+                    }
 
-                for (k, ft) in types.iter() {
-                    ft.validate(values.get(k).unwrap_or(&FieldValue::Null))
-                        .map_err(|err| {
-                            SchemaError::FieldValue(format!(
-                                "invalid map value at key {:?}, error: {}",
-                                k, err
-                            ))
-                        })?;
+                    for (k, ft) in types.iter() {
+                        ft.validate(values.get(k).unwrap_or(&FieldValue::Null))
+                            .map_err(|err| {
+                                SchemaError::FieldValue(format!(
+                                    "invalid map value at key {:?}, error: {}",
+                                    k, err
+                                ))
+                            })?;
+                    }
+                    Ok(())
                 }
-                Ok(())
-            }
+            },
             (FieldType::Option(ft), val) => {
                 if val == &FieldValue::Null {
                     return Ok(());
@@ -1393,6 +1411,11 @@ mod tests {
         assert!(
             FieldType::Vector
                 .validate(&FieldValue::Array(vec![FieldValue::U64(1)]))
+                .is_ok()
+        );
+        assert!(
+            FieldType::Vector
+                .validate(&FieldValue::Array(vec![FieldValue::I64(-1)]))
                 .is_err()
         );
 

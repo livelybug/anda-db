@@ -53,3 +53,7 @@ default = []
 full = ["tantivy", "tantivy-jieba"]
 tantivy = ["dep:tantivy"]
 tantivy-jieba = ["dep:tantivy-jieba", "dep:tantivy"]
+
+[[example]]
+name = "db_demo"
+required-features = ["full"]

@@ -175,7 +175,7 @@ impl Collection {
             max_segment_id: AtomicU64::new(0),
             search_count: AtomicU64::new(0),
             get_count: AtomicU64::new(0),
-            tokenizer: jieba_tokenizer(),
+            tokenizer: default_tokenizer(),
             doc_ids: RwLock::new(Treemap::new()),
             bucket_overload_size,
             current_bucket: RwLock::new((0, 0)),
@@ -185,7 +185,10 @@ impl Collection {
         })
     }
 
-    pub(crate) async fn open(db: &AndaDB, name: String) -> Result<Self, DBError> {
+    pub(crate) async fn open<F>(db: &AndaDB, name: String, f: F) -> Result<Self, DBError>
+    where
+        F: AsyncFnOnce(&mut Collection) -> Result<(), DBError>,
+    {
         validate_field_name(name.as_str())?;
         let base_path = Path::from(db.name()).child(name.as_str());
         let db_metadata = db.metadata();
@@ -213,7 +216,7 @@ impl Collection {
             max_segment_id: AtomicU64::new(metadata.stats.max_segment_id),
             search_count: AtomicU64::new(metadata.stats.search_count),
             get_count: AtomicU64::new(metadata.stats.get_count),
-            tokenizer: jieba_tokenizer(),
+            tokenizer: default_tokenizer(),
             doc_ids: RwLock::new(Treemap::new()),
             bucket_overload_size,
             current_bucket: RwLock::new((metadata.stats.max_bucket_id, 0)),
@@ -222,6 +225,7 @@ impl Collection {
             read_only: AtomicBool::new(false),
         };
 
+        f(&mut collection).await?;
         collection.load_ids().await?;
         collection.load_doc_segments().await?;
         collection.load_indexes().await?;
@@ -243,7 +247,8 @@ impl Collection {
     async fn load_doc_segments(&mut self) -> Result<(), DBError> {
         let mut doc_segments: BTreeMap<DocumentId, Vec<SegmentId>> = BTreeMap::new();
         let max_bucket_id = self.metadata.read().stats.max_bucket_id;
-        for i in 0..max_bucket_id {
+
+        for i in 0..=max_bucket_id {
             let path = Self::doc_segments_path(i);
             let (bucket, _) = self.storage.fetch::<DocSegmentsBucket>(&path).await?;
             let doc_ids = self.doc_ids.read();
@@ -320,7 +325,7 @@ impl Collection {
 
     pub async fn close(&self) -> Result<(), DBError> {
         let start = Instant::now();
-        match self.store_all(unix_ms()).await {
+        match self.flush(unix_ms()).await {
             Ok(_) => {
                 let elapsed = start.elapsed();
                 log::info!(
@@ -344,7 +349,7 @@ impl Collection {
         Ok(())
     }
 
-    pub async fn store_all(&self, now_ms: u64) -> Result<(), DBError> {
+    pub async fn flush(&self, now_ms: u64) -> Result<(), DBError> {
         try_join!(
             self.store_metadata(now_ms),
             self.store_ids(),
@@ -521,6 +526,17 @@ impl Collection {
         Ok(())
     }
 
+    pub async fn create_btree_index_nx(&mut self, name: &str, field: &str) -> Result<(), DBError> {
+        match self.create_btree_index(name, field).await {
+            Ok(_) => Ok(()),
+            Err(DBError::AlreadyExists { .. }) => {
+                // Ignore the error if the index already exists
+                Ok(())
+            }
+            Err(err) => Err(err),
+        }
+    }
+
     pub async fn create_search_index(
         &mut self,
         name: &str,
@@ -582,6 +598,22 @@ impl Collection {
         self.bm25_hnsw_indexes.push((bm25, hnsw));
         self.store_metadata(now_ms).await?;
         Ok(())
+    }
+
+    pub async fn create_search_index_nx(
+        &mut self,
+        name: &str,
+        field: &str,
+        config: HnswConfig,
+    ) -> Result<(), DBError> {
+        match self.create_search_index(name, field, config).await {
+            Ok(_) => Ok(()),
+            Err(DBError::AlreadyExists { .. }) => {
+                // Ignore the error if the index already exists
+                Ok(())
+            }
+            Err(err) => Err(err),
+        }
     }
 
     pub async fn add(&self, mut doc: Document) -> Result<DocumentId, DBError> {
@@ -779,6 +811,8 @@ impl Collection {
         let top_k = limit * 3;
         let mut candidates = Vec::with_capacity(top_k);
         let mut result = Vec::new();
+
+        self.search_count.fetch_add(1, AtomicOrdering::Relaxed);
 
         if let Some(params) = query.search {
             if let Some((bm25, hnsw)) = self

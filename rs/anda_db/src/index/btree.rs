@@ -346,8 +346,11 @@ where
         let (metadata, _) = storage.fetch_raw(&path).await?;
         let index = BTreeIndex::<DocumentId, FV>::load_all(&metadata[..], async |id: u32| {
             let path = BTree::posting_path(&name, id);
-            let (data, _) = storage.fetch_raw(&path).await?;
-            Ok(data.into())
+            match storage.fetch_raw(&path).await {
+                Ok((data, _)) => Ok(Some(data.into())),
+                Err(DBError::NotFound { .. }) => Ok(None),
+                Err(e) => Err(e.into()),
+            }
         })
         .await?;
 
@@ -360,9 +363,9 @@ where
     }
 
     async fn flush(&self, now_ms: u64) -> Result<(), DBError> {
-        let path = BTree::metadata_path(&self.name);
         let mut data = Vec::new();
         self.index.store_metadata(&mut data, now_ms)?;
+        let path = BTree::metadata_path(&self.name);
         self.storage
             .put_bytes(&path, data.into(), PutMode::Overwrite)
             .await?;

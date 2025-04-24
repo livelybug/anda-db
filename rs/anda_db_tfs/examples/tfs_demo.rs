@@ -56,7 +56,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let metadata = std::fs::File::create("debug/tfs_demo/metadata.cbor")?;
         index
-            .store_all(
+            .flush(
                 metadata,
                 0,
                 async |id, data| {
@@ -82,13 +82,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut node = std::fs::File::open(format!("debug/tfs_demo/seg_{id}.cbor"))?;
             let mut buf = Vec::new();
             node.read_to_end(&mut buf)?;
-            Ok(buf)
+            Ok(Some(buf))
         },
         async |id| {
             let mut node = std::fs::File::open(format!("debug/tfs_demo/posting_{id}.cbor"))?;
             let mut buf = Vec::new();
             node.read_to_end(&mut buf)?;
-            Ok(buf)
+            Ok(Some(buf))
         },
     )
     .await?;
