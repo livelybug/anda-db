@@ -26,10 +26,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     index.insert(1, apple.clone(), now_ms).unwrap();
     index.insert(2, banana.clone(), now_ms).unwrap();
     index.insert(3, cherry.clone(), now_ms).unwrap();
-
-    // Batch insert
-    let items = vec![(4, date.clone()), (5, berry.clone())];
-    index.batch_insert(items, now_ms).unwrap();
+    index.insert(4, date.clone(), now_ms).unwrap();
+    index.insert(5, berry.clone(), now_ms).unwrap();
 
     // Search for exact matches
     let result = index.search_with(&apple, |ids| Some(ids.clone()));

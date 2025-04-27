@@ -52,7 +52,7 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
 name = "anda_db"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anda_db_btree",
  "anda_db_hnsw",
@@ -90,7 +90,7 @@ dependencies = [
 
 [[package]]
 name = "anda_db_btree"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "ciborium",
  "const-hex",

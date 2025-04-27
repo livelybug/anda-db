@@ -15,7 +15,7 @@ use dashmap::DashMap;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     fmt::Debug,
     hash::Hash,
     io::{Read, Write},
@@ -544,99 +544,160 @@ where
         Ok(size_increase > 0)
     }
 
-    /// Batch inserts multiple document_id-field_value pairs into the index
-    ///
-    /// This method is optimized for inserting multiple items at once by grouping
-    /// updates by field value and bucket, reducing lock contention and improving performance.
-    /// Duplicate keys will be skipped if `allow_duplicates` is set to `false`.
+    /// Removes a document_id-field_value pair from the index with hook function
     ///
     /// # Arguments
     ///
-    /// * `items` - Iterator of (document_id, field_value) pairs to insert
+    /// * `doc_id` - Document identifier
+    /// * `field_value` - field to remove
     /// * `now_ms` - Current timestamp in milliseconds
     ///
     /// # Returns
     ///
-    /// * `Result<usize, BTreeError>` - Success or error
-    pub fn batch_insert<I>(&self, items: I, now_ms: u64) -> Result<usize, BTreeError>
-    where
-        I: IntoIterator<Item = (PK, FV)>,
-    {
-        // Group batch data by different field values
-        let mut grouped_items: BTreeMap<FV, Vec<PK>> = BTreeMap::new();
-        for (doc_id, field_value) in items {
-            grouped_items.entry(field_value).or_default().push(doc_id);
-        }
+    /// * `bool` - `true` if the document_id-field_value pair was successfully removed, `false` otherwise
+    pub fn remove(&self, doc_id: PK, field_value: FV, now_ms: u64) -> bool {
+        let mut removed = false;
+        let mut size_decrease = 0;
+        let mut posting_empty = false;
+        let mut bucket_id = 0;
 
-        if grouped_items.is_empty() {
-            return Ok(0);
-        }
-        let insert_count = grouped_items.len() as u64;
-
-        // Batch processing work, optimized by grouping writes by bucket
-        // Phase 1: Update the postings collection
-        let mut bucket_updates: HashMap<u32, (u32, Vec<FV>)> = HashMap::new();
-        let mut new_btree_values: BTreeSet<FV> = BTreeSet::new();
-
-        for (field_value, doc_ids) in grouped_items {
-            // Consider concurrent scenarios where buckets might be modified by other threads
-            let bucket = self.max_bucket_id.load(Ordering::Relaxed);
-            let mut size_increase = 0;
-            let mut inserted_to_bucket = bucket;
-
-            match self.postings.entry(field_value.clone()) {
-                dashmap::Entry::Occupied(mut entry) => {
-                    // Check if duplicate keys are allowed
-                    if !self.config.allow_duplicates && !doc_ids.is_empty() {
-                        // Skip duplicate keys
-                        continue;
-                    }
-
-                    let posting = entry.get_mut();
-                    // Use HashSet to avoid adding duplicate doc_ids
-                    let mut new_ids = Vec::new();
-                    for doc_id in doc_ids {
-                        if !posting.2.contains(&doc_id) {
-                            new_ids.push(doc_id);
-                        }
-                    }
-
-                    if !new_ids.is_empty() {
-                        size_increase = new_ids
-                            .iter()
-                            .fold(0, |acc, id| acc + CountingWriter::count_cbor(id) as u32 + 2);
-                        posting.2.extend(new_ids);
-                        posting.1 += 1; // increment version
-                    }
-                    inserted_to_bucket = posting.0;
-                }
-                dashmap::Entry::Vacant(entry) => {
-                    let posting = (bucket, 1, doc_ids);
-                    size_increase = CountingWriter::count_cbor(&posting) as u32 + 2;
-                    entry.insert(posting);
-                    new_btree_values.insert(field_value.clone());
-                }
-            };
-
-            // If new content was added
-            if size_increase > 0 {
-                // Collect updates by bucket for batch processing later
-                let entry = bucket_updates
-                    .entry(inserted_to_bucket)
-                    .or_insert((0, Vec::new()));
-
-                entry.0 += size_increase;
-                if !entry.1.contains(&field_value) {
-                    entry.1.push(field_value.clone());
+        {
+            if let Some(mut posting) = self.postings.get_mut(&field_value) {
+                removed = true;
+                bucket_id = posting.0;
+                if let Some(pos) = posting.2.iter().position(|id| id == &doc_id) {
+                    size_decrease = if posting.2.len() > 1 {
+                        CountingWriter::count_cbor(&doc_id) as u32 + 2
+                    } else {
+                        CountingWriter::count_cbor(&posting) as u32 + 2
+                    };
+                    posting.1 += 1; // increment version
+                    posting.2.swap_remove(pos);
+                    posting_empty = posting.2.is_empty();
                 }
             }
         }
 
-        if !new_btree_values.is_empty() {
-            self.btree.write().append(&mut new_btree_values);
+        if removed {
+            // Update the bucket state
+            if let Some(mut b) = self.buckets.get_mut(&bucket_id) {
+                b.0 = b.0.saturating_sub(size_decrease);
+                b.1 = true;
+
+                if posting_empty {
+                    // remove FV from the bucket
+                    if let Some(pos) = b.2.iter().position(|k| &field_value == k) {
+                        b.2.swap_remove(pos);
+                    }
+                }
+            }
+
+            if posting_empty {
+                self.btree.write().remove(&field_value);
+                self.postings.remove(&field_value);
+            }
+
+            self.update_metadata(|m| {
+                m.stats.version += 1;
+                m.stats.last_deleted = now_ms;
+                m.stats.delete_count += 1;
+            });
         }
 
-        // Phase 2: Update bucket states
+        removed
+    }
+
+    /// Inserts document_id-field_values to the index
+    ///
+    /// This method is more efficient than calling insert() multiple times
+    /// as it can optimize bucket allocation and reduce lock contention.
+    ///
+    /// # Arguments
+    ///
+    /// * `doc_id` - Document identifier
+    /// * `field_values` - Array of field values to index for this document
+    /// * `now_ms` - Current timestamp in milliseconds
+    ///
+    /// # Returns
+    ///
+    /// * `Result<usize, BTreeError>` - Number of items successfully inserted or error
+    pub fn insert_array(
+        &self,
+        doc_id: PK,
+        field_values: Vec<FV>,
+        now_ms: u64,
+    ) -> Result<usize, BTreeError> {
+        if field_values.is_empty() {
+            return Ok(0);
+        }
+
+        // Track which values were successfully inserted
+        let mut inserted_count = 0;
+        // Track which buckets were modified and need updates
+        let mut bucket_updates: HashMap<u32, (u32, HashSet<FV>)> = HashMap::new();
+        // New values that need to be added to the B-tree
+        let mut new_btree_values = Vec::new();
+
+        let bucket_id = self.max_bucket_id.load(Ordering::Acquire);
+
+        // Phase 1: collect existing postings and prepare modifications
+        // Skip duplicate field values if not allowed
+        if !self.config.allow_duplicates {
+            for field_value in &field_values {
+                // Check if the field value already exists with this doc_id
+                if self.postings.contains_key(field_value) {
+                    return Err(BTreeError::AlreadyExists {
+                        name: self.name.clone(),
+                        id: format!("{:?}", doc_id),
+                        value: format!("{:?}", field_value),
+                    });
+                }
+            }
+        }
+
+        for field_value in field_values {
+            let mut size_increase = 0;
+            match self.postings.entry(field_value.clone()) {
+                dashmap::Entry::Occupied(mut entry) => {
+                    let posting = entry.get_mut();
+                    // Only add the doc_id if it's not already present
+                    if !posting.2.contains(&doc_id) {
+                        // Calculate size increase for this insertion
+                        size_increase = CountingWriter::count_cbor(&doc_id) as u32 + 2;
+
+                        // Add doc_id to the posting
+                        posting.2.push(doc_id.clone());
+                        posting.1 += 1; // Increment version
+                    }
+                }
+                dashmap::Entry::Vacant(entry) => {
+                    // Create a new posting for this field value
+                    let posting = (bucket_id, 1, vec![doc_id.clone()]);
+                    size_increase = CountingWriter::count_cbor(&posting) as u32 + 2;
+                    // Insert the new posting
+                    entry.insert(posting);
+                    // Remember to add this to the B-tree for range queries
+                    new_btree_values.push(field_value.clone());
+                }
+            };
+
+            if size_increase > 0 {
+                // Update the bucket size tracking
+                let bucket_entry = bucket_updates
+                    .entry(bucket_id)
+                    .or_insert_with(|| (0, HashSet::new()));
+                bucket_entry.0 += size_increase;
+                bucket_entry.1.insert(field_value);
+                inserted_count += 1;
+            }
+        }
+
+        // Add all new values to the B-tree in a single operation
+        if !new_btree_values.is_empty() {
+            self.btree.write().extend(new_btree_values);
+        }
+
+        // Phase 2: handle bucket overflow and updates
         // field_values_to_migrate: (old_bucket_id, field_value, size)
         let mut field_values_to_migrate: Vec<(u32, FV, u32)> = Vec::new();
         for (bucket_id, (size_increase, field_values)) in bucket_updates {
@@ -658,7 +719,6 @@ where
                 } else {
                     // Bucket doesn't have enough space, need to migrate these values to a new bucket
                     for fv in field_values {
-                        // 获取需要迁移的 field_value 大小
                         let size = if let Some(posting) = self.postings.get(&fv) {
                             CountingWriter::count_cbor(&posting) as u32 + 2
                         } else {
@@ -736,77 +796,133 @@ where
             }
         }
 
-        // Update index metadata
-        self.update_metadata(|m| {
-            m.stats.version += 1;
-            m.stats.last_inserted = now_ms;
-            m.stats.insert_count += insert_count;
-        });
+        // Update metadata if any items were inserted
+        if inserted_count > 0 {
+            self.update_metadata(|m| {
+                m.stats.version += 1;
+                m.stats.last_inserted = now_ms;
+                m.stats.insert_count += inserted_count as u64;
+            });
+        }
 
-        Ok(insert_count as usize)
+        Ok(inserted_count)
     }
 
-    /// Removes a document_id-field_value pair from the index with hook function
+    /// Batch removes multiple document_id-field_value pairs from the index
+    ///
+    /// This method is more efficient than calling remove() multiple times
+    /// as it can optimize bucket updates and reduce lock contention.
     ///
     /// # Arguments
     ///
     /// * `doc_id` - Document identifier
-    /// * `field_value` - field to remove
+    /// * `field_values` - Array of field values to remove for this document
     /// * `now_ms` - Current timestamp in milliseconds
     ///
     /// # Returns
     ///
-    /// * `bool` - `true` if the document_id-field_value pair was successfully removed, `false` otherwise
-    pub fn remove(&self, doc_id: PK, field_value: FV, now_ms: u64) -> bool {
-        let mut removed = false;
-        let mut size_decrease = 0;
-        let mut posting_empty = false;
-        let mut bucket_id = 0;
+    /// * `usize` - Number of items successfully removed
+    pub fn remove_array(&self, doc_id: PK, field_values: Vec<FV>, now_ms: u64) -> usize {
+        if field_values.is_empty() {
+            return 0;
+        }
 
-        {
+        // Track removal statistics
+        let mut removed_count = 0;
+        // Track which buckets were modified
+        let mut bucket_updates: HashMap<u32, (u32, HashSet<FV>)> = HashMap::new();
+        // Track which field values are completely removed
+        let mut values_to_remove = Vec::new();
+
+        // First pass: collect which postings to modify
+        for field_value in field_values {
+            let mut removed = false;
+            let mut size_decrease = 0;
+            let mut posting_empty = false;
+            let mut bucket_id = 0;
+
+            // Check if this field value exists
             if let Some(mut posting) = self.postings.get_mut(&field_value) {
-                removed = true;
                 bucket_id = posting.0;
+
+                // Check if the document ID exists in the posting
                 if let Some(pos) = posting.2.iter().position(|id| id == &doc_id) {
+                    removed = true;
+
+                    // Calculate size decrease based on whether this is the last document
                     size_decrease = if posting.2.len() > 1 {
                         CountingWriter::count_cbor(&doc_id) as u32 + 2
                     } else {
                         CountingWriter::count_cbor(&posting) as u32 + 2
                     };
-                    posting.1 += 1; // increment version
+
+                    // Remove the document ID from the posting
+                    posting.1 += 1; // Increment version
                     posting.2.swap_remove(pos);
                     posting_empty = posting.2.is_empty();
                 }
             }
+
+            if removed {
+                // If posting is now empty, mark for removal
+                if posting_empty {
+                    values_to_remove.push(field_value.clone());
+                }
+
+                // Update bucket tracking
+                let bucket_entry = bucket_updates
+                    .entry(bucket_id)
+                    .or_insert_with(|| (0, HashSet::new()));
+                bucket_entry.0 += size_decrease;
+                bucket_entry.1.insert(field_value);
+
+                removed_count += 1;
+            }
         }
 
-        if removed {
-            // Update the bucket state
-            if let Some(mut b) = self.buckets.get_mut(&bucket_id) {
-                b.0 = b.0.saturating_sub(size_decrease);
-                b.1 = true;
-
-                if posting_empty {
-                    // remove FV from the bucket
-                    if let Some(pos) = b.2.iter().position(|k| &field_value == k) {
-                        b.2.swap_remove(pos);
-                    }
+        // Remove empty postings from the index and B-tree
+        if !values_to_remove.is_empty() {
+            // Remove from the B-tree
+            {
+                let mut btree = self.btree.write();
+                for value in &values_to_remove {
+                    btree.remove(value);
                 }
             }
 
-            if posting_empty {
-                self.btree.write().remove(&field_value);
-                self.postings.remove(&field_value);
+            // Remove from the postings map
+            for value in &values_to_remove {
+                self.postings.remove(value);
             }
+        }
 
+        // Update all modified buckets
+        for (bucket_id, (size_decrease, field_values)) in bucket_updates {
+            if let Some(mut bucket) = self.buckets.get_mut(&bucket_id) {
+                bucket.0 = bucket.0.saturating_sub(size_decrease);
+                bucket.1 = true; // Mark as dirty
+
+                // Remove field values that are completely removed
+                for fv in &values_to_remove {
+                    if field_values.contains(fv) {
+                        if let Some(pos) = bucket.2.iter().position(|k| k == fv) {
+                            bucket.2.swap_remove(pos);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Update metadata if any items were removed
+        if removed_count > 0 {
             self.update_metadata(|m| {
                 m.stats.version += 1;
                 m.stats.last_deleted = now_ms;
-                m.stats.delete_count += 1;
+                m.stats.delete_count += removed_count as u64;
             });
         }
 
-        removed
+        removed_count
     }
 
     /// Searches the index for an exact key match
@@ -1419,49 +1535,6 @@ mod tests {
     }
 
     #[test]
-    fn test_batch_insert() {
-        let index = create_test_index();
-
-        // 准备批量插入的数据
-        let items = vec![
-            (1, "apple".to_string()),
-            (2, "banana".to_string()),
-            (3, "cherry".to_string()),
-            (4, "date".to_string()),
-            (5, "eggplant".to_string()),
-        ];
-
-        // 测试批量插入
-        let result = index.batch_insert(items, now_ms());
-        assert!(result.is_ok());
-
-        assert_eq!(index.len(), 5);
-
-        // 测试重复插入
-        let items = vec![(6, "apple".to_string()), (7, "banana".to_string())];
-
-        let result = index.batch_insert(items, now_ms());
-        assert!(result.is_ok());
-
-        assert_eq!(index.len(), 5); // 字段值数量仍然是5
-
-        // 测试重复键的情况
-        let config = BTreeConfig {
-            bucket_overload_size: 1024,
-            allow_duplicates: false,
-        };
-        let unique_index = BTreeIndex::new("unique_index".to_string(), Some(config));
-
-        let result = unique_index.insert(1, "apple".to_string(), now_ms());
-        assert!(result.is_ok());
-
-        let items = vec![(2, "apple".to_string()), (3, "cherry".to_string())];
-        let result = unique_index.batch_insert(items, now_ms());
-        assert!(result.is_ok());
-        assert_eq!(unique_index.len(), 2); // 字段值数量是2
-    }
-
-    #[test]
     fn test_remove() {
         let index = create_populated_index();
 
@@ -1897,8 +1970,240 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_insert_array() {
+        let index = create_test_index();
+
+        // Test batch insert with empty values
+        let result = index.insert_array(1, vec![], now_ms());
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 0);
+
+        // Test batch insert with multiple values
+        let values = vec![
+            "apple".to_string(),
+            "banana".to_string(),
+            "cherry".to_string(),
+        ];
+        let result = index.insert_array(1, values.clone(), now_ms());
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 3);
+
+        // Verify all values were inserted
+        for value in &values {
+            let result = index.search_with(value, |ids| Some(ids.clone()));
+            assert!(result.is_some());
+            let ids = result.unwrap();
+            assert!(ids.contains(&1));
+        }
+
+        // Test inserting duplicate document ID for existing values (should be no-op)
+        let result = index.insert_array(1, values.clone(), now_ms());
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 0);
+
+        // Test inserting new document ID for existing values
+        let result = index.insert_array(2, values.clone(), now_ms());
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 3);
+
+        // Verify both document IDs are present
+        for value in &values {
+            let result = index.search_with(value, |ids| Some(ids.clone()));
+            assert!(result.is_some());
+            let ids = result.unwrap();
+            assert!(ids.contains(&1));
+            assert!(ids.contains(&2));
+        }
+
+        // Test with non-duplicate configuration
+        let config = BTreeConfig {
+            bucket_overload_size: 1024,
+            allow_duplicates: false,
+        };
+        let unique_index = BTreeIndex::new("unique_index".to_string(), Some(config));
+
+        // First insert should succeed
+        let result = unique_index.insert_array(1, vec!["apple".to_string()], now_ms());
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 1);
+
+        // Second insert with same value but different doc_id should fail
+        let result = unique_index.insert_array(2, vec!["apple".to_string()], now_ms());
+        assert!(result.is_err());
+
+        // Test bucket overflow handling
+        let small_bucket_config = BTreeConfig {
+            bucket_overload_size: 50,
+            allow_duplicates: true,
+        };
+        let overflow_index =
+            BTreeIndex::new("overflow_test".to_string(), Some(small_bucket_config));
+
+        // Create large values that will cause bucket overflow
+        let large_values: Vec<_> = (0..20).map(|i| format!("large_value_{}", i)).collect();
+
+        let result = overflow_index.insert_array(1, large_values.clone(), now_ms());
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 20);
+        let stats = overflow_index.stats();
+        assert!(stats.max_bucket_id == 0);
+
+        let result = overflow_index.insert_array(2, large_values.clone(), now_ms());
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 20);
+
+        // Verify bucket overflow occurred and created multiple buckets
+        let stats = overflow_index.stats();
+        println!("Overflow index stats: {:?}", stats);
+        assert!(stats.max_bucket_id > 0);
+
+        // Verify all values can still be found
+        for value in &large_values {
+            let result = overflow_index.search_with(value, |ids| Some(ids.clone()));
+            assert!(result.is_some());
+            let ids = result.unwrap();
+            assert!(ids.contains(&1));
+            assert!(ids.contains(&2));
+        }
+    }
+
+    #[test]
+    fn test_remove_array() {
+        let index = create_test_index();
+
+        // 首先插入一批数据
+        let values = vec![
+            "apple".to_string(),
+            "banana".to_string(),
+            "cherry".to_string(),
+            "date".to_string(),
+            "eggplant".to_string(),
+        ];
+
+        // 插入相同的值，但使用不同的文档ID
+        let _ = index.insert_array(1, values.clone(), now_ms());
+        let _ = index.insert_array(2, values.clone(), now_ms());
+        let _ = index.insert_array(3, vec![values[0].clone(), values[1].clone()], now_ms());
+
+        // 确认初始数据已正确插入
+        for value in &values {
+            let result = index.search_with(value, |ids| Some(ids.clone()));
+            assert!(result.is_some());
+            let ids = result.unwrap();
+
+            if value == "apple" || value == "banana" {
+                assert_eq!(ids.len(), 3); // 这些值应该有3个文档ID
+                assert!(ids.contains(&1) && ids.contains(&2) && ids.contains(&3));
+            } else {
+                assert_eq!(ids.len(), 2); // 其他值应该只有2个文档ID
+                assert!(ids.contains(&1) && ids.contains(&2));
+            }
+        }
+
+        // 测试1: 批量删除空列表 - 应该无效果
+        let removed = index.remove_array(1, vec![], now_ms());
+        assert_eq!(removed, 0);
+        assert_eq!(index.len(), 5); // 索引中的键数量不变
+
+        // 测试2: 批量删除部分存在的值
+        let remove_values = vec![
+            "apple".to_string(),
+            "nonexistent".to_string(), // 不存在的值
+            "banana".to_string(),
+        ];
+        let removed = index.remove_array(1, remove_values, now_ms());
+        assert_eq!(removed, 2); // 只有2个值被实际删除
+
+        // 验证删除结果 - apple和banana仍然存在，但不再包含文档ID 1
+        let apple_result = index.search_with(&"apple".to_string(), |ids| Some(ids.clone()));
+        assert!(apple_result.is_some());
+        let apple_ids = apple_result.unwrap();
+        assert_eq!(apple_ids.len(), 2);
+        assert!(!apple_ids.contains(&1) && apple_ids.contains(&2) && apple_ids.contains(&3));
+
+        let banana_result = index.search_with(&"banana".to_string(), |ids| Some(ids.clone()));
+        assert!(banana_result.is_some());
+        let banana_ids = banana_result.unwrap();
+        assert_eq!(banana_ids.len(), 2);
+        assert!(!banana_ids.contains(&1) && banana_ids.contains(&2) && banana_ids.contains(&3));
+
+        // 测试3: 删除某个值的最后一个文档ID - 该键应该从索引中完全移除
+        // 首先删除date和eggplant的文档ID 2，只剩下文档ID 1
+        let _ = index.remove_array(
+            2,
+            vec!["date".to_string(), "eggplant".to_string()],
+            now_ms(),
+        );
+
+        // 然后删除最后剩余的文档ID
+        let remove_values = vec!["date".to_string(), "eggplant".to_string()];
+        let removed = index.remove_array(1, remove_values, now_ms());
+        assert_eq!(removed, 2);
+
+        // 验证这些键已经完全从索引中移除
+        assert!(
+            index
+                .search_with(&"date".to_string(), |ids| Some(ids.clone()))
+                .is_none()
+        );
+        assert!(
+            index
+                .search_with(&"eggplant".to_string(), |ids| Some(ids.clone()))
+                .is_none()
+        );
+
+        // 验证索引中的键数量减少
+        assert_eq!(index.len(), 3); // 现在只剩下apple, banana, cherry
+
+        // 测试4: 测试统计信息更新
+        let stats = index.stats();
+        assert!(stats.delete_count > 0);
+
+        // 测试5: 测试从多个桶中删除（首先创建具有溢出的索引）
+        let small_bucket_config = BTreeConfig {
+            bucket_overload_size: 50,
+            allow_duplicates: true,
+        };
+        let overflow_index =
+            BTreeIndex::new("overflow_test".to_string(), Some(small_bucket_config));
+
+        // 插入足够多的数据以触发桶溢出
+        let large_values: Vec<_> = (0..20).map(|i| format!("large_value_{}", i)).collect();
+        let _ = overflow_index.insert_array(1, large_values.clone(), now_ms());
+        let _ = overflow_index.insert_array(2, large_values.clone(), now_ms());
+
+        // 验证桶溢出
+        let stats = overflow_index.stats();
+        assert!(stats.max_bucket_id > 0);
+
+        // 删除所有文档ID 1的条目
+        let removed = overflow_index.remove_array(1, large_values.clone(), now_ms());
+        assert_eq!(removed, 20);
+
+        // 验证所有键仍然存在，但只包含文档ID 2
+        for value in &large_values {
+            let result = overflow_index.search_with(value, |ids| Some(ids.clone()));
+            assert!(result.is_some());
+            let ids = result.unwrap();
+            assert_eq!(ids.len(), 1);
+            assert!(ids.contains(&2));
+        }
+
+        // 删除所有文档ID 2的条目 - 这应该完全清空索引
+        let removed = overflow_index.remove_array(2, large_values.clone(), now_ms());
+        assert_eq!(removed, 20);
+        assert_eq!(overflow_index.len(), 0);
+
+        // 验证所有键都已被移除
+        for value in &large_values {
+            let result = overflow_index.search_with(value, |ids| Some(ids.clone()));
+            assert!(result.is_none());
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_batch_insert_chaos() {
+    async fn test_chaos() {
         let index = Arc::new(BTreeIndex::<u64, String>::new(
             "chaos_index".to_string(),
             Some(BTreeConfig {
@@ -1921,11 +2226,11 @@ mod tests {
 
                 let base = t * n_keys_per_thread;
                 let items: Vec<_> = (0..n_keys_per_thread)
-                    .map(|i| ((base + i) as u64, format!("key_{}", base + i)))
+                    .map(|i| format!("key_{}", base + i))
                     .collect();
-                // 多次调用 batch_insert，模拟混乱
-                for _ in 0..3 {
-                    let _ = index.batch_insert(items.clone(), now_ms());
+                // 多次调用 insert_array，模拟混乱
+                for j in 0..5 {
+                    let _ = index.insert_array((base + j) as u64, items.clone(), now_ms());
                 }
             }));
         }
@@ -1940,12 +2245,118 @@ mod tests {
                 let key = format!("key_{}", base + i);
                 let result = index.search_with(&key, |ids| Some(ids.clone()));
                 assert!(result.is_some(), "key {} not found", key);
-                assert!(
-                    result.unwrap().contains(&((base + i) as u64)),
-                    "id {} not found for key {}",
-                    base + i,
-                    key
-                );
+
+                // 验证该键包含5个文档ID
+                let ids = result.unwrap();
+                assert_eq!(ids.len(), 5, "key {} should have 5 doc IDs", key);
+
+                for j in 0..5 {
+                    let doc_id = (base + j) as u64;
+                    assert!(
+                        ids.contains(&doc_id),
+                        "id {} not found for key {}",
+                        doc_id,
+                        key
+                    );
+                }
+            }
+        }
+
+        // 记录当前索引的大小
+        let size_before_remove = index.len();
+        assert_eq!(size_before_remove, n_threads * n_keys_per_thread);
+        println!("索引大小 (删除前): {}", size_before_remove);
+
+        // 第二阶段：多线程同时批量删除数据
+        let barrier = Arc::new(Barrier::new(n_threads));
+        let mut handles = Vec::new();
+
+        for t in 0..n_threads {
+            let index = index.clone();
+            let b = barrier.clone();
+            handles.push(tokio::spawn(async move {
+                // 等待所有线程准备好
+                b.wait().await;
+
+                let base = t * n_keys_per_thread;
+                let items: Vec<_> = (0..n_keys_per_thread)
+                    .map(|i| format!("key_{}", base + i))
+                    .collect();
+
+                // 删除前3个文档ID
+                for j in 0..3 {
+                    let doc_id = (base + j) as u64;
+                    let removed = index.remove_array(doc_id, items.clone(), now_ms());
+                    assert_eq!(
+                        removed, n_keys_per_thread,
+                        "应删除 {} 个键，实际删除 {}",
+                        n_keys_per_thread, removed
+                    );
+                }
+            }));
+        }
+
+        // 等待所有删除任务完成
+        futures::future::try_join_all(handles).await.unwrap();
+
+        // 验证删除结果：
+        // 1. 所有键都应该仍然存在，因为每个键仍有2个文档ID (4和5)
+        // 2. 每个键现在应该只包含2个文档ID
+        for t in 0..n_threads {
+            let base = t * n_keys_per_thread;
+            for i in 0..n_keys_per_thread {
+                let key = format!("key_{}", base + i);
+                let result = index.search_with(&key, |ids| Some(ids.clone()));
+                assert!(result.is_some(), "删除后键 {} 不应该被完全移除", key);
+
+                let ids = result.unwrap();
+                assert_eq!(ids.len(), 2, "删除后键 {} 应该有2个文档ID", key);
+
+                // 验证文档ID 0,1,2已被删除，3,4仍然存在
+                for j in 0..3 {
+                    let doc_id = (base + j) as u64;
+                    assert!(!ids.contains(&doc_id), "文档ID {} 应该已被删除", doc_id);
+                }
+
+                for j in 3..5 {
+                    let doc_id = (base + j) as u64;
+                    assert!(ids.contains(&doc_id), "文档ID {} 应该仍然存在", doc_id);
+                }
+            }
+        }
+
+        // 第三阶段：删除所有剩余的文档ID，清空索引
+        let mut handles = Vec::new();
+
+        for t in 0..n_threads {
+            let index = index.clone();
+            handles.push(tokio::spawn(async move {
+                let base = t * n_keys_per_thread;
+                let items: Vec<_> = (0..n_keys_per_thread)
+                    .map(|i| format!("key_{}", base + i))
+                    .collect();
+
+                // 删除剩余的2个文档ID
+                for j in 3..5 {
+                    let doc_id = (base + j) as u64;
+                    index.remove_array(doc_id, items.clone(), now_ms());
+                }
+            }));
+        }
+
+        // 等待所有删除任务完成
+        futures::future::try_join_all(handles).await.unwrap();
+
+        // 验证索引现在应该是空的
+        assert_eq!(index.len(), 0, "删除所有文档ID后索引应该为空");
+
+        // 尝试查找任意键，应该返回None
+        for t in 0..n_threads {
+            let base = t * n_keys_per_thread;
+            for i in 0..n_keys_per_thread {
+                let key = format!("key_{}", base + i);
+                let result = index.search_with(&key, |ids| Some(ids.clone()));
+                assert!(result.is_none(), "键 {} 应该已完全从索引中移除", key);
             }
         }
     }

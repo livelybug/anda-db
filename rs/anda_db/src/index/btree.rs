@@ -87,6 +87,22 @@ impl BTree {
             Ft::I64 => BTree::I64(InnerBTree::new(name, field, config, storage, now_ms).await?),
             Ft::Text => BTree::String(InnerBTree::new(name, field, config, storage, now_ms).await?),
             Ft::Bytes => BTree::Bytes(InnerBTree::new(name, field, config, storage, now_ms).await?),
+            Ft::Array(ref v) if v.len() == 1 => match v[0] {
+                Ft::U64 => BTree::U64(InnerBTree::new(name, field, config, storage, now_ms).await?),
+                Ft::I64 => BTree::I64(InnerBTree::new(name, field, config, storage, now_ms).await?),
+                Ft::Text => {
+                    BTree::String(InnerBTree::new(name, field, config, storage, now_ms).await?)
+                }
+                Ft::Bytes => {
+                    BTree::Bytes(InnerBTree::new(name, field, config, storage, now_ms).await?)
+                }
+                _ => {
+                    return Err(DBError::Index {
+                        name,
+                        source: format!("BTree: unsupported field: {:?}", field).into(),
+                    });
+                }
+            },
             _ => {
                 return Err(DBError::Index {
                     name,
@@ -165,6 +181,10 @@ impl BTree {
         field_value: &Fv,
         now_ms: u64,
     ) -> Result<bool, DBError> {
+        if let Fv::Array(vals) = field_value {
+            return self.insert_array(doc_id, vals, now_ms).map(|n| n > 0);
+        }
+
         match (&self, field_value) {
             (BTree::I64(btree), Fv::I64(val)) => btree
                 .index
@@ -194,51 +214,64 @@ impl BTree {
         }
     }
 
-    pub fn batch_insert<I>(&self, items: I, now_ms: u64) -> Result<usize, DBError>
-    where
-        I: IntoIterator<Item = (DocumentId, Fv)>,
-    {
+    pub fn insert_array(
+        &self,
+        doc_id: DocumentId,
+        field_values: &[Fv],
+        now_ms: u64,
+    ) -> Result<usize, DBError> {
         match &self {
-            BTree::I64(btree) => btree
-                .index
-                .batch_insert(
-                    items
-                        .into_iter()
-                        .filter_map(|(id, val)| val.try_into().ok().map(|v| (id, v))),
-                    now_ms,
-                )
-                .map_err(DBError::from),
-            BTree::U64(btree) => btree
-                .index
-                .batch_insert(
-                    items
-                        .into_iter()
-                        .filter_map(|(id, val)| val.try_into().ok().map(|v| (id, v))),
-                    now_ms,
-                )
-                .map_err(DBError::from),
-            BTree::String(btree) => btree
-                .index
-                .batch_insert(
-                    items
-                        .into_iter()
-                        .filter_map(|(id, val)| val.try_into().ok().map(|v| (id, v))),
-                    now_ms,
-                )
-                .map_err(DBError::from),
-            BTree::Bytes(btree) => btree
-                .index
-                .batch_insert(
-                    items
-                        .into_iter()
-                        .filter_map(|(id, val)| val.try_into().ok().map(|v| (id, v))),
-                    now_ms,
-                )
-                .map_err(DBError::from),
+            BTree::I64(btree) => {
+                let values: Vec<i64> = field_values
+                    .iter()
+                    .filter_map(|val| val.try_into().ok())
+                    .collect();
+                btree
+                    .index
+                    .insert_array(doc_id, values, now_ms)
+                    .map_err(DBError::from)
+            }
+            BTree::U64(btree) => {
+                let values: Vec<u64> = field_values
+                    .iter()
+                    .filter_map(|val| val.try_into().ok())
+                    .collect();
+                btree
+                    .index
+                    .insert_array(doc_id, values, now_ms)
+                    .map_err(DBError::from)
+            }
+            BTree::String(btree) => {
+                let values: Vec<String> = field_values
+                    .iter()
+                    .filter_map(|val| val.clone().try_into().ok())
+                    .collect();
+                btree
+                    .index
+                    .insert_array(doc_id, values, now_ms)
+                    .map_err(DBError::from)
+            }
+            BTree::Bytes(btree) => {
+                let values: Vec<Vec<u8>> = field_values
+                    .iter()
+                    .filter_map(|val| val.clone().try_into().ok())
+                    .collect();
+                btree
+                    .index
+                    .insert_array(doc_id, values, now_ms)
+                    .map_err(DBError::from)
+            }
         }
     }
 
     pub fn remove(&self, doc_id: DocumentId, field_value: &Fv, now_ms: u64) -> bool {
+        if let Fv::Array(vals) = field_value {
+            return self
+                .remove_array(doc_id, vals, now_ms)
+                .map(|n| n > 0)
+                .unwrap_or_default();
+        }
+
         match (&self, field_value) {
             (BTree::I64(btree), Fv::I64(val)) => btree.index.remove(doc_id, *val, now_ms),
             (BTree::U64(btree), Fv::U64(val)) => btree.index.remove(doc_id, *val, now_ms),
@@ -249,6 +282,44 @@ impl BTree {
                 btree.index.remove(doc_id, val.clone(), now_ms)
             }
             _ => false,
+        }
+    }
+
+    pub fn remove_array(
+        &self,
+        doc_id: DocumentId,
+        field_values: &[Fv],
+        now_ms: u64,
+    ) -> Result<usize, DBError> {
+        match &self {
+            BTree::I64(btree) => {
+                let values: Vec<i64> = field_values
+                    .iter()
+                    .filter_map(|val| val.try_into().ok())
+                    .collect();
+                Ok(btree.index.remove_array(doc_id, values, now_ms))
+            }
+            BTree::U64(btree) => {
+                let values: Vec<u64> = field_values
+                    .iter()
+                    .filter_map(|val| val.try_into().ok())
+                    .collect();
+                Ok(btree.index.remove_array(doc_id, values, now_ms))
+            }
+            BTree::String(btree) => {
+                let values: Vec<String> = field_values
+                    .iter()
+                    .filter_map(|val| val.clone().try_into().ok())
+                    .collect();
+                Ok(btree.index.remove_array(doc_id, values, now_ms))
+            }
+            BTree::Bytes(btree) => {
+                let values: Vec<Vec<u8>> = field_values
+                    .iter()
+                    .filter_map(|val| val.clone().try_into().ok())
+                    .collect();
+                Ok(btree.index.remove_array(doc_id, values, now_ms))
+            }
         }
     }
 
