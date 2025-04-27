@@ -1,6 +1,6 @@
 [package]
 name = "anda_db"
-version = "0.1.0"
+version = "0.1.1"
 description = "A multimodal knowledge database for AI with text and vector search"
 keywords = ["database", "vector", "search", "embedding", "ai"]
 categories = ["database", "data-structures", "text-processing"]

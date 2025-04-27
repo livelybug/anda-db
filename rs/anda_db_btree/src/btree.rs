@@ -19,7 +19,7 @@ use std::{
     fmt::Debug,
     hash::Hash,
     io::{Read, Write},
-    sync::atomic::{AtomicU32, AtomicU64, Ordering as AtomicOrdering},
+    sync::atomic::{AtomicU32, AtomicU64, Ordering},
 };
 
 use crate::{BTreeError, BoxError};
@@ -65,6 +65,9 @@ where
 
     /// Number of search operations performed
     search_count: AtomicU64,
+
+    /// Last saved version of the index
+    last_saved_version: AtomicU64,
 }
 
 /// Type alias for posting values: (bucket id, update version, Vec<document id>)
@@ -285,6 +288,7 @@ where
             bucket_overload_size,
             max_bucket_id: AtomicU32::new(0),
             search_count: AtomicU64::new(0),
+            last_saved_version: AtomicU64::new(0),
         }
     }
 
@@ -329,6 +333,8 @@ where
         let bucket_overload_size = index.metadata.config.bucket_overload_size;
         let max_bucket_id = AtomicU32::new(index.metadata.stats.max_bucket_id);
         let search_count = AtomicU64::new(index.metadata.stats.search_count);
+        let last_saved_version = AtomicU64::new(index.metadata.stats.version);
+
         Ok(BTreeIndex {
             name: index.metadata.name.clone(),
             config: index.metadata.config.clone(),
@@ -339,6 +345,7 @@ where
             bucket_overload_size,
             search_count,
             max_bucket_id,
+            last_saved_version,
         })
     }
 
@@ -360,7 +367,7 @@ where
     where
         F: AsyncFnMut(u32) -> Result<Option<Vec<u8>>, BoxError>,
     {
-        for i in 0..=self.max_bucket_id.load(AtomicOrdering::Relaxed) {
+        for i in 0..=self.max_bucket_id.load(Ordering::Relaxed) {
             let data = f(i).await.map_err(|err| BTreeError::Generic {
                 name: self.name.clone(),
                 source: err,
@@ -403,8 +410,8 @@ where
     pub fn metadata(&self) -> BTreeMetadata {
         let mut metadata = self.metadata.read().clone();
         metadata.stats.num_elements = self.postings.len() as u64;
-        metadata.stats.search_count = self.search_count.load(AtomicOrdering::Relaxed);
-        metadata.stats.max_bucket_id = self.max_bucket_id.load(AtomicOrdering::Relaxed);
+        metadata.stats.search_count = self.search_count.load(Ordering::Relaxed);
+        metadata.stats.max_bucket_id = self.max_bucket_id.load(Ordering::Relaxed);
         metadata
     }
 
@@ -412,8 +419,8 @@ where
     pub fn stats(&self) -> BTreeStats {
         let mut stats = { self.metadata.read().stats.clone() };
         stats.num_elements = self.postings.len() as u64;
-        stats.search_count = self.search_count.load(AtomicOrdering::Relaxed);
-        stats.max_bucket_id = self.max_bucket_id.load(AtomicOrdering::Relaxed);
+        stats.search_count = self.search_count.load(Ordering::Relaxed);
+        stats.max_bucket_id = self.max_bucket_id.load(Ordering::Relaxed);
         stats
     }
 
@@ -430,7 +437,7 @@ where
     /// * `Ok(bool)` if the document_id-field_value pair was successfully added
     /// * `Err(BTreeError)` if failed
     pub fn insert(&self, doc_id: PK, field_value: FV, now_ms: u64) -> Result<bool, BTreeError> {
-        let bucket = self.max_bucket_id.load(AtomicOrdering::Acquire);
+        let bucket = self.max_bucket_id.load(Ordering::Acquire);
 
         // Calculate the size increase for this insertion
         let mut is_new = false;
@@ -492,7 +499,7 @@ where
             } else {
                 // If the current bucket is full, create a new one
                 let mut size_decrease = 0;
-                new_bucket = self.max_bucket_id.fetch_add(1, AtomicOrdering::Release) + 1;
+                new_bucket = self.max_bucket_id.fetch_add(1, Ordering::Release) + 1;
                 {
                     if let Some(mut posting) = self.postings.get_mut(&field_value) {
                         // Update the posting's bucket ID
@@ -573,7 +580,7 @@ where
 
         for (field_value, doc_ids) in grouped_items {
             // Consider concurrent scenarios where buckets might be modified by other threads
-            let bucket = self.max_bucket_id.load(AtomicOrdering::Relaxed);
+            let bucket = self.max_bucket_id.load(Ordering::Relaxed);
             let mut size_increase = 0;
             let mut inserted_to_bucket = bucket;
 
@@ -668,7 +675,7 @@ where
 
         // Phase 3: Create new buckets if needed
         if !field_values_to_migrate.is_empty() {
-            let mut next_bucket_id = self.max_bucket_id.fetch_add(1, AtomicOrdering::Release) + 1;
+            let mut next_bucket_id = self.max_bucket_id.fetch_add(1, Ordering::Release) + 1;
 
             {
                 self.buckets
@@ -705,7 +712,7 @@ where
                 }
 
                 if new_bucket {
-                    next_bucket_id = self.max_bucket_id.fetch_add(1, AtomicOrdering::Release) + 1;
+                    next_bucket_id = self.max_bucket_id.fetch_add(1, Ordering::Release) + 1;
                     // update the posting's bucket_id again
                     if let Some(mut posting) = self.postings.get_mut(&field_value) {
                         posting.0 = next_bucket_id;
@@ -816,7 +823,7 @@ where
     where
         F: FnOnce(&Vec<PK>) -> Option<R>,
     {
-        self.search_count.fetch_add(1, AtomicOrdering::Relaxed);
+        self.search_count.fetch_add(1, Ordering::Relaxed);
 
         self.postings
             .get(field_value)
@@ -843,7 +850,7 @@ where
             return results;
         }
 
-        self.search_count.fetch_add(1, AtomicOrdering::Relaxed);
+        self.search_count.fetch_add(1, Ordering::Relaxed);
 
         match query {
             RangeQuery::Eq(key) => {
@@ -1097,13 +1104,21 @@ where
     }
 
     /// Stores the index metadata and dirty buckets to persistent storage.
-    pub async fn flush<W: Write, F>(&self, metadata: W, now_ms: u64, f: F) -> Result<(), BTreeError>
+    pub async fn flush<W: Write, F>(
+        &self,
+        metadata: W,
+        now_ms: u64,
+        f: F,
+    ) -> Result<bool, BTreeError>
     where
         F: AsyncFnMut(u32, &[u8]) -> Result<bool, BoxError>,
     {
-        self.store_metadata(metadata, now_ms)?;
+        if !self.store_metadata(metadata, now_ms)? {
+            return Ok(false);
+        }
+
         self.store_dirty_postings(f).await?;
-        Ok(())
+        Ok(true)
     }
 
     /// Stores the index metadata to a writer
@@ -1115,9 +1130,17 @@ where
     ///
     /// # Returns
     ///
-    /// * `Result<(), Error>` - Success or error
-    pub fn store_metadata<W: Write>(&self, w: W, now_ms: u64) -> Result<(), BTreeError> {
+    /// * `Result<bool, Error>` - true if the metadata was saved, false if the version was not updated
+    pub fn store_metadata<W: Write>(&self, w: W, now_ms: u64) -> Result<bool, BTreeError> {
         let mut meta = self.metadata();
+        let prev_saved_version = self
+            .last_saved_version
+            .fetch_max(meta.stats.version, Ordering::Release);
+        if prev_saved_version >= meta.stats.version {
+            // No need to save if the version is not updated
+            return Ok(false);
+        }
+
         meta.stats.last_saved = now_ms.max(meta.stats.last_saved);
         let postings: DashMap<FV, PostingValue<PK>> = DashMap::new();
         ciborium::into_writer(
@@ -1136,7 +1159,7 @@ where
             m.stats.last_saved = meta.stats.last_saved.max(m.stats.last_saved);
         });
 
-        Ok(())
+        Ok(true)
     }
 
     /// Stores dirty postings to persistent storage using the provided async function
@@ -1233,7 +1256,7 @@ where
             return results;
         }
 
-        self.search_count.fetch_add(1, AtomicOrdering::Relaxed);
+        self.search_count.fetch_add(1, Ordering::Relaxed);
         // Use prefix search
         for k in self
             .btree

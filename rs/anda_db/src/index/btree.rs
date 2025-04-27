@@ -305,7 +305,7 @@ impl BTree {
         }
     }
 
-    pub async fn flush(&self, now_ms: u64) -> Result<(), DBError> {
+    pub async fn flush(&self, now_ms: u64) -> Result<bool, DBError> {
         match self {
             BTree::I64(btree) => btree.flush(now_ms).await,
             BTree::U64(btree) => btree.flush(now_ms).await,
@@ -362,9 +362,12 @@ where
         })
     }
 
-    async fn flush(&self, now_ms: u64) -> Result<(), DBError> {
+    async fn flush(&self, now_ms: u64) -> Result<bool, DBError> {
         let mut data = Vec::new();
-        self.index.store_metadata(&mut data, now_ms)?;
+        if !self.index.store_metadata(&mut data, now_ms)? {
+            return Ok(false);
+        }
+
         let path = BTree::metadata_path(&self.name);
         self.storage
             .put_bytes(&path, data.into(), PutMode::Overwrite)
@@ -380,6 +383,6 @@ where
             })
             .await?;
 
-        Ok(())
+        Ok(true)
     }
 }

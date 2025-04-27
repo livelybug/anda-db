@@ -7,12 +7,12 @@ use anda_db::{
     schema::{Document, Fe, Ft, Fv, Json, Resource, Schema, Segment},
     storage::StorageConfig,
 };
-use anda_db_tfs::jieba_tokenizer;
 use ic_auth_types::Xid;
 use object_store::local::LocalFileSystem;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, sync::Arc};
 use structured_logger::unix_ms;
+// use anda_db_tfs::jieba_tokenizer;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Knowledge {
@@ -82,7 +82,7 @@ async fn main() -> Result<(), DBError> {
 
     let collection = db
         .open_or_create_collection(schema, collection_config, async |collection| {
-            collection.set_tokenizer(jieba_tokenizer());
+            // collection.set_tokenizer(jieba_tokenizer());
             collection
                 .create_btree_index_nx("btree_thread", "thread")
                 .await?;

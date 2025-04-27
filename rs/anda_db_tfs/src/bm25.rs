@@ -61,6 +61,9 @@ pub struct BM25Index<T: Tokenizer + Clone> {
 
     /// Number of search operations performed.
     search_count: AtomicU64,
+
+    /// Last saved version of the index
+    last_saved_version: AtomicU64,
 }
 
 /// Parameters for the BM25 ranking algorithm
@@ -207,6 +210,7 @@ where
             dirty_segment_buckets: RwLock::new(BTreeSet::new()),
             avg_seg_tokens: RwLock::new(0.0),
             search_count: AtomicU64::new(0),
+            last_saved_version: AtomicU64::new(0),
         }
     }
 
@@ -260,6 +264,7 @@ where
         let max_segment_id = AtomicU64::new(index.metadata.stats.max_segment_id);
         let search_count = AtomicU64::new(index.metadata.stats.search_count);
         let avg_seg_tokens = RwLock::new(index.metadata.stats.avg_seg_tokens);
+        let last_saved_version = AtomicU64::new(index.metadata.stats.version);
 
         Ok(BM25Index {
             name: index.metadata.name.clone(),
@@ -275,6 +280,7 @@ where
             max_segment_id,
             avg_seg_tokens,
             search_count,
+            last_saved_version,
         })
     }
 
@@ -841,15 +847,18 @@ where
         now_ms: u64,
         segments_fn: F1,
         postings_fn: F2,
-    ) -> Result<(), BM25Error>
+    ) -> Result<bool, BM25Error>
     where
         F1: AsyncFnMut(u32, &[u8]) -> Result<bool, BoxError>,
         F2: AsyncFnMut(u32, &[u8]) -> Result<bool, BoxError>,
     {
-        self.store_metadata(metadata, now_ms)?;
+        if !self.store_metadata(metadata, now_ms)? {
+            return Ok(false);
+        }
+
         self.store_dirty_segments(segments_fn).await?;
         self.store_dirty_postings(postings_fn).await?;
-        Ok(())
+        Ok(true)
     }
 
     /// Stores the index metadata to a writer in CBOR format.
@@ -861,9 +870,17 @@ where
     ///
     /// # Returns
     ///
-    /// * `Result<(), BM25Error>` - Success or error.
-    pub fn store_metadata<W: Write>(&self, w: W, now_ms: u64) -> Result<(), BM25Error> {
+    /// * `Result<bool, BM25Error>` - true if the metadata was saved, false if the version was not updated
+    pub fn store_metadata<W: Write>(&self, w: W, now_ms: u64) -> Result<bool, BM25Error> {
         let mut meta = self.metadata();
+        let prev_saved_version = self
+            .last_saved_version
+            .fetch_max(meta.stats.version, Ordering::Release);
+        if prev_saved_version >= meta.stats.version {
+            // No need to save if the version is not updated
+            return Ok(false);
+        }
+
         meta.stats.last_saved = now_ms.max(meta.stats.last_saved);
 
         ciborium::into_writer(
@@ -883,7 +900,7 @@ where
             m.stats.last_saved = meta.stats.last_saved.max(m.stats.last_saved);
         });
 
-        Ok(())
+        Ok(true)
     }
 
     /// Stores dirty segments to persistent storage using the provided async function

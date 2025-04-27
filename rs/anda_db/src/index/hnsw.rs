@@ -92,9 +92,12 @@ impl Hnsw {
         })
     }
 
-    pub async fn flush(&self, now_ms: u64) -> Result<(), DBError> {
+    pub async fn flush(&self, now_ms: u64) -> Result<bool, DBError> {
         let mut data = Vec::new();
-        self.index.store_metadata(&mut data, now_ms)?;
+        if !self.index.store_metadata(&mut data, now_ms)? {
+            return Ok(false);
+        }
+
         let path = Hnsw::metadata_path(&self.name);
         self.storage
             .put_bytes(&path, Bytes::copy_from_slice(&data[..]), PutMode::Overwrite)
@@ -117,7 +120,7 @@ impl Hnsw {
             })
             .await?;
 
-        Ok(())
+        Ok(true)
     }
 
     pub fn name(&self) -> &str {

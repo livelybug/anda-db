@@ -8,10 +8,10 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::{
-    cmp::{Ordering, Reverse},
+    cmp::{self, Reverse},
     collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet},
     io::{Read, Write},
-    sync::atomic::{self, AtomicU64},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 pub use half;
@@ -47,6 +47,9 @@ pub struct HnswIndex {
 
     /// Number of search operations performed.
     search_count: AtomicU64,
+
+    /// Last saved version of the index
+    last_saved_version: AtomicU64,
 }
 
 /// HNSW configuration parameters.
@@ -238,6 +241,7 @@ impl HnswIndex {
             dirty_nodes: RwLock::new(BTreeSet::new()),
             ids: RwLock::new(Treemap::new()),
             search_count: AtomicU64::new(0),
+            last_saved_version: AtomicU64::new(0),
         }
     }
 
@@ -281,6 +285,7 @@ impl HnswIndex {
             })?;
         let layer_gen = index.metadata.config.layer_gen();
         let search_count = AtomicU64::new(index.metadata.stats.search_count);
+        let last_saved_version = AtomicU64::new(index.metadata.stats.version);
 
         Ok(HnswIndex {
             name: index.metadata.name.clone(),
@@ -292,6 +297,7 @@ impl HnswIndex {
             dirty_nodes: RwLock::new(BTreeSet::new()),
             ids: RwLock::new(Treemap::new()),
             search_count,
+            last_saved_version,
         })
     }
 
@@ -390,7 +396,7 @@ impl HnswIndex {
     pub fn metadata(&self) -> HnswMetadata {
         let mut metadata = { self.metadata.read().clone() };
         metadata.stats.num_elements = self.nodes.len() as u64;
-        metadata.stats.search_count = self.search_count.load(atomic::Ordering::Relaxed);
+        metadata.stats.search_count = self.search_count.load(Ordering::Relaxed);
 
         metadata
     }
@@ -403,7 +409,7 @@ impl HnswIndex {
     pub fn stats(&self) -> HnswStats {
         let mut stats = { self.metadata.read().stats.clone() };
         stats.num_elements = self.nodes.len() as u64;
-        stats.search_count = self.search_count.load(atomic::Ordering::Relaxed);
+        stats.search_count = self.search_count.load(Ordering::Relaxed);
 
         stats
     }
@@ -557,7 +563,7 @@ impl HnswIndex {
             // improve the entry point for the next layer up.
             if let Some(closest_in_layer) = selected_neighbors
                 .iter()
-                .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal))
+                .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(cmp::Ordering::Equal))
             {
                 if closest_in_layer.1 < entry_point_dist {
                     entry_point_node = closest_in_layer.0;
@@ -822,7 +828,7 @@ impl HnswIndex {
         )?;
         results.truncate(top_k);
 
-        self.search_count.fetch_add(1, atomic::Ordering::Relaxed);
+        self.search_count.fetch_add(1, Ordering::Relaxed);
 
         Ok(results
             .into_iter()
@@ -1000,7 +1006,7 @@ impl HnswIndex {
             SelectNeighborsStrategy::Simple => {
                 // Simple strategy: select m closest neighbors
                 let mut selected = candidates;
-                selected.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
+                selected.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(cmp::Ordering::Equal));
                 selected.truncate(m);
                 Ok(selected)
             }
@@ -1009,7 +1015,7 @@ impl HnswIndex {
                 // Create candidate and result sets
                 let mut selected: Vec<(u64, f32, u8)> = Vec::with_capacity(m);
                 let mut remaining = candidates;
-                remaining.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
+                remaining.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(cmp::Ordering::Equal));
 
                 // Add the first nearest neighbor
                 if !remaining.is_empty() {
@@ -1110,14 +1116,16 @@ impl HnswIndex {
         ids: W,
         now_ms: u64,
         f: F,
-    ) -> Result<(), HnswError>
+    ) -> Result<bool, HnswError>
     where
         F: AsyncFnMut(u64, &[u8]) -> Result<bool, BoxError>,
     {
-        self.store_metadata(metadata, now_ms)?;
+        if !self.store_metadata(metadata, now_ms)? {
+            return Ok(false);
+        }
         self.store_ids(ids)?;
         self.store_dirty_nodes(f).await?;
-        Ok(())
+        Ok(true)
     }
 
     /// Stores the index metadata to a writer in CBOR format.
@@ -1129,9 +1137,17 @@ impl HnswIndex {
     ///
     /// # Returns
     ///
-    /// * `Result<(), HnswError>` - Success or error.
-    pub fn store_metadata<W: Write>(&self, w: W, now_ms: u64) -> Result<(), HnswError> {
+    /// * `Result<bool, HnswError>` - true if the metadata was saved, false if the version was not updated
+    pub fn store_metadata<W: Write>(&self, w: W, now_ms: u64) -> Result<bool, HnswError> {
         let mut meta = self.metadata();
+        let prev_saved_version = self
+            .last_saved_version
+            .fetch_max(meta.stats.version, Ordering::Release);
+        if prev_saved_version >= meta.stats.version {
+            // No need to save if the version is not updated
+            return Ok(false);
+        }
+
         meta.stats.last_saved = now_ms.max(meta.stats.last_saved);
         ciborium::into_writer(
             &HnswIndexRef {
@@ -1150,7 +1166,7 @@ impl HnswIndex {
             m.stats.last_saved = meta.stats.last_saved.max(m.stats.last_saved);
         });
 
-        Ok(())
+        Ok(true)
     }
 
     /// Stores the index ids to a writer in CBOR format.

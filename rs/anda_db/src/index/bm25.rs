@@ -115,9 +115,12 @@ impl BM25 {
         })
     }
 
-    pub async fn flush(&self, now_ms: u64) -> Result<(), DBError> {
+    pub async fn flush(&self, now_ms: u64) -> Result<bool, DBError> {
         let mut data = Vec::new();
-        self.index.store_metadata(&mut data, now_ms)?;
+        if !self.index.store_metadata(&mut data, now_ms)? {
+            return Ok(false);
+        }
+
         let path = BM25::metadata_path(&self.name);
         self.storage
             .put_bytes(&path, data.into(), PutMode::Overwrite)
@@ -143,7 +146,7 @@ impl BM25 {
             })
             .await?;
 
-        Ok(())
+        Ok(true)
     }
 
     pub fn name(&self) -> &str {
