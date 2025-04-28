@@ -30,6 +30,8 @@ dashmap = "6.1"
 rand = "0.9"
 rayon = "1.10"
 ordered-float = "5.0"
+ndarray = { version = "0.16" }
+blas-src = { version = "0.10" }
 half = { version = "2.5", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_bytes = "0.11"
@@ -50,3 +52,6 @@ pin-project-lite = "0.2"
 zstd-safe = "7"
 async-compression = { version = "0.4", features = ["tokio", "zstd"] }
 unicode-segmentation = "1"
+
+[workspace.metadata.cargo-shear]
+ignored = ["blas-src"]
