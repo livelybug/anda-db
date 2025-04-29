@@ -178,7 +178,6 @@ impl SchemaBuilder {
                 Schema::ID_KEY.to_string(),
                 FieldEntry::new(Schema::ID_KEY.to_string(), FieldType::U64)
                     .unwrap()
-                    .with_required()
                     .with_unique()
                     .with_idx(0)
                     .with_description(format!(
@@ -189,20 +188,6 @@ impl SchemaBuilder {
         }
     }
 
-    pub fn with_xid(&mut self, field: &str, unique: bool) -> Result<&mut Self, SchemaError> {
-        let mut entry = FieldEntry::new(field.to_string(), FieldType::Bytes)?
-            .with_required()
-            .with_description(format!(
-                "{:?} is a field of type Xid, used as an unique identifier",
-                field
-            ));
-        if unique {
-            entry = entry.with_unique();
-        }
-
-        self.add_field(entry)
-    }
-
     pub fn with_segments(&mut self, field: &str, required: bool) -> Result<&mut Self, SchemaError> {
         let ft = Segment::field_type();
         let ft = if required {
@@ -210,14 +195,11 @@ impl SchemaBuilder {
         } else {
             FieldType::Option(Box::new(ft))
         };
-        let mut entry = FieldEntry::new(field.to_string(), FieldType::Array(vec![ft]))?
+        let entry = FieldEntry::new(field.to_string(), FieldType::Array(vec![ft]))?
             .with_description(format!(
                 "{:?} is a field of type Segment, used to store segments",
                 field
             ));
-        if required {
-            entry = entry.with_required();
-        }
         self.add_field(entry)
     }
 
@@ -228,13 +210,11 @@ impl SchemaBuilder {
         } else {
             FieldType::Option(Box::new(ft))
         };
-        let mut entry = FieldEntry::new(field.to_string(), ft)?.with_description(format!(
+        let entry = FieldEntry::new(field.to_string(), ft)?.with_description(format!(
             "{:?} is a field of type Resource, used to store resources",
             field
         ));
-        if required {
-            entry = entry.with_required();
-        }
+
         self.add_field(entry)
     }
 
@@ -322,7 +302,7 @@ mod tests {
         let name_field = Fe::new("name".to_string(), Ft::Text).unwrap();
         assert!(builder.add_field(name_field).is_ok());
 
-        let age_field = Fe::new("age".to_string(), Ft::U64).unwrap().with_required();
+        let age_field = Fe::new("age".to_string(), Ft::Option(Box::new(Ft::U64))).unwrap();
         assert!(builder.add_field(age_field).is_ok());
 
         // 测试添加重复字段
@@ -351,12 +331,12 @@ mod tests {
         let name_field = schema.get_field("name").unwrap();
         assert_eq!(name_field.name(), "name");
         assert_eq!(name_field.idx(), 1);
-        assert!(!name_field.required());
+        assert!(name_field.required());
 
         let age_field = schema.get_field("age").unwrap();
         assert_eq!(age_field.name(), "age");
         assert_eq!(age_field.idx(), 2);
-        assert!(age_field.required());
+        assert!(!age_field.required());
 
         // 测试不存在的字段
         assert!(schema.get_field("unknown").is_none());
@@ -370,7 +350,7 @@ mod tests {
         let name_field = Fe::new("name".to_string(), Ft::Text).unwrap();
         builder.add_field(name_field).unwrap();
 
-        let age_field = Fe::new("age".to_string(), Ft::U64).unwrap().with_required();
+        let age_field = Fe::new("age".to_string(), Ft::U64).unwrap();
         builder.add_field(age_field).unwrap();
 
         let schema = builder.build().unwrap();

@@ -192,6 +192,8 @@ where
     pub fn new(name: String, tokenizer: T, config: Option<BM25Config>) -> Self {
         let config = config.unwrap_or_default();
         let bucket_overload_size = config.bucket_overload_size;
+        let mut stats = BM25Stats::default();
+        stats.version = 1;
         BM25Index {
             name: name.clone(),
             tokenizer,
@@ -202,7 +204,7 @@ where
             metadata: RwLock::new(BM25Metadata {
                 name,
                 config,
-                stats: BM25Stats::default(),
+                stats,
             }),
             bucket_overload_size,
             max_bucket_id: AtomicU32::new(0),

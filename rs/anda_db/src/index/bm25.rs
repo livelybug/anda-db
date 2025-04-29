@@ -166,8 +166,11 @@ impl BM25 {
     }
 
     pub fn insert(&self, id: SegmentId, text: &str, now_ms: u64) -> Result<(), DBError> {
-        self.index.insert(id, text, now_ms)?;
-        Ok(())
+        match self.index.insert(id, text, now_ms) {
+            Ok(()) => Ok(()),
+            Err(BM25Error::TokenizeFailed { .. }) => Ok(()), // Ignore tokenize errors
+            Err(e) => Err(e.into()),
+        }
     }
 
     pub fn remove(&self, id: SegmentId, text: &str, now_ms: u64) -> bool {

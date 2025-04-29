@@ -274,6 +274,8 @@ where
     pub fn new(name: String, config: Option<BTreeConfig>) -> Self {
         let config = config.unwrap_or_default();
         let bucket_overload_size = config.bucket_overload_size;
+        let mut stats = BTreeStats::default();
+        stats.version = 1;
         BTreeIndex {
             name: name.clone(),
             config: config.clone(),
@@ -283,7 +285,7 @@ where
             metadata: RwLock::new(BTreeMetadata {
                 name,
                 config,
-                stats: BTreeStats::default(),
+                stats,
             }),
             bucket_overload_size,
             max_bucket_id: AtomicU32::new(0),

@@ -226,7 +226,8 @@ impl HnswIndex {
     pub fn new(name: String, config: Option<HnswConfig>) -> Self {
         let config = config.unwrap_or_default();
         let layer_gen = config.layer_gen();
-
+        let mut stats = HnswStats::default();
+        stats.version = 1;
         Self {
             name: name.clone(),
             config: config.clone(),
@@ -236,7 +237,7 @@ impl HnswIndex {
             metadata: RwLock::new(HnswMetadata {
                 name,
                 config,
-                stats: HnswStats::default(),
+                stats,
             }),
             dirty_nodes: RwLock::new(BTreeSet::new()),
             ids: RwLock::new(Treemap::new()),

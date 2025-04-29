@@ -58,7 +58,7 @@ where
     FV: Eq + Ord + Hash + Debug + Clone + Serialize + DeserializeOwned,
 {
     name: String,
-    field: Fe,
+    field_name: String,
     index: BTreeIndex<u64, FV>,
     storage: Storage, // 与 Collection 共享同一个 Storage 实例
 }
@@ -82,27 +82,57 @@ impl BTree {
             bucket_overload_size: storage.object_chunk_size() as u32 * 2,
             allow_duplicates: !field.unique(),
         };
-        let btree = match *field.r#type() {
-            Ft::U64 => BTree::U64(InnerBTree::new(name, field, config, storage, now_ms).await?),
-            Ft::I64 => BTree::I64(InnerBTree::new(name, field, config, storage, now_ms).await?),
-            Ft::Text => BTree::String(InnerBTree::new(name, field, config, storage, now_ms).await?),
-            Ft::Bytes => BTree::Bytes(InnerBTree::new(name, field, config, storage, now_ms).await?),
-            Ft::Array(ref v) if v.len() == 1 => match v[0] {
-                Ft::U64 => BTree::U64(InnerBTree::new(name, field, config, storage, now_ms).await?),
-                Ft::I64 => BTree::I64(InnerBTree::new(name, field, config, storage, now_ms).await?),
-                Ft::Text => {
-                    BTree::String(InnerBTree::new(name, field, config, storage, now_ms).await?)
+        match field.r#type() {
+            Ft::Option(ft) => match ft.as_ref() {
+                Ft::Array(v) if v.len() == 1 => {
+                    BTree::inner_new(name, &field, &v[0], config, storage, now_ms).await
                 }
-                Ft::Bytes => {
-                    BTree::Bytes(InnerBTree::new(name, field, config, storage, now_ms).await?)
-                }
-                _ => {
-                    return Err(DBError::Index {
-                        name,
-                        source: format!("BTree: unsupported field: {:?}", field).into(),
-                    });
-                }
+                v => BTree::inner_new(name, &field, &v, config, storage, now_ms).await,
             },
+            Ft::Array(v) if v.len() == 1 => {
+                BTree::inner_new(name, &field, &v[0], config, storage, now_ms).await
+            }
+            v => BTree::inner_new(name, &field, &v, config, storage, now_ms).await,
+        }
+    }
+
+    pub async fn bootstrap(name: String, field: Fe, storage: Storage) -> Result<Self, DBError> {
+        match field.r#type() {
+            Ft::Option(ft) => match ft.as_ref() {
+                Ft::Array(v) if v.len() == 1 => {
+                    BTree::inner_bootstrap(name, &field, &v[0], storage).await
+                }
+                v => BTree::inner_bootstrap(name, &field, &v, storage).await,
+            },
+            Ft::Array(v) if v.len() == 1 => {
+                BTree::inner_bootstrap(name, &field, &v[0], storage).await
+            }
+            v => BTree::inner_bootstrap(name, &field, &v, storage).await,
+        }
+    }
+
+    async fn inner_new(
+        name: String,
+        field: &Fe,
+        ft: &Ft,
+        config: BTreeConfig,
+        storage: Storage,
+        now_ms: u64,
+    ) -> Result<Self, DBError> {
+        let field_name = field.name().to_string();
+        let btree = match ft {
+            Ft::U64 => {
+                BTree::U64(InnerBTree::new(name, field_name, config, storage, now_ms).await?)
+            }
+            Ft::I64 => {
+                BTree::I64(InnerBTree::new(name, field_name, config, storage, now_ms).await?)
+            }
+            Ft::Text => {
+                BTree::String(InnerBTree::new(name, field_name, config, storage, now_ms).await?)
+            }
+            Ft::Bytes => {
+                BTree::Bytes(InnerBTree::new(name, field_name, config, storage, now_ms).await?)
+            }
             _ => {
                 return Err(DBError::Index {
                     name,
@@ -114,22 +144,28 @@ impl BTree {
         Ok(btree)
     }
 
-    pub async fn bootstrap(name: String, field: Fe, storage: Storage) -> Result<Self, DBError> {
-        match field.r#type() {
+    async fn inner_bootstrap(
+        name: String,
+        field: &Fe,
+        ft: &Ft,
+        storage: Storage,
+    ) -> Result<Self, DBError> {
+        let field_name = field.name().to_string();
+        match ft {
             Ft::U64 => {
-                let btree = InnerBTree::<u64>::bootstrap(name, field, storage).await?;
+                let btree = InnerBTree::<u64>::bootstrap(name, field_name, storage).await?;
                 Ok(BTree::U64(btree))
             }
             Ft::I64 => {
-                let btree = InnerBTree::<i64>::bootstrap(name, field, storage).await?;
+                let btree = InnerBTree::<i64>::bootstrap(name, field_name, storage).await?;
                 Ok(BTree::I64(btree))
             }
             Ft::Text => {
-                let btree = InnerBTree::<String>::bootstrap(name, field, storage).await?;
+                let btree = InnerBTree::<String>::bootstrap(name, field_name, storage).await?;
                 Ok(BTree::String(btree))
             }
             Ft::Bytes => {
-                let btree = InnerBTree::<Vec<u8>>::bootstrap(name, field, storage).await?;
+                let btree = InnerBTree::<Vec<u8>>::bootstrap(name, field_name, storage).await?;
                 Ok(BTree::Bytes(btree))
             }
             _ => Err(DBError::Index {
@@ -150,10 +186,10 @@ impl BTree {
 
     pub fn field_name(&self) -> &str {
         match self {
-            BTree::I64(btree) => btree.field.name(),
-            BTree::U64(btree) => btree.field.name(),
-            BTree::String(btree) => btree.field.name(),
-            BTree::Bytes(btree) => btree.field.name(),
+            BTree::I64(btree) => &btree.field_name,
+            BTree::U64(btree) => &btree.field_name,
+            BTree::String(btree) => &btree.field_name,
+            BTree::Bytes(btree) => &btree.field_name,
         }
     }
 
@@ -392,7 +428,7 @@ where
 {
     async fn new(
         name: String,
-        field: Fe,
+        field_name: String,
         config: BTreeConfig,
         storage: Storage,
         now_ms: u64,
@@ -406,13 +442,17 @@ where
             .await?;
         Ok(InnerBTree {
             name,
-            field,
+            field_name,
             index,
             storage,
         })
     }
 
-    async fn bootstrap(name: String, field: Fe, storage: Storage) -> Result<Self, DBError> {
+    async fn bootstrap(
+        name: String,
+        field_name: String,
+        storage: Storage,
+    ) -> Result<Self, DBError> {
         let path = BTree::metadata_path(&name);
         let (metadata, _) = storage.fetch_raw(&path).await?;
         let index = BTreeIndex::<DocumentId, FV>::load_all(&metadata[..], async |id: u32| {
@@ -427,7 +467,7 @@ where
 
         Ok(Self {
             name,
-            field,
+            field_name,
             index,
             storage,
         })

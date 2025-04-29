@@ -328,27 +328,29 @@ mod tests {
         let mut builder = Schema::builder();
 
         // 添加必填字段
-        let name_field = Fe::new("name".to_string(), Ft::Text)
-            .unwrap()
-            .with_required();
+        let name_field = Fe::new("name".to_string(), Ft::Text).unwrap();
         builder.add_field(name_field).unwrap();
 
-        let age_field = Fe::new("age".to_string(), Ft::U64).unwrap().with_required();
+        let age_field = Fe::new("age".to_string(), Ft::U64).unwrap();
         builder.add_field(age_field).unwrap();
 
         // 添加普通字段
-        let active_field = Fe::new("active".to_string(), Ft::Bool).unwrap();
+        let active_field = Fe::new("active".to_string(), Ft::Option(Box::new(Ft::Bool))).unwrap();
         builder.add_field(active_field).unwrap();
 
-        let tags_field = Fe::new("tags".to_string(), Ft::Array(vec![Ft::Text])).unwrap();
+        let tags_field = Fe::new(
+            "tags".to_string(),
+            Ft::Option(Box::new(Ft::Array(vec![Ft::Text]))),
+        )
+        .unwrap();
         builder.add_field(tags_field).unwrap();
 
         let meta_field = Fe::new(
             "meta".to_string(),
-            Ft::Map(BTreeMap::from([
+            Ft::Option(Box::new(Ft::Map(BTreeMap::from([
                 ("created".to_string(), Ft::U64),
                 ("updated".to_string(), Ft::U64),
-            ])),
+            ])))),
         )
         .unwrap();
         builder.add_field(meta_field).unwrap();

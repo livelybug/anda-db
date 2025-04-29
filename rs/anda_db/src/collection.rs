@@ -148,12 +148,14 @@ impl Collection {
             db_metadata.config.storage.clone(),
         )
         .await?;
+        let mut stats = CollectionStats::default();
+        stats.version = 1;
         let metadata = CollectionMetadata {
             config: config.clone(),
             schema: schema.clone(),
             btree_indexes: BTreeMap::new(),
             bm25_hnsw_indexes: BTreeMap::new(),
-            stats: CollectionStats::default(),
+            stats,
         };
 
         match storage.create(Self::METADATA_PATH, &metadata).await {
@@ -233,6 +235,7 @@ impl Collection {
         collection.load_ids().await?;
         collection.load_doc_segments().await?;
         collection.load_indexes().await?;
+        collection.auto_repair_indexes().await;
         Ok(collection)
     }
 
@@ -316,6 +319,10 @@ impl Collection {
         self.btree_indexes = btree_indexes;
         self.bm25_hnsw_indexes = bm25_indexes.into_iter().zip(hnsw_indexes).collect();
         Ok(())
+    }
+
+    async fn auto_repair_indexes(&mut self) {
+        // TODO
     }
 
     pub fn set_read_only(&self, read_only: bool) {
@@ -500,44 +507,43 @@ impl Collection {
         validate_field_name(name)?;
 
         let now_ms = unix_ms();
+
         {
-            {
-                if self.metadata.read().btree_indexes.contains_key(name) {
-                    return Err(DBError::AlreadyExists {
-                        name: name.to_string(),
-                        path: self.name.clone(),
-                        source: "BTree index already exists".into(),
-                    });
-                }
-            }
-
-            let field = self
-                .schema
-                .get_field(field)
-                .ok_or_else(|| DBError::NotFound {
-                    name: field.to_string(),
+            if self.metadata.read().btree_indexes.contains_key(name) {
+                return Err(DBError::AlreadyExists {
+                    name: name.to_string(),
                     path: self.name.clone(),
-                    source: "field not found".into(),
-                })?;
-
-            let index = BTree::new(
-                name.to_string(),
-                field.clone(),
-                self.storage.clone(),
-                now_ms,
-            )
-            .await?;
-
-            let mut meta = self.metadata.write();
-            meta.btree_indexes.insert(name.to_string(), field.clone());
-            if field.unique() {
-                self.btree_indexes.insert(0, index);
-            } else {
-                self.btree_indexes.push(index);
+                    source: "BTree index already exists".into(),
+                });
             }
         }
 
-        self.store_metadata(now_ms).await?;
+        let field = self
+            .schema
+            .get_field(field)
+            .ok_or_else(|| DBError::NotFound {
+                name: field.to_string(),
+                path: self.name.clone(),
+                source: "field not found".into(),
+            })?;
+
+        let index = BTree::new(
+            name.to_string(),
+            field.clone(),
+            self.storage.clone(),
+            now_ms,
+        )
+        .await?;
+
+        let mut meta = self.metadata.write();
+        meta.stats.version += 1;
+        meta.btree_indexes.insert(name.to_string(), field.clone());
+        if field.unique() {
+            self.btree_indexes.insert(0, index);
+        } else {
+            self.btree_indexes.push(index);
+        }
+
         Ok(())
     }
 
@@ -606,12 +612,12 @@ impl Collection {
 
         {
             let mut meta = self.metadata.write();
+            meta.stats.version += 1;
             meta.bm25_hnsw_indexes
                 .insert(name.to_string(), field.clone());
         }
 
         self.bm25_hnsw_indexes.push((bm25, hnsw));
-        self.store_metadata(now_ms).await?;
         Ok(())
     }
 
@@ -656,6 +662,10 @@ impl Collection {
         let rt: Result<(), DBError> = (|| {
             for index in &self.btree_indexes {
                 if let Some(fv) = doc.get_field(index.field_name()) {
+                    if fv == &FieldValue::Null {
+                        continue;
+                    }
+
                     btree_inserted.insert(index, fv);
                     index.insert(id, fv, now_ms)?;
                 }
@@ -720,8 +730,12 @@ impl Collection {
             current_bucket.0
         };
 
+        for sid in &segment_ids {
+            self.inverted_doc_segments.insert(*sid, id);
+        }
         self.doc_ids.write().add(id);
         self.doc_segments.write().insert(id, segment_ids.clone());
+
         let mut dirty_buckets = self.dirty_buckets.write();
         dirty_buckets
             .entry(max_bucket_id)
@@ -836,17 +850,17 @@ impl Collection {
                 .find(|i| i.0.field_name() == params.field)
             {
                 let mut results: Vec<Vec<u64>> = Vec::new();
-                if let Some(text) = params.text {
+                if let Some(ref text) = params.text {
                     let rt = if params.logical_search {
-                        bm25.search_advanced(&text, top_k, params.bm25_params)
+                        bm25.search_advanced(text, top_k, params.bm25_params)
                     } else {
-                        bm25.search(&text, top_k, params.bm25_params)
+                        bm25.search(text, top_k, params.bm25_params)
                     };
                     results.push(rt.into_iter().map(|r| r.0).collect());
                 }
 
-                if let Some(vector) = params.vector {
-                    let rt = hnsw.search(&vector, top_k);
+                if let Some(ref vector) = params.vector {
+                    let rt = hnsw.search(vector, top_k);
                     results.push(rt.into_iter().map(|r| r.0).collect());
                 }
 

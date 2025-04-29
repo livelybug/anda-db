@@ -1010,10 +1010,6 @@ pub struct FieldEntry {
     #[serde(rename = "t")]
     r#type: FieldType,
 
-    /// Whether the field is required (cannot be null)
-    #[serde(rename = "r")]
-    required: bool,
-
     /// Whether the field value must be unique in the collection
     #[serde(rename = "u")]
     unique: bool,
@@ -1039,7 +1035,6 @@ impl FieldEntry {
             name,
             r#type,
             description: String::new(),
-            required: false,
             unique: false,
             idx: 0,
         })
@@ -1054,15 +1049,6 @@ impl FieldEntry {
     /// * `Self` - The modified field entry
     pub fn with_description(mut self, description: String) -> Self {
         self.description = description;
-        self
-    }
-
-    /// Mark the field as required
-    ///
-    /// # Returns
-    /// * `Self` - The modified field entry
-    pub fn with_required(mut self) -> Self {
-        self.required = true;
         self
     }
 
@@ -1103,12 +1089,11 @@ impl FieldEntry {
         &self.r#type
     }
 
-    /// Check if the field is required
-    ///
-    /// # Returns
-    /// * `bool` - True if the field is required
     pub fn required(&self) -> bool {
-        self.required
+        if let FieldType::Option(_) = self.r#type {
+            return false;
+        }
+        return true;
     }
 
     /// Check if the field is unique
@@ -1131,14 +1116,14 @@ impl FieldEntry {
     ///
     /// # Arguments
     /// * `val` - The CBOR value to extract from
-    /// * `valid` - Whether to validate the extracted value
+    /// * `validate` - Whether to validate the extracted value
     ///
     /// # Returns
     /// * `Result<FieldValue, SchemaError>` - The extracted field value or an error message
-    pub fn extract(&self, val: Cbor, valid: bool) -> Result<FieldValue, SchemaError> {
+    pub fn extract(&self, val: Cbor, validate: bool) -> Result<FieldValue, SchemaError> {
         match self.r#type.extract(val) {
             Ok(v) => {
-                if valid {
+                if validate {
                     self.validate(&v)?;
                 }
                 Ok(v)
@@ -1159,14 +1144,14 @@ impl FieldEntry {
     /// * `Result<(), SchemaError>` - Ok if valid, or an error message if invalid
     pub fn validate(&self, value: &FieldValue) -> Result<(), SchemaError> {
         if value == &FieldValue::Null {
-            if self.required {
-                return Err(SchemaError::FieldValue(format!(
-                    "field {} is required, expected type {:?}",
-                    self.name, self.r#type
-                )));
+            if let FieldType::Option(_) = self.r#type {
+                return Ok(());
             }
 
-            return Ok(());
+            return Err(SchemaError::FieldValue(format!(
+                "field {} is required, expected type {:?}",
+                self.name, self.r#type
+            )));
         }
 
         self.r#type.validate(value).map_err(|err| {
@@ -1550,13 +1535,11 @@ mod tests {
         // 创建字段
         let field = FieldEntry::new("user_id".to_string(), FieldType::U64)
             .unwrap()
-            .with_required()
             .with_unique()
             .with_idx(1);
 
         assert_eq!(field.name(), "user_id");
         assert_eq!(field.r#type(), &FieldType::U64);
-        assert!(field.required());
         assert!(field.unique());
         assert_eq!(field.idx(), 1);
 
@@ -1572,7 +1555,11 @@ mod tests {
         assert!(field.validate(&FieldValue::Null).is_err());
 
         // 测试非必填字段的空值验证
-        let optional_field = FieldEntry::new("optional".to_string(), FieldType::U64).unwrap();
+        let optional_field = FieldEntry::new(
+            "optional".to_string(),
+            FieldType::Option(Box::new(FieldType::U64)),
+        )
+        .unwrap();
         assert!(optional_field.validate(&FieldValue::Null).is_ok());
     }
 
@@ -1633,7 +1620,6 @@ mod tests {
         // 测试 FieldEntry 序列化和反序列化
         let field_entry = Fe::new("id".to_string(), Ft::Bytes)
             .unwrap()
-            .with_required()
             .with_unique()
             .with_idx(0);
         let mut serialized = Vec::new();
