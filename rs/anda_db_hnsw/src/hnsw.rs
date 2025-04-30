@@ -226,8 +226,10 @@ impl HnswIndex {
     pub fn new(name: String, config: Option<HnswConfig>) -> Self {
         let config = config.unwrap_or_default();
         let layer_gen = config.layer_gen();
-        let mut stats = HnswStats::default();
-        stats.version = 1;
+        let stats = HnswStats {
+            version: 1,
+            ..Default::default()
+        };
         Self {
             name: name.clone(),
             config: config.clone(),

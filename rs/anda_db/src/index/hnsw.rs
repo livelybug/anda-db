@@ -72,11 +72,11 @@ impl Hnsw {
     }
 
     pub async fn bootstrap(name: String, field: Fe, storage: Storage) -> Result<Self, DBError> {
-        let (metadata, _) = storage.fetch_raw(&Hnsw::metadata_path(&name)).await?;
-        let (ids, _) = storage.fetch_raw(&Hnsw::ids_path(&name)).await?;
+        let (metadata, _) = storage.fetch_bytes(&Hnsw::metadata_path(&name)).await?;
+        let (ids, _) = storage.fetch_bytes(&Hnsw::ids_path(&name)).await?;
         let index = HnswIndex::load_all(&metadata[..], &ids[..], async |id: u64| {
             let path = Hnsw::node_path(&name, id);
-            match storage.fetch_raw(&path).await {
+            match storage.fetch_bytes(&path).await {
                 Ok((data, _)) => Ok(Some(data.into())),
                 Err(DBError::NotFound { .. }) => Ok(None),
                 Err(e) => Err(e.into()),

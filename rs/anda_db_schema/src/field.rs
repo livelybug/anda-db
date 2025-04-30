@@ -1093,7 +1093,7 @@ impl FieldEntry {
         if let FieldType::Option(_) = self.r#type {
             return false;
         }
-        return true;
+        true
     }
 
     /// Check if the field is unique

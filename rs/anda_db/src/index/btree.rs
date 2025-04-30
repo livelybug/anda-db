@@ -87,12 +87,12 @@ impl BTree {
                 Ft::Array(v) if v.len() == 1 => {
                     BTree::inner_new(name, &field, &v[0], config, storage, now_ms).await
                 }
-                v => BTree::inner_new(name, &field, &v, config, storage, now_ms).await,
+                v => BTree::inner_new(name, &field, v, config, storage, now_ms).await,
             },
             Ft::Array(v) if v.len() == 1 => {
                 BTree::inner_new(name, &field, &v[0], config, storage, now_ms).await
             }
-            v => BTree::inner_new(name, &field, &v, config, storage, now_ms).await,
+            v => BTree::inner_new(name, &field, v, config, storage, now_ms).await,
         }
     }
 
@@ -102,12 +102,12 @@ impl BTree {
                 Ft::Array(v) if v.len() == 1 => {
                     BTree::inner_bootstrap(name, &field, &v[0], storage).await
                 }
-                v => BTree::inner_bootstrap(name, &field, &v, storage).await,
+                v => BTree::inner_bootstrap(name, &field, v, storage).await,
             },
             Ft::Array(v) if v.len() == 1 => {
                 BTree::inner_bootstrap(name, &field, &v[0], storage).await
             }
-            v => BTree::inner_bootstrap(name, &field, &v, storage).await,
+            v => BTree::inner_bootstrap(name, &field, v, storage).await,
         }
     }
 
@@ -454,10 +454,10 @@ where
         storage: Storage,
     ) -> Result<Self, DBError> {
         let path = BTree::metadata_path(&name);
-        let (metadata, _) = storage.fetch_raw(&path).await?;
+        let (metadata, _) = storage.fetch_bytes(&path).await?;
         let index = BTreeIndex::<DocumentId, FV>::load_all(&metadata[..], async |id: u32| {
             let path = BTree::posting_path(&name, id);
-            match storage.fetch_raw(&path).await {
+            match storage.fetch_bytes(&path).await {
                 Ok((data, _)) => Ok(Some(data.into())),
                 Err(DBError::NotFound { .. }) => Ok(None),
                 Err(e) => Err(e.into()),

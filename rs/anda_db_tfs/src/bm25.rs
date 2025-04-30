@@ -192,8 +192,10 @@ where
     pub fn new(name: String, tokenizer: T, config: Option<BM25Config>) -> Self {
         let config = config.unwrap_or_default();
         let bucket_overload_size = config.bucket_overload_size;
-        let mut stats = BM25Stats::default();
-        stats.version = 1;
+        let stats = BM25Stats {
+            version: 1,
+            ..Default::default()
+        };
         BM25Index {
             name: name.clone(),
             tokenizer,

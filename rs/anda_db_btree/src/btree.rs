@@ -274,8 +274,10 @@ where
     pub fn new(name: String, config: Option<BTreeConfig>) -> Self {
         let config = config.unwrap_or_default();
         let bucket_overload_size = config.bucket_overload_size;
-        let mut stats = BTreeStats::default();
-        stats.version = 1;
+        let stats = BTreeStats {
+            version: 1,
+            ..Default::default()
+        };
         BTreeIndex {
             name: name.clone(),
             config: config.clone(),

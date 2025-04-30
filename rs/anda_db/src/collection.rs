@@ -148,8 +148,10 @@ impl Collection {
             db_metadata.config.storage.clone(),
         )
         .await?;
-        let mut stats = CollectionStats::default();
-        stats.version = 1;
+        let stats = CollectionStats {
+            version: 1,
+            ..Default::default()
+        };
         let metadata = CollectionMetadata {
             config: config.clone(),
             schema: schema.clone(),

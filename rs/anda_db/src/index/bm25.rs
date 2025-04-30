@@ -84,13 +84,13 @@ impl BM25 {
         storage: Storage,
     ) -> Result<Self, DBError> {
         let path = BM25::metadata_path(&name);
-        let (metadata, _) = storage.fetch_raw(&path).await?;
+        let (metadata, _) = storage.fetch_bytes(&path).await?;
         let index = BM25Index::load_all(
             tokenizer,
             &metadata[..],
             async |id: u32| {
                 let path = BM25::segment_path(&name, id);
-                match storage.fetch_raw(&path).await {
+                match storage.fetch_bytes(&path).await {
                     Ok((data, _)) => Ok(Some(data.into())),
                     Err(DBError::NotFound { .. }) => Ok(None),
                     Err(e) => Err(e.into()),
@@ -98,7 +98,7 @@ impl BM25 {
             },
             async |id: u32| {
                 let path = BM25::posting_path(&name, id);
-                match storage.fetch_raw(&path).await {
+                match storage.fetch_bytes(&path).await {
                     Ok((data, _)) => Ok(Some(data.into())),
                     Err(DBError::NotFound { .. }) => Ok(None),
                     Err(e) => Err(e.into()),
