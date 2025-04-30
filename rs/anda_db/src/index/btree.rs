@@ -3,7 +3,7 @@ use bytes::Bytes;
 use serde::{Serialize, de::DeserializeOwned};
 use std::{fmt::Debug, hash::Hash};
 
-pub use anda_db_btree::{BTreeConfig, BTreeError, BTreeMetadata, BTreeStats, RangeQuery};
+pub use anda_db_btree::{BTreeConfig, BTreeMetadata, BTreeStats, RangeQuery};
 
 use crate::{
     error::DBError,

@@ -16,71 +16,103 @@ use crate::{
     database::AndaDB, error::DBError, index::*, query::*, schema::*, storage::Storage, unix_ms,
 };
 
+/// A Collection represents a logical grouping of documents with the same schema.
+/// It provides methods for document storage, retrieval, and indexing.
+///
+/// Collections manage:
+/// - Document storage and retrieval
+/// - Schema validation
+/// - Index creation and maintenance
+/// - Search functionality
 pub struct Collection {
     /// Collection name
     name: String,
     /// Collection metadata
     schema: Arc<Schema>,
-    /// Storage backend
+    /// Storage backend for persisting collection data
     storage: Storage,
+    /// Maps document IDs to their segment IDs
     doc_segments: RwLock<BTreeMap<DocumentId, Vec<SegmentId>>>,
+    /// Reverse mapping from segment IDs to document IDs for quick lookups
     inverted_doc_segments: DashMap<SegmentId, DocumentId>,
+    /// BTree indexes for efficient exact-match queries
     btree_indexes: Vec<BTree>,
+    /// Combined BM25 (text search) and HNSW (vector search) indexes
     bm25_hnsw_indexes: Vec<(BM25, Hnsw)>,
+    /// Collection metadata including statistics and configuration
     metadata: RwLock<CollectionMetadata>,
+    /// Highest document ID assigned so far
     max_document_id: AtomicU64,
+    /// Highest segment ID assigned so far
     max_segment_id: AtomicU64,
+    /// Counter for search operations
     search_count: AtomicU64,
+    /// Counter for get operations
     get_count: AtomicU64,
+    /// Text tokenization chain for text analysis
     tokenizer: TokenizerChain,
+    /// Bitmap of document IDs for efficient membership tests
     doc_ids: RwLock<Treemap>,
 
     /// Maximum size of a bucket before creating a new one
     /// When a bucket's stored data exceeds this size,
     /// a new bucket should be created for new data
     bucket_overload_size: usize,
+    /// Current bucket ID and its size
     current_bucket: RwLock<(BucketId, usize)>,
+    /// Buckets with pending changes that need to be persisted
     dirty_buckets: RwLock<BTreeMap<BucketId, DocSegmentsBucket>>,
+    /// Whether the collection is in read-only mode
     read_only: AtomicBool,
     /// Last saved version of the collection
     last_saved_version: AtomicU64,
 }
 
+/// Bucket identifier for document segments storage
 type BucketId = u32;
+
+/// Mapping of document IDs to their segment IDs within a bucket
 type DocSegmentsBucket = HashMap<DocumentId, Vec<SegmentId>>;
 
 /// Collection configuration parameters.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CollectionConfig {
-    /// Index name
+    /// Collection name
     pub name: String,
 
     /// Collection description
     pub description: String,
 }
 
-/// Index metadata.
+/// Collection metadata containing configuration, schema, indexes, and statistics.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CollectionMetadata {
     /// Collection configuration.
     pub config: CollectionConfig,
 
+    /// Schema defining the structure of documents in this collection
     pub schema: Schema,
 
+    /// Map of BTree index names to their field entries
     pub btree_indexes: BTreeMap<String, FieldEntry>,
 
+    /// Map of BM25/HNSW index names to their field entries
     pub bm25_hnsw_indexes: BTreeMap<String, FieldEntry>,
 
     /// Collection statistics.
     pub stats: CollectionStats,
 }
 
+/// Statistics about the collection's usage and state.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CollectionStats {
+    /// Highest document ID assigned so far
     pub max_document_id: u64,
 
+    /// Highest segment ID assigned so far
     pub max_segment_id: u64,
 
+    /// Highest bucket ID used for document segments storage
     pub max_bucket_id: u32,
 
     /// Last insertion timestamp (unix ms).
@@ -95,7 +127,7 @@ pub struct CollectionStats {
     /// Updated version for the collection. It will be incremented when the collection is updated.
     pub version: u64,
 
-    /// Number of documents in the index.
+    /// Number of documents in the collection.
     pub num_documents: u64,
 
     /// Number of search operations performed.
@@ -110,21 +142,36 @@ pub struct CollectionStats {
     /// Number of delete operations performed.
     pub delete_count: u64,
 
+    /// Whether the collection is in read-only mode
     pub read_only: bool,
 }
 
 impl Collection {
+    /// Path to the collection metadata file
     const METADATA_PATH: &'static str = "meta.cbor";
+
+    /// Path to the document IDs bitmap file
     const IDS_PATH: &'static str = "ids.cbor";
 
+    /// Generates the storage path for a document with the given ID
     fn doc_path(id: DocumentId) -> String {
         format!("data/{}.cbor", id)
     }
 
+    /// Generates the storage path for document segments in the given bucket
     fn doc_segments_path(bucket: BucketId) -> String {
         format!("segments/{bucket}.cbor")
     }
 
+    /// Creates a new collection with the given schema and configuration.
+    ///
+    /// # Arguments
+    /// * `db` - Reference to the database this collection belongs to
+    /// * `schema` - Schema defining the structure of documents in this collection
+    /// * `config` - Configuration parameters for the collection
+    ///
+    /// # Returns
+    /// A new Collection instance or an error if creation fails
     pub(crate) async fn create(
         db: &AndaDB,
         schema: Schema,
@@ -192,6 +239,15 @@ impl Collection {
         })
     }
 
+    /// Opens an existing collection.
+    ///
+    /// # Arguments
+    /// * `db` - Reference to the database this collection belongs to
+    /// * `name` - Name of the collection to open
+    /// * `f` - Function to execute on the collection before it's fully loaded
+    ///
+    /// # Returns
+    /// The opened Collection instance or an error if opening fails
     pub(crate) async fn open<F>(db: &AndaDB, name: String, f: F) -> Result<Self, DBError>
     where
         F: AsyncFnOnce(&mut Collection) -> Result<(), DBError>,
@@ -241,6 +297,10 @@ impl Collection {
         Ok(collection)
     }
 
+    /// Loads document IDs from storage.
+    ///
+    /// # Returns
+    /// Ok(()) if successful, or an error if loading fails
     async fn load_ids(&mut self) -> Result<(), DBError> {
         let (ids, _) = self.storage.fetch::<Vec<u8>>(Self::IDS_PATH).await?;
 
@@ -253,6 +313,10 @@ impl Collection {
         Ok(())
     }
 
+    /// Loads document segments from storage.
+    ///
+    /// # Returns
+    /// Ok(()) if successful, or an error if loading fails
     async fn load_doc_segments(&mut self) -> Result<(), DBError> {
         let mut doc_segments: BTreeMap<DocumentId, Vec<SegmentId>> = BTreeMap::new();
         let max_bucket_id = self.metadata.read().stats.max_bucket_id;
@@ -275,6 +339,10 @@ impl Collection {
         Ok(())
     }
 
+    /// Loads all indexes from storage.
+    ///
+    /// # Returns
+    /// Ok(()) if successful, or an error if loading fails
     async fn load_indexes(&mut self) -> Result<(), DBError> {
         let meta = self.metadata.read().clone();
         let (btree_indexes, bm25_indexes, hnsw_indexes) = try_join!(
@@ -323,10 +391,16 @@ impl Collection {
         Ok(())
     }
 
+    /// Automatically repairs indexes if needed.
+    /// This is called during collection opening to ensure index integrity.
     async fn auto_repair_indexes(&mut self) {
         // TODO
     }
 
+    /// Sets the collection to read-only mode.
+    ///
+    /// # Arguments
+    /// * `read_only` - Whether to enable read-only mode
     pub fn set_read_only(&self, read_only: bool) {
         self.read_only.store(read_only, Ordering::Release);
         log::info!(
@@ -336,6 +410,10 @@ impl Collection {
         );
     }
 
+    /// Closes the collection, ensuring all data is flushed to storage.
+    ///
+    /// # Returns
+    /// Ok(()) if successful, or an error if closing fails
     pub async fn close(&self) -> Result<(), DBError> {
         let start = Instant::now();
         match self.flush(unix_ms()).await {
@@ -362,6 +440,13 @@ impl Collection {
         Ok(())
     }
 
+    /// Flushes all pending changes to storage.
+    ///
+    /// # Arguments
+    /// * `now_ms` - Current timestamp in milliseconds
+    ///
+    /// # Returns
+    /// `true` if changes were flushed, `false` if no changes needed to be flushed
     pub async fn flush(&self, now_ms: u64) -> Result<bool, DBError> {
         if !self.store_metadata(now_ms).await? {
             return Ok(false);
@@ -376,6 +461,13 @@ impl Collection {
         Ok(true)
     }
 
+    /// Stores collection metadata to storage if it has changed.
+    ///
+    /// # Arguments
+    /// * `now_ms` - Current timestamp in milliseconds
+    ///
+    /// # Returns
+    /// `true` if metadata was stored, `false` if no changes needed to be stored
     async fn store_metadata(&self, now_ms: u64) -> Result<bool, DBError> {
         let mut meta = self.metadata();
         let prev_saved_version = self
@@ -399,6 +491,10 @@ impl Collection {
         Ok(true)
     }
 
+    /// Stores document IDs bitmap to storage.
+    ///
+    /// # Returns
+    /// Ok(()) if successful, or an error if storing fails
     async fn store_ids(&self) -> Result<(), DBError> {
         let data = {
             let mut ids = self.doc_ids.read().clone();
@@ -409,6 +505,10 @@ impl Collection {
         Ok(())
     }
 
+    /// Stores dirty document segments to storage.
+    ///
+    /// # Returns
+    /// Ok(()) if successful, or an error if storing fails
     async fn store_dirty_segments(&self) -> Result<(), DBError> {
         let mut dirty_buckets = BTreeMap::new();
         {
@@ -433,6 +533,13 @@ impl Collection {
         Ok(())
     }
 
+    /// Stores all indexes to storage.
+    ///
+    /// # Arguments
+    /// * `now_ms` - Current timestamp in milliseconds
+    ///
+    /// # Returns
+    /// Ok(()) if successful, or an error if storing fails
     async fn store_indexes(&self, now_ms: u64) -> Result<(), DBError> {
         // TODO: concurrently store indexes
         for index in &self.btree_indexes {
@@ -447,20 +554,26 @@ impl Collection {
         Ok(())
     }
 
+    /// Sets the tokenizer for text analysis.
+    ///
+    /// # Arguments
+    /// * `tokenizer` - The tokenizer chain to use
     pub fn set_tokenizer(&mut self, tokenizer: TokenizerChain) {
         self.tokenizer = tokenizer;
     }
 
+    /// Returns the collection name.
     pub fn name(&self) -> &str {
         &self.name
     }
 
+    /// Returns the collection schema.
     pub fn schema(&self) -> Arc<Schema> {
         self.schema.clone()
     }
 
-    /// Returns the collection metadata
-    /// This includes up-to-date statistics about the collection
+    /// Returns the collection metadata.
+    /// This includes up-to-date statistics about the collection.
     pub fn metadata(&self) -> CollectionMetadata {
         let mut metadata = self.metadata.read().clone();
         metadata.stats.max_document_id = self.max_document_id.load(Ordering::Relaxed);
@@ -487,10 +600,42 @@ impl Collection {
         stats
     }
 
+    /// Checks if a document with the given ID exists in the collection.
+    ///
+    /// # Arguments
+    /// * `id` - The ID to check
+    ///
+    /// # Returns
+    /// `true` if a document with the ID exists, `false` otherwise
+    pub fn contains(&self, id: DocumentId) -> bool {
+        self.doc_ids.read().contains(id)
+    }
+
+    /// Gets the number of documents in the collection.
+    ///
+    /// # Returns
+    /// The number of documents in the collection
+    pub fn len(&self) -> usize {
+        self.doc_segments.read().len()
+    }
+
+    /// Checks if the collection is empty.
+    ///
+    /// # Returns
+    /// `true` if the collection contains no documents, `false` otherwise
+    pub fn is_empty(&self) -> bool {
+        self.doc_segments.read().is_empty()
+    }
+
+    /// Creates a new empty document with the collection's schema.
     pub fn new_document(&self) -> Document {
         Document::new(self.schema.clone())
     }
 
+    /// Assigns unique IDs to segments.
+    ///
+    /// # Arguments
+    /// * `segments` - Mutable slice of segments to assign IDs to
     pub fn obtain_segment_ids(&self, segments: &mut [Segment]) {
         let count = segments.len();
         if count == 0 {
@@ -505,6 +650,14 @@ impl Collection {
         }
     }
 
+    /// Creates a BTree index on the specified field.
+    ///
+    /// # Arguments
+    /// * `name` - Name of the index
+    /// * `field` - Name of the field to index
+    ///
+    /// # Returns
+    /// Ok(()) if successful, or an error if creation fails
     pub async fn create_btree_index(&mut self, name: &str, field: &str) -> Result<(), DBError> {
         validate_field_name(name)?;
 
@@ -549,6 +702,14 @@ impl Collection {
         Ok(())
     }
 
+    /// Creates a BTree index if it doesn't already exist.
+    ///
+    /// # Arguments
+    /// * `name` - Name of the index
+    /// * `field` - Name of the field to index
+    ///
+    /// # Returns
+    /// Ok(()) if successful, or an error if creation fails
     pub async fn create_btree_index_nx(&mut self, name: &str, field: &str) -> Result<(), DBError> {
         match self.create_btree_index(name, field).await {
             Ok(_) => Ok(()),
@@ -560,6 +721,15 @@ impl Collection {
         }
     }
 
+    /// Creates a combined BM25 (text) and HNSW (vector) search index.
+    ///
+    /// # Arguments
+    /// * `name` - Name of the index
+    /// * `field` - Name of the field to index
+    /// * `config` - HNSW index configuration
+    ///
+    /// # Returns
+    /// Ok(()) if successful, or an error if creation fails
     pub async fn create_search_index(
         &mut self,
         name: &str,
@@ -623,6 +793,15 @@ impl Collection {
         Ok(())
     }
 
+    /// Creates a search index if it doesn't already exist.
+    ///
+    /// # Arguments
+    /// * `name` - Name of the index
+    /// * `field` - Name of the field to index
+    /// * `config` - HNSW index configuration
+    ///
+    /// # Returns
+    /// Ok(()) if successful, or an error if creation fails
     pub async fn create_search_index_nx(
         &mut self,
         name: &str,
@@ -639,6 +818,26 @@ impl Collection {
         }
     }
 
+    /// Adds a new document to the collection.
+    ///
+    /// This method:
+    /// 1. Validates the document against the collection schema
+    /// 2. Assigns a unique ID to the document
+    /// 3. Updates all relevant indexes
+    /// 4. Persists the document to storage
+    ///
+    /// # Arguments
+    /// * `doc` - The document to add to the collection
+    ///
+    /// # Returns
+    /// The ID of the newly added document, or an error if addition fails
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - The collection is in read-only mode
+    /// - The document fails schema validation
+    /// - Any index update fails
+    /// - Storage operations fail
     pub async fn add(&self, mut doc: Document) -> Result<DocumentId, DBError> {
         if self.read_only.load(Ordering::Relaxed) {
             return Err(DBError::Generic {
@@ -753,6 +952,25 @@ impl Collection {
         Ok(id)
     }
 
+    /// Removes a document from the collection by its ID.
+    ///
+    /// This method:
+    /// 1. Removes the document ID from the bitmap
+    /// 2. Removes document segments from memory
+    /// 3. Updates all relevant indexes
+    /// 4. Deletes the document from storage
+    ///
+    /// # Arguments
+    /// * `id` - The ID of the document to remove
+    ///
+    /// # Returns
+    /// Ok(()) if successful, or an error if removal fails
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - The collection is in read-only mode
+    /// - Any index update fails
+    /// - Storage operations fail
     pub async fn remove(&self, id: DocumentId) -> Result<(), DBError> {
         if self.read_only.load(Ordering::Relaxed) {
             return Err(DBError::Generic {
@@ -813,6 +1031,13 @@ impl Collection {
         Ok(())
     }
 
+    /// Searches for documents matching the given query and returns them.
+    ///
+    /// # Arguments
+    /// * `query` - The search query parameters
+    ///
+    /// # Returns
+    /// A vector of matching documents, or an error if the search fails
     pub async fn search(&self, query: Query) -> Result<Vec<Document>, DBError> {
         let ids = self.search_ids(query).await?;
         let mut docs = Vec::with_capacity(ids.len());
@@ -825,6 +1050,16 @@ impl Collection {
         Ok(docs)
     }
 
+    /// Searches for documents matching the given query and deserializes them into the specified type.
+    ///
+    /// # Type Parameters
+    /// * `T` - The type to deserialize documents into
+    ///
+    /// # Arguments
+    /// * `query` - The search query parameters
+    ///
+    /// # Returns
+    /// A vector of deserialized objects of type T, or an error if the search or deserialization fails
     pub async fn search_as<T>(&self, query: Query) -> Result<Vec<T>, DBError>
     where
         T: DeserializeOwned,
@@ -837,6 +1072,15 @@ impl Collection {
         Ok(rt)
     }
 
+    /// Searches for documents matching the given query and returns only their IDs.
+    ///
+    /// This is more efficient than retrieving full documents when only IDs are needed.
+    ///
+    /// # Arguments
+    /// * `query` - The search query parameters
+    ///
+    /// # Returns
+    /// A vector of matching document IDs, or an error if the search fails
     pub async fn search_ids(&self, query: Query) -> Result<Vec<DocumentId>, DBError> {
         let limit = query.limit.unwrap_or(10).min(1000);
         let top_k = limit * 3;
@@ -895,6 +1139,78 @@ impl Collection {
         Ok(result)
     }
 
+    /// Gets a document by its ID.
+    ///
+    /// # Arguments
+    /// * `id` - The ID of the document to retrieve
+    ///
+    /// # Returns
+    /// The document if found, or an error if retrieval fails
+    pub async fn get(&self, id: DocumentId) -> Result<Document, DBError> {
+        if self.doc_ids.read().contains(id) {
+            self.get_count.fetch_add(1, Ordering::Relaxed);
+
+            let path = Self::doc_path(id);
+            if let Ok((doc, _)) = self.storage.get::<DocumentOwned>(&path).await {
+                let doc = Document::try_from_doc(self.schema(), doc)?;
+                return Ok(doc);
+            }
+        }
+        Err(DBError::NotFound {
+            name: id.to_string(),
+            path: self.name.clone(),
+            source: format!("Document with ID {id} not found").into(),
+        })
+    }
+
+    /// Gets a document by its ID and deserializes it into the specified type.
+    ///
+    /// # Type Parameters
+    /// * `T` - The type to deserialize the document into
+    ///
+    /// # Arguments
+    /// * `id` - The ID of the document to retrieve
+    ///
+    /// # Returns
+    /// The deserialized object of type T if found, or an error if retrieval or deserialization fails
+    pub async fn get_as<T>(&self, id: DocumentId) -> Result<T, DBError>
+    where
+        T: DeserializeOwned,
+    {
+        let doc = self.get(id).await?;
+        let obj = doc.try_into()?;
+        Ok(obj)
+    }
+
+    /// Updates an existing document with new field values.
+    ///
+    /// # Arguments
+    /// * `id` - The ID of the document to update
+    /// * `fields` - The new field values to apply
+    ///
+    /// # Returns
+    /// Ok(()) if successful, or an error if update fails
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - The collection is in read-only mode
+    /// - The document doesn't exist
+    /// - The updated document fails schema validation
+    /// - Any index update fails
+    /// - Storage operations fail
+    // pub async fn update(&self, id: DocumentId, fields: &Fields) -> Result<(), DBError> {
+    //     unimplemented!()
+    // }
+
+    /// Filters documents by a field condition.
+    ///
+    /// # Arguments
+    /// * `filter` - The filter condition to apply
+    /// * `candidates` - Optional list of document IDs to filter (if empty, all documents are considered)
+    /// * `limit` - Maximum number of results to return
+    ///
+    /// # Returns
+    /// A vector of document IDs matching the filter, or an error if filtering fails
     fn filter_by_field(
         &self,
         filter: Filter,
@@ -988,6 +1304,13 @@ impl Collection {
         Ok(result)
     }
 
+    /// Filters documents by ID using a range query.
+    ///
+    /// # Arguments
+    /// * `query` - The range query to apply to document IDs
+    ///
+    /// # Returns
+    /// A vector of document IDs matching the range query
     fn filter_by_id(&self, query: RangeQuery<DocumentId>) -> Vec<DocumentId> {
         let mut results: Vec<u64> = Vec::new();
 
@@ -1094,6 +1417,10 @@ impl Collection {
         results
     }
 
+    /// Updates the collection metadata with the provided function.
+    ///
+    /// # Arguments
+    /// * `f` - A function that modifies the collection metadata
     fn update_metadata<F>(&self, f: F)
     where
         F: FnOnce(&mut CollectionMetadata),

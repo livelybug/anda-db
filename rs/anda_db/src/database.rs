@@ -17,25 +17,38 @@ use crate::{
     unix_ms,
 };
 
+/// Main database structure that manages collections and storage.
+///
+/// AndaDB provides a high-level interface for creating, opening, and managing
+/// collections of documents. It handles persistence through an object store
+/// and maintains metadata about the database and its collections.
 pub struct AndaDB {
     /// Database name
     name: String,
+    /// Underlying object storage implementation
     object_store: Arc<dyn ObjectStore>,
+    /// Storage layer for database operations
     storage: Storage,
+    /// Database metadata protected by a read-write lock
     metadata: RwLock<DBMetadata>,
+    /// Map of collection names to collection instances
     collections: RwLock<BTreeMap<String, Arc<Collection>>>,
+    /// Flag indicating whether the database is in read-only mode
     read_only: AtomicBool,
 }
 
-/// Collection configuration parameters.
+/// Database configuration parameters.
+///
+/// Contains settings that define the database's behavior and properties.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DBConfig {
-    /// Index name
+    /// Database name
     pub name: String,
 
-    /// Collection description
+    /// Database description
     pub description: String,
 
+    /// Storage configuration settings
     pub storage: StorageConfig,
 }
 
@@ -49,17 +62,35 @@ impl Default for DBConfig {
     }
 }
 
-/// Index metadata.
+/// Database metadata.
+///
+/// Contains the database configuration and a set of collection names
+/// that belong to this database.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DBMetadata {
+    /// Database configuration
     pub config: DBConfig,
 
+    /// Set of collection names in this database
     pub collections: BTreeSet<String>,
 }
 
 impl AndaDB {
+    /// Path where database metadata is stored
     const METADATA_PATH: &'static str = "db_meta.cbor";
 
+    /// Creates a new database with the given configuration.
+    ///
+    /// This method initializes a new database with the specified configuration
+    /// and object store. It validates the database name, connects to storage,
+    /// and creates the initial metadata.
+    ///
+    /// # Arguments
+    /// * `object_store` - The object store implementation to use for persistence
+    /// * `config` - The database configuration
+    ///
+    /// # Returns
+    /// A Result containing either the new AndaDB instance or an error
     pub async fn create(
         object_store: Arc<dyn ObjectStore>,
         config: DBConfig,
@@ -96,6 +127,17 @@ impl AndaDB {
         })
     }
 
+    /// Connects to an existing database or creates a new one if it doesn't exist.
+    ///
+    /// This method attempts to connect to an existing database with the given
+    /// configuration. If the database doesn't exist, it creates a new one.
+    ///
+    /// # Arguments
+    /// * `object_store` - The object store implementation to use for persistence
+    /// * `config` - The database configuration
+    ///
+    /// # Returns
+    /// A Result containing either the AndaDB instance or an error
     pub async fn connect(
         object_store: Arc<dyn ObjectStore>,
         config: DBConfig,
@@ -145,14 +187,23 @@ impl AndaDB {
         }
     }
 
+    /// Returns the name of the database.
     pub fn name(&self) -> &str {
         &self.name
     }
 
+    /// Returns a clone of the database metadata.
     pub fn metadata(&self) -> DBMetadata {
         self.metadata.read().clone()
     }
 
+    /// Sets the database to read-only mode.
+    ///
+    /// When in read-only mode, operations that modify the database will fail.
+    /// This setting is propagated to all collections in the database.
+    ///
+    /// # Arguments
+    /// * `read_only` - Whether to enable read-only mode
     pub fn set_read_only(&self, read_only: bool) {
         self.read_only.store(read_only, Ordering::Release);
         log::info!(
@@ -167,6 +218,13 @@ impl AndaDB {
         }
     }
 
+    /// Closes the database, ensuring all data is flushed to storage.
+    ///
+    /// This method sets the database to read-only mode, closes all collections,
+    /// and flushes any pending changes to storage.
+    ///
+    /// # Returns
+    /// A Result indicating success or an error
     pub async fn close(&self) -> Result<(), DBError> {
         self.set_read_only(true);
         let collections = self
@@ -201,6 +259,18 @@ impl AndaDB {
         Ok(())
     }
 
+    /// Creates a new collection in the database.
+    ///
+    /// This method creates a new collection with the given schema and configuration.
+    /// It also executes the provided function on the collection before finalizing creation.
+    ///
+    /// # Arguments
+    /// * `schema` - The schema defining the structure of documents in the collection
+    /// * `config` - The collection configuration
+    /// * `f` - A function to execute on the collection during creation
+    ///
+    /// # Returns
+    /// A Result containing either the new Collection or an error
     pub async fn create_collection<F>(
         &self,
         schema: Schema,
@@ -255,6 +325,19 @@ impl AndaDB {
         Ok(collection)
     }
 
+    /// Opens an existing collection or creates a new one if it doesn't exist.
+    ///
+    /// This method attempts to open an existing collection with the given name.
+    /// If the collection doesn't exist, it creates a new one with the provided
+    /// schema and configuration.
+    ///
+    /// # Arguments
+    /// * `schema` - The schema to use if creating a new collection
+    /// * `config` - The collection configuration
+    /// * `f` - A function to execute on the collection during opening/creation
+    ///
+    /// # Returns
+    /// A Result containing either the Collection or an error
     pub async fn open_or_create_collection<F>(
         &self,
         schema: Schema,
@@ -290,6 +373,17 @@ impl AndaDB {
         Ok(collection)
     }
 
+    /// Opens an existing collection.
+    ///
+    /// This method attempts to open an existing collection with the given name.
+    /// It fails if the collection doesn't exist.
+    ///
+    /// # Arguments
+    /// * `name` - The name of the collection to open
+    /// * `f` - A function to execute on the collection during opening
+    ///
+    /// # Returns
+    /// A Result containing either the Collection or an error
     pub async fn open_collection<F>(&self, name: String, f: F) -> Result<Arc<Collection>, DBError>
     where
         F: AsyncFnOnce(&mut Collection) -> Result<(), DBError>,
@@ -316,6 +410,16 @@ impl AndaDB {
         Ok(collection)
     }
 
+    /// Flushes database metadata to storage.
+    ///
+    /// This method writes the current database metadata to storage and
+    /// updates the storage metadata with the current timestamp.
+    ///
+    /// # Arguments
+    /// * `now_ms` - The current timestamp in milliseconds
+    ///
+    /// # Returns
+    /// A Result indicating success or an error
     async fn flush(&self, now_ms: u64) -> Result<(), DBError> {
         let metadata = self.metadata();
 
@@ -327,6 +431,9 @@ impl AndaDB {
         Ok(())
     }
 
+    /// Returns a clone of the object store.
+    ///
+    /// This method is used internally by collections to access the object store.
     pub(crate) fn object_store(&self) -> Arc<dyn ObjectStore> {
         self.object_store.clone()
     }

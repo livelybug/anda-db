@@ -4,6 +4,7 @@ use std::{fmt::Debug, hash::Hash};
 
 pub use anda_db_tfs::{
     BM25Config, BM25Error, BM25Metadata, BM25Params, BM25Stats, TokenizerChain, default_tokenizer,
+    jieba_tokenizer,
 };
 
 use crate::{

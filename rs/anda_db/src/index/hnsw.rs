@@ -2,7 +2,7 @@ use anda_db_hnsw::HnswIndex;
 use bytes::Bytes;
 use std::{fmt::Debug, hash::Hash};
 
-pub use anda_db_hnsw::{HnswConfig, HnswError, HnswMetadata, HnswStats};
+pub use anda_db_hnsw::{HnswConfig, HnswMetadata, HnswStats};
 
 use crate::{
     error::DBError,

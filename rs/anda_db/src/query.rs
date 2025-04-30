@@ -5,50 +5,106 @@ pub use anda_db_btree::RangeQuery;
 pub use anda_db_schema::{Fv, bf16};
 pub use anda_db_tfs::BM25Params;
 
-/// A query for searching the database
+/// A query for searching the database.
+///
+/// This structure defines the parameters for performing searches against the database,
+/// including full-text search, vector search, filtering, and result limiting.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Query {
-    // 在 field 中进行全文本搜索：(field name, search term, Option<BM25Params>)
-    // field 需要建立 TFS 索引
+    /// Full-text or vector search configuration.
+    ///
+    /// When specified, performs a search on the specified field.
+    /// The field must have a TFS (Text Field Search) index built.
     pub search: Option<Search>,
 
-    /// 用 field 进行范围过滤
-    /// field 需要建立 B-Tree 索引
+    /// Range filtering configuration.
+    ///
+    /// When specified, filters results based on field values.
+    /// The field must have a B-Tree index built.
     pub filter: Option<Filter>,
 
-    // default to 10
+    /// Maximum number of results to return.
+    ///
+    /// Defaults to 10 if not specified.
     pub limit: Option<usize>,
 }
 
+/// Configuration for full-text and vector search operations.
+///
+/// Supports both text-based and vector-based search with optional reranking.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Search {
+    /// The field name to search against.
     pub field: String,
+
+    /// The text query to search for.
+    ///
+    /// Used for full-text search operations.
     pub text: Option<String>,
+
+    /// The vector query to search for.
+    ///
+    /// Used for vector similarity search operations.
     pub vector: Option<Vec<f32>>,
+
+    /// Parameters for the BM25 ranking algorithm.
+    ///
+    /// Customizes the behavior of the full-text search ranking.
     pub bm25_params: Option<BM25Params>,
+
+    /// Configuration for reranking search results.
+    ///
+    /// When specified, applies the Reciprocal Rank Fusion algorithm
+    /// to combine and rerank results from text and vector searches.
+    /// Defaults to `RRFReranker` with k=60 if not specified.
     pub reranker: Option<RRFReranker>,
+
+    /// Whether to use logical search operators.
+    ///
+    /// When true, the search text can include logical operators (AND, OR, NOT).
     pub logical_search: bool,
 }
 
+/// Filter conditions for query results.
+///
+/// Provides a flexible way to define complex filtering logic
+/// using field-based conditions and logical operators.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Filter {
-    /// 单一字段过滤条件 (字段名, 范围查询)
+    /// A single field filter condition.
+    ///
+    /// Filters based on a range query against a specific field.
+    /// Format: (field_name, range_query)
     Field((String, RangeQuery<Fv>)),
 
-    /// A logical OR filter that requires at least one subfilter to match
+    /// A logical OR filter.
+    ///
+    /// Matches documents that satisfy at least one of the contained filters.
     Or(Vec<Box<Filter>>),
 
-    /// A logical AND filter that requires all subfilters to match
+    /// A logical AND filter.
+    ///
+    /// Matches documents that satisfy all of the contained filters.
     And(Vec<Box<Filter>>),
 
-    /// A logical NOT filter that negates the result of its subfilter
+    /// A logical NOT filter.
+    ///
+    /// Matches documents that do not satisfy the contained filter.
     Not(Box<Filter>),
 }
 
-/// Reranks the results using Reciprocal Rank Fusion(RRF) algorithm based
-/// on the scores of vector and FTS search.
+/// Reranks search results using the Reciprocal Rank Fusion (RRF) algorithm.
+///
+/// This algorithm combines multiple ranked lists (e.g., from text and vector searches)
+/// into a single, unified ranking by considering the position of each document
+/// across all lists.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RRFReranker {
+    /// The constant factor in the RRF formula.
+    ///
+    /// Higher values reduce the impact of high rankings,
+    /// making the algorithm more forgiving to items that
+    /// rank poorly in some lists.
     pub k: f32,
 }
 
@@ -59,13 +115,18 @@ impl Default for RRFReranker {
 }
 
 impl RRFReranker {
-    /// Rerank results using RRF.
+    /// Reranks results using the Reciprocal Rank Fusion algorithm.
+    ///
+    /// This method combines multiple ranked lists into a single ranking
+    /// by assigning scores based on the position of each document in each list,
+    /// then aggregating these scores.
     ///
     /// # Arguments
-    /// * `ranked_lists` - 一个包含多个排序列表的切片，每个列表是 doc_id 的有序 Vec。
+    /// * `ranked_lists` - A slice containing multiple ordered lists, where each list
+    ///                    is a Vec of document IDs sorted by relevance.
     ///
     /// # Returns
-    /// 返回一个 Vec<(doc_id, score)>，按融合分数降序排列。
+    /// A Vec of (document_id, score) pairs, sorted by descending score.
     pub fn rerank(&self, ranked_lists: &[Vec<u64>]) -> Vec<(u64, f32)> {
         let mut scores: HashMap<u64, f32> = HashMap::new();
 
