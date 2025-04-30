@@ -123,7 +123,7 @@ impl RRFReranker {
     ///
     /// # Arguments
     /// * `ranked_lists` - A slice containing multiple ordered lists, where each list
-    ///                    is a Vec of document IDs sorted by relevance.
+    ///   is a Vec of document IDs sorted by relevance.
     ///
     /// # Returns
     /// A Vec of (document_id, score) pairs, sorted by descending score.

@@ -63,12 +63,18 @@ impl BM25 {
             bucket_overload_size: storage.object_chunk_size() as u32 * 2,
             ..Default::default()
         };
-        let path = BM25::metadata_path(&name);
         let index = BM25Index::new(name.clone(), tokenizer, Some(config));
         let mut data = Vec::new();
-        index.store_metadata(&mut data, now_ms)?;
+        index
+            .flush(
+                &mut data,
+                now_ms,
+                async |_, _| Ok(true),
+                async |_, _| Ok(true),
+            )
+            .await?;
         storage
-            .put_bytes(&path, data.into(), PutMode::Create)
+            .put_bytes(&BM25::metadata_path(&name), data.into(), PutMode::Create)
             .await?;
         Ok(Self {
             name,

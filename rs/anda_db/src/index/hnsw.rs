@@ -56,12 +56,21 @@ impl Hnsw {
         storage: Storage,
         now_ms: u64,
     ) -> Result<Self, DBError> {
-        let path = Hnsw::metadata_path(&name);
         let index = HnswIndex::new(name.clone(), Some(config));
-        let mut data = Vec::new();
-        index.store_metadata(&mut data, now_ms)?;
+        let mut metadata = Vec::new();
+        let mut ids = Vec::new();
+        index
+            .flush(&mut metadata, &mut ids, now_ms, async |_, _| Ok(true))
+            .await?;
         storage
-            .put_bytes(&path, data.into(), PutMode::Create)
+            .put_bytes(
+                &Hnsw::metadata_path(&name),
+                metadata.into(),
+                PutMode::Create,
+            )
+            .await?;
+        storage
+            .put_bytes(&Hnsw::ids_path(&name), ids.into(), PutMode::Create)
             .await?;
         Ok(Self {
             name,

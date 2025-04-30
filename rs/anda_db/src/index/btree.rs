@@ -433,12 +433,13 @@ where
         storage: Storage,
         now_ms: u64,
     ) -> Result<Self, DBError> {
-        let path = BTree::metadata_path(&name);
         let index = BTreeIndex::new(name.clone(), Some(config));
         let mut data = Vec::new();
-        index.store_metadata(&mut data, now_ms)?;
+        index
+            .flush(&mut data, now_ms, async |_, _| Ok(true))
+            .await?;
         storage
-            .put_bytes(&path, data.into(), PutMode::Create)
+            .put_bytes(&BTree::metadata_path(&name), data.into(), PutMode::Create)
             .await?;
         Ok(InnerBTree {
             name,

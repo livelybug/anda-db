@@ -1182,23 +1182,23 @@ impl Collection {
         Ok(obj)
     }
 
-    /// Updates an existing document with new field values.
-    ///
-    /// # Arguments
-    /// * `id` - The ID of the document to update
-    /// * `fields` - The new field values to apply
-    ///
-    /// # Returns
-    /// Ok(()) if successful, or an error if update fails
-    ///
-    /// # Errors
-    /// Returns an error if:
-    /// - The collection is in read-only mode
-    /// - The document doesn't exist
-    /// - The updated document fails schema validation
-    /// - Any index update fails
-    /// - Storage operations fail
-    // pub async fn update(&self, id: DocumentId, fields: &Fields) -> Result<(), DBError> {
+    // Updates an existing document with new field values.
+    //
+    // # Arguments
+    // * `id` - The ID of the document to update
+    // * `fields` - The new field values to apply
+    //
+    // # Returns
+    // Ok(()) if successful, or an error if update fails
+    //
+    // # Errors
+    // Returns an error if:
+    // - The collection is in read-only mode
+    // - The document doesn't exist
+    // - The updated document fails schema validation
+    // - Any index update fails
+    // - Storage operations fail
+    // pub async fn update(&self, filter: Filter, fields: &Fields) -> Result<(), DBError> {
     //     unimplemented!()
     // }
 
@@ -1475,4 +1475,606 @@ impl std::io::Write for CountingWriter {
 }
 
 #[cfg(test)]
-mod tests {}
+mod tests {
+    use super::*;
+    use crate::{
+        database::{AndaDB, DBConfig},
+        error::DBError,
+        index::HnswConfig,
+        query::{Filter, Query, RangeQuery, Search},
+        schema::{Document, Fe, Ft, Fv, Json, Schema, Segment},
+        storage::StorageConfig,
+    };
+    use object_store::memory::InMemory;
+    use serde::{Deserialize, Serialize};
+    use std::{collections::BTreeMap, sync::Arc};
+
+    // 测试用的文档结构
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    struct TestDoc {
+        pub id: u64,
+        pub name: String,
+        pub age: u32,
+        pub tags: Vec<String>,
+        pub metadata: BTreeMap<String, Json>,
+        pub segments: Vec<Segment>,
+    }
+
+    // 创建测试数据库和集合的辅助函数
+    async fn setup_test_db() -> Result<AndaDB, DBError> {
+        let object_store = Arc::new(InMemory::new());
+
+        let db_config = DBConfig {
+            name: "test_db".to_string(),
+            description: "Test database".to_string(),
+            storage: StorageConfig {
+                compress_level: 0,
+                ..Default::default()
+            },
+        };
+
+        let db = AndaDB::connect(object_store, db_config).await?;
+        Ok(db)
+    }
+
+    // 创建测试集合的辅助函数
+    async fn create_test_collection<F>(db: &AndaDB, f: F) -> Result<Arc<Collection>, DBError>
+    where
+        F: AsyncFnOnce(&mut Collection) -> Result<(), DBError>,
+    {
+        // 创建测试文档的模式
+        let mut schema = Schema::builder();
+        schema
+            .add_field(
+                Fe::new("name".to_string(), Ft::Text)?.with_description("Person name".to_string()),
+            )?
+            .add_field(
+                Fe::new("age".to_string(), Ft::U64)?.with_description("Person age".to_string()),
+            )?
+            .add_field(
+                Fe::new("tags".to_string(), Ft::Array(vec![Ft::Text]))?
+                    .with_description("Person tags".to_string()),
+            )?
+            .add_field(
+                Fe::new("metadata".to_string(), Ft::Map(BTreeMap::new()))?
+                    .with_description("Additional metadata".to_string()),
+            )?
+            .with_segments("segments", true)?;
+
+        let schema = schema.build()?;
+
+        let collection_config = CollectionConfig {
+            name: "test_collection".to_string(),
+            description: "Test collection".to_string(),
+        };
+
+        let collection = db
+            .open_or_create_collection(schema, collection_config, f)
+            .await?;
+
+        Ok(collection)
+    }
+
+    // 创建测试文档的辅助函数
+    fn create_test_doc(id: u64, name: &str, age: u32, tags: Vec<&str>) -> TestDoc {
+        TestDoc {
+            id,
+            name: name.to_string(),
+            age,
+            tags: tags.iter().map(|s| s.to_string()).collect(),
+            metadata: BTreeMap::new(),
+            segments: vec![
+                Segment::new(format!("This is a segment for {}", name), None)
+                    .with_vec_f32(vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]),
+            ],
+        }
+    }
+
+    #[tokio::test]
+    async fn test_collection_create() -> Result<(), DBError> {
+        let db = setup_test_db().await?;
+
+        let collection = create_test_collection(&db, async |_| Ok(())).await?;
+
+        assert_eq!(collection.name(), "test_collection");
+        assert_eq!(collection.metadata().config.description, "Test collection");
+
+        db.close().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_collection_open() -> Result<(), DBError> {
+        let db = setup_test_db().await?;
+
+        // 首先创建集合
+        {
+            let collection = create_test_collection(&db, async |_| Ok(())).await?;
+            assert_eq!(collection.name(), "test_collection");
+
+            // 添加一个文档以确保有数据可以在重新打开时加载
+            let mut doc = create_test_doc(0, "Alice", 30, vec!["smart", "friendly"]);
+            collection.obtain_segment_ids(&mut doc.segments);
+            let doc_obj = Document::try_from(collection.schema(), &doc)?;
+            let id = collection.add(doc_obj).await?;
+            assert_eq!(id, 1);
+
+            // 刷新以确保数据被持久化
+            collection.flush(unix_ms()).await?;
+        }
+
+        // 关闭并重新打开数据库
+        db.close().await?;
+        let db = AndaDB::connect(
+            db.object_store(),
+            DBConfig {
+                name: "test_db".to_string(),
+                description: "Test database".to_string(),
+                storage: StorageConfig {
+                    compress_level: 0,
+                    ..Default::default()
+                },
+            },
+        )
+        .await?;
+
+        // 重新打开集合
+        let collection = db
+            .open_collection("test_collection".to_string(), async |_| Ok(()))
+            .await?;
+
+        assert_eq!(collection.name(), "test_collection");
+        assert_eq!(collection.metadata().stats.num_documents, 1);
+
+        // 验证文档是否正确加载
+        let result: Vec<TestDoc> = collection
+            .search_as(Query {
+                filter: Some(Filter::Field((
+                    "id".to_string(),
+                    RangeQuery::Eq(Fv::U64(1)),
+                ))),
+                ..Default::default()
+            })
+            .await?;
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "Alice");
+
+        db.close().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_document_operations() -> Result<(), DBError> {
+        let db = setup_test_db().await?;
+        let collection = create_test_collection(&db, async |_| Ok(())).await?;
+
+        // 添加文档
+        let mut doc1 = create_test_doc(0, "Alice", 30, vec!["smart", "friendly"]);
+        collection.obtain_segment_ids(&mut doc1.segments);
+        let doc_obj1 = Document::try_from(collection.schema(), &doc1)?;
+        let id1 = collection.add(doc_obj1).await?;
+        assert_eq!(id1, 1);
+
+        let mut doc2 = create_test_doc(0, "Bob", 25, vec!["tall", "quiet"]);
+        collection.obtain_segment_ids(&mut doc2.segments);
+        let doc_obj2 = Document::try_from(collection.schema(), &doc2)?;
+        let id2 = collection.add(doc_obj2).await?;
+        assert_eq!(id2, 2);
+
+        // 获取文档
+        let result: TestDoc = collection.get_as(id1).await?;
+        assert_eq!(result.name, "Alice");
+        assert_eq!(result.age, 30);
+
+        // 删除文档
+        collection.remove(id2).await?;
+
+        // 验证删除
+        let result = collection.get(id2).await;
+        assert!(result.is_err());
+
+        // 验证集合统计信息
+        let stats = collection.stats();
+        assert_eq!(stats.num_documents, 1);
+
+        db.close().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_index_operations() -> Result<(), DBError> {
+        let db = setup_test_db().await?;
+        let collection = create_test_collection(&db, async |collection| {
+            // 创建索引
+            collection
+                .create_btree_index_nx("btree_name", "name")
+                .await?;
+            collection.create_btree_index_nx("btree_age", "age").await?;
+            collection
+                .create_btree_index_nx("btree_tags", "tags")
+                .await?;
+
+            // 创建搜索索引
+            collection
+                .create_search_index_nx(
+                    "search_segments",
+                    "segments",
+                    HnswConfig {
+                        dimension: 10,
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            Ok(())
+        })
+        .await?;
+
+        // 添加测试文档
+        for (name, age, tags) in [
+            ("Alice", 30, vec!["smart", "friendly"]),
+            ("Bob", 25, vec!["tall", "quiet"]),
+            ("Charlie", 35, vec!["smart", "tall"]),
+            ("David", 40, vec!["friendly", "quiet"]),
+        ] {
+            let mut doc = create_test_doc(0, name, age, tags);
+            collection.obtain_segment_ids(&mut doc.segments);
+            let doc_obj = Document::try_from(collection.schema(), &doc)?;
+            collection.add(doc_obj).await?;
+        }
+
+        // 刷新以确保索引更新
+        collection.flush(unix_ms()).await?;
+
+        // 测试精确匹配查询
+        let result: Vec<TestDoc> = collection
+            .search_as(Query {
+                filter: Some(Filter::Field((
+                    "name".to_string(),
+                    RangeQuery::Eq(Fv::Text("Alice".to_string())),
+                ))),
+                ..Default::default()
+            })
+            .await?;
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "Alice");
+
+        // 测试范围查询
+        let result: Vec<TestDoc> = collection
+            .search_as(Query {
+                filter: Some(Filter::Field((
+                    "age".to_string(),
+                    RangeQuery::Gt(Fv::U64(30)),
+                ))),
+                ..Default::default()
+            })
+            .await?;
+
+        assert_eq!(result.len(), 2);
+        assert!(result.iter().any(|doc| doc.name == "Charlie"));
+        assert!(result.iter().any(|doc| doc.name == "David"));
+
+        // 测试数组字段查询
+        let result: Vec<TestDoc> = collection
+            .search_as(Query {
+                filter: Some(Filter::Field((
+                    "tags".to_string(),
+                    RangeQuery::Eq(Fv::Text("smart".to_string())),
+                ))),
+                ..Default::default()
+            })
+            .await?;
+
+        assert_eq!(result.len(), 2);
+        assert!(result.iter().any(|doc| doc.name == "Alice"));
+        assert!(result.iter().any(|doc| doc.name == "Charlie"));
+
+        // 测试文本搜索
+        let result: Vec<TestDoc> = collection
+            .search_as(Query {
+                search: Some(Search {
+                    field: "segments".to_string(),
+                    text: Some("Alice".to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .await?;
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "Alice");
+
+        // 测试向量搜索
+        let result: Vec<TestDoc> = collection
+            .search_as(Query {
+                search: Some(Search {
+                    field: "segments".to_string(),
+                    vector: Some(vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .await?;
+
+        assert!(!result.is_empty());
+
+        // 测试复合查询
+        let result: Vec<TestDoc> = collection
+            .search_as(Query {
+                search: Some(Search {
+                    field: "segments".to_string(),
+                    text: Some("segment".to_string()),
+                    ..Default::default()
+                }),
+                filter: Some(Filter::Field((
+                    "age".to_string(),
+                    RangeQuery::Lt(Fv::U64(30)),
+                ))),
+                ..Default::default()
+            })
+            .await?;
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "Bob");
+
+        db.close().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_persistence() -> Result<(), DBError> {
+        let db = setup_test_db().await?;
+        let object_store = db.object_store();
+
+        // 创建集合并添加文档
+        {
+            let collection = create_test_collection(&db, async |collection| {
+                // 创建索引
+                collection
+                    .create_btree_index_nx("btree_name", "name")
+                    .await?;
+                collection.create_btree_index_nx("btree_age", "age").await?;
+                collection
+                    .create_btree_index_nx("btree_tags", "tags")
+                    .await?;
+
+                // 创建搜索索引
+                collection
+                    .create_search_index_nx(
+                        "search_segments",
+                        "segments",
+                        HnswConfig {
+                            dimension: 10,
+                            ..Default::default()
+                        },
+                    )
+                    .await?;
+                Ok(())
+            })
+            .await?;
+
+            // 添加文档
+            let mut doc = create_test_doc(0, "Alice", 30, vec!["smart", "friendly"]);
+            collection.obtain_segment_ids(&mut doc.segments);
+            let doc_obj = Document::try_from(collection.schema(), &doc)?;
+            collection.add(doc_obj).await?;
+
+            // 刷新以确保数据被持久化
+            // collection.flush(unix_ms()).await?;
+
+            // 关闭集合
+            // collection.close().await?;
+        }
+
+        // 关闭并持久化数据库
+        db.close().await?;
+
+        // 重新打开数据库和集合
+        let db = AndaDB::connect(
+            object_store.clone(),
+            DBConfig {
+                name: "test_db".to_string(),
+                description: "Test database".to_string(),
+                storage: StorageConfig {
+                    compress_level: 0,
+                    ..Default::default()
+                },
+            },
+        )
+        .await?;
+
+        let collection = db
+            .open_collection("test_collection".to_string(), async |_| Ok(()))
+            .await?;
+
+        // 验证文档是否正确加载
+        let result: Vec<TestDoc> = collection
+            .search_as(Query {
+                filter: Some(Filter::Field((
+                    "name".to_string(),
+                    RangeQuery::Eq(Fv::Text("Alice".to_string())),
+                ))),
+                ..Default::default()
+            })
+            .await?;
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "Alice");
+        assert_eq!(result[0].age, 30);
+
+        db.close().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_read_only_mode() -> Result<(), DBError> {
+        let db = setup_test_db().await?;
+        let collection = create_test_collection(&db, async |_| Ok(())).await?;
+
+        // 添加一个文档
+        let mut doc = create_test_doc(0, "Alice", 30, vec!["smart", "friendly"]);
+        collection.obtain_segment_ids(&mut doc.segments);
+        let doc_obj = Document::try_from(collection.schema(), &doc)?;
+        collection.add(doc_obj).await?;
+
+        // 设置为只读模式
+        collection.set_read_only(true);
+
+        // 尝试添加另一个文档，应该失败
+        let mut doc2 = create_test_doc(0, "Bob", 25, vec!["tall", "quiet"]);
+        collection.obtain_segment_ids(&mut doc2.segments);
+        let doc_obj2 = Document::try_from(collection.schema(), &doc2)?;
+        let result = collection.add(doc_obj2).await;
+
+        assert!(result.is_err());
+
+        // 验证读取操作仍然有效
+        let result: TestDoc = collection.get_as(1).await?;
+        assert_eq!(result.name, "Alice");
+
+        // 恢复为读写模式
+        collection.set_read_only(false);
+
+        // 现在应该可以添加文档
+        let mut doc3 = create_test_doc(0, "Charlie", 35, vec!["smart", "tall"]);
+        collection.obtain_segment_ids(&mut doc3.segments);
+        let doc_obj3 = Document::try_from(collection.schema(), &doc3)?;
+        let id = collection.add(doc_obj3).await?;
+        assert_eq!(id, 2);
+
+        db.close().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_error_handling() -> Result<(), DBError> {
+        let db = setup_test_db().await?;
+        let collection = create_test_collection(&db, async |collection| {
+            // 测试创建已存在的索引
+            collection
+                .create_btree_index_nx("btree_name", "name")
+                .await?;
+            let result = collection.create_btree_index("btree_name", "name").await;
+            assert!(result.is_err());
+            Ok(())
+        })
+        .await?;
+
+        // 测试获取不存在的文档
+        let result = collection.get(999).await;
+        assert!(result.is_err());
+
+        // 测试删除不存在的文档
+        let result = collection.remove(999).await;
+        assert!(result.is_ok());
+
+        // 测试无效的查询
+        let result: Result<Vec<TestDoc>, DBError> = collection
+            .search_as(Query {
+                filter: Some(Filter::Field((
+                    "non_existent_field".to_string(),
+                    RangeQuery::Eq(Fv::Text("value".to_string())),
+                ))),
+                ..Default::default()
+            })
+            .await;
+
+        assert!(result.is_err());
+
+        db.close().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_concurrent_operations() -> Result<(), DBError> {
+        let db = setup_test_db().await?;
+        let collection = create_test_collection(&db, async |collection| {
+            // 创建索引
+            collection
+                .create_btree_index_nx("btree_name", "name")
+                .await?;
+            Ok(())
+        })
+        .await?;
+
+        // 并发添加多个文档
+        let mut handles = Vec::new();
+        for i in 0..10 {
+            let collection_clone = collection.clone();
+            let handle = tokio::spawn(async move {
+                let mut doc = create_test_doc(0, &format!("Person{}", i), 20 + i, vec!["tag"]);
+                collection_clone.obtain_segment_ids(&mut doc.segments);
+                let doc_obj = Document::try_from(collection_clone.schema(), &doc).unwrap();
+                collection_clone.add(doc_obj).await
+            });
+            handles.push(handle);
+        }
+
+        // 等待所有任务完成
+        let mut ids = Vec::new();
+        for handle in handles {
+            let id = handle.await.unwrap()?;
+            ids.push(id);
+        }
+
+        // 验证所有文档都被添加
+        assert_eq!(ids.len(), 10);
+
+        // 验证文档数量
+        let stats = collection.stats();
+        assert_eq!(stats.num_documents, 10);
+
+        // 并发获取文档
+        let mut handles = Vec::new();
+        for id in ids {
+            let collection_clone = collection.clone();
+            let handle = tokio::spawn(async move { collection_clone.get_as::<TestDoc>(id).await });
+            handles.push(handle);
+        }
+
+        // 等待所有任务完成
+        for handle in handles {
+            let result = handle.await.unwrap();
+            assert!(result.is_ok());
+        }
+
+        db.close().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_metadata_updates() -> Result<(), DBError> {
+        let db = setup_test_db().await?;
+        let collection = create_test_collection(&db, async |_| Ok(())).await?;
+
+        // 记录初始版本
+        let initial_version = collection.metadata().stats.version;
+
+        // 添加文档应该更新元数据
+        let mut doc = create_test_doc(0, "Alice", 30, vec!["smart", "friendly"]);
+        collection.obtain_segment_ids(&mut doc.segments);
+        let doc_obj = Document::try_from(collection.schema(), &doc)?;
+        collection.add(doc_obj).await?;
+
+        // 验证版本已更新
+        let new_version = collection.metadata().stats.version;
+        assert!(new_version > initial_version);
+
+        // 验证统计信息已更新
+        let stats = collection.stats();
+        assert_eq!(stats.num_documents, 1);
+        assert_eq!(stats.insert_count, 1);
+
+        // 删除文档应该更新元数据
+        collection.remove(1).await?;
+
+        // 验证统计信息已更新
+        let stats = collection.stats();
+        assert_eq!(stats.num_documents, 0);
+        assert_eq!(stats.delete_count, 1);
+
+        db.close().await?;
+        Ok(())
+    }
+}

@@ -18,7 +18,7 @@ pub type SegmentId = u64;
 /// but consume more memory and computational resources.
 ///
 /// A Document should be split into a group of Segments for storage and retrieval.
-#[derive(Debug, Default, Clone, Serialize, Deserialize, FieldTyped)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize, FieldTyped, PartialEq)]
 pub struct Segment {
     /// Unique identifier for the segment.
     #[serde(rename = "i")]
@@ -68,11 +68,7 @@ impl Segment {
 
     pub fn with_vec_f32(self, vec: Vec<f32>) -> Self {
         Self {
-            vec: Some(
-                vec.into_iter()
-                    .map(bf16::from_f32)
-                    .collect::<Vec<bf16>>(),
-            ),
+            vec: Some(vec.into_iter().map(bf16::from_f32).collect::<Vec<bf16>>()),
             ..self
         }
     }

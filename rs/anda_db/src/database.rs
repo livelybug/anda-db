@@ -366,11 +366,7 @@ impl AndaDB {
             }
         }
 
-        let collection = Collection::open(self, config.name, f).await?;
-        let collection = Arc::new(collection);
-        let mut collections = self.collections.write();
-        collections.insert(collection.name().to_string(), collection.clone());
-        Ok(collection)
+        self.open_collection(config.name, f).await
     }
 
     /// Opens an existing collection.
@@ -405,8 +401,12 @@ impl AndaDB {
 
         let collection = Collection::open(self, name, f).await?;
         let collection = Arc::new(collection);
-        let mut collections = self.collections.write();
-        collections.insert(collection.name().to_string(), collection.clone());
+        {
+            let mut collections = self.collections.write();
+            collections.insert(collection.name().to_string(), collection.clone());
+        }
+        let now = unix_ms();
+        collection.flush(now).await?;
         Ok(collection)
     }
 
@@ -436,5 +436,203 @@ impl AndaDB {
     /// This method is used internally by collections to access the object store.
     pub(crate) fn object_store(&self) -> Arc<dyn ObjectStore> {
         self.object_store.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schema::{Fe, Ft, Schema};
+    use object_store::memory::InMemory;
+
+    #[tokio::test]
+    async fn test_database_creation() {
+        let object_store = Arc::new(InMemory::new());
+        let config = DBConfig::default();
+
+        let db = AndaDB::create(object_store, config).await.unwrap();
+        assert_eq!(db.name(), "anda_db");
+        assert!(db.metadata().collections.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_database_connection() {
+        let object_store = Arc::new(InMemory::new());
+        let config = DBConfig {
+            name: "test_db".to_string(),
+            description: "Test Database".to_string(),
+            storage: StorageConfig::default(),
+        };
+
+        // First create the database
+        {
+            let _db = AndaDB::create(object_store.clone(), config.clone())
+                .await
+                .unwrap();
+        }
+
+        // Then connect to it
+        let db = AndaDB::connect(object_store, config).await.unwrap();
+        assert_eq!(db.name(), "test_db");
+    }
+
+    #[tokio::test]
+    async fn test_create_collection() {
+        let object_store = Arc::new(InMemory::new());
+        let config = DBConfig::default();
+        let db = AndaDB::create(object_store, config).await.unwrap();
+
+        let mut schema = Schema::builder();
+        schema
+            .add_field(Fe::new("name".to_string(), Ft::Text).unwrap())
+            .unwrap();
+        let schema = schema.build().unwrap();
+
+        let collection_config = CollectionConfig {
+            name: "test_collection".to_string(),
+            description: "Test Collection".to_string(),
+        };
+
+        let collection = db
+            .create_collection(schema, collection_config, async |_| Ok(()))
+            .await
+            .unwrap();
+
+        assert_eq!(collection.name(), "test_collection");
+        assert!(db.metadata().collections.contains("test_collection"));
+    }
+
+    #[tokio::test]
+    async fn test_open_collection() {
+        let object_store = Arc::new(InMemory::new());
+        let config = DBConfig::default();
+        let db = AndaDB::create(object_store, config).await.unwrap();
+
+        let mut schema = Schema::builder();
+        schema
+            .add_field(Fe::new("name".to_string(), Ft::Text).unwrap())
+            .unwrap();
+        let schema = schema.build().unwrap();
+
+        let collection_config = CollectionConfig {
+            name: "test_collection".to_string(),
+            description: "Test Collection".to_string(),
+        };
+
+        // Create collection first
+        db.create_collection(schema, collection_config.clone(), async |_| Ok(()))
+            .await
+            .unwrap();
+
+        // Then open it
+        let collection = db
+            .open_collection("test_collection".to_string(), async |_| Ok(()))
+            .await
+            .unwrap();
+
+        assert_eq!(collection.name(), "test_collection");
+    }
+
+    #[tokio::test]
+    async fn test_open_or_create_collection() {
+        let object_store = Arc::new(InMemory::new());
+        let config = DBConfig::default();
+        let db = AndaDB::create(object_store, config).await.unwrap();
+
+        let mut schema = Schema::builder();
+        schema
+            .add_field(Fe::new("name".to_string(), Ft::Text).unwrap())
+            .unwrap();
+        let schema = schema.build().unwrap();
+
+        let collection_config = CollectionConfig {
+            name: "test_collection".to_string(),
+            description: "Test Collection".to_string(),
+        };
+
+        // First call should create the collection
+        let collection1 = db
+            .open_or_create_collection(schema.clone(), collection_config.clone(), async |_| Ok(()))
+            .await
+            .unwrap();
+
+        assert_eq!(collection1.name(), "test_collection");
+
+        // Second call should open the existing collection
+        let collection2 = db
+            .open_or_create_collection(schema, collection_config, async |_| Ok(()))
+            .await
+            .unwrap();
+
+        assert_eq!(collection2.name(), "test_collection");
+    }
+
+    #[tokio::test]
+    async fn test_read_only_mode() {
+        let object_store = Arc::new(InMemory::new());
+        let config = DBConfig::default();
+        let db = AndaDB::create(object_store, config).await.unwrap();
+
+        let mut schema = Schema::builder();
+        schema
+            .add_field(Fe::new("name".to_string(), Ft::Text).unwrap())
+            .unwrap();
+        let schema = schema.build().unwrap();
+
+        // Create collection while DB is writable
+        let collection_config = CollectionConfig {
+            name: "test_collection".to_string(),
+            description: "Test Collection".to_string(),
+        };
+        let _collection = db
+            .create_collection(schema.clone(), collection_config.clone(), async |_| Ok(()))
+            .await
+            .unwrap();
+
+        // Set database to read-only
+        db.set_read_only(true);
+
+        // Attempt to create another collection should fail
+        let collection_config2 = CollectionConfig {
+            name: "test_collection2".to_string(),
+            description: "Test Collection 2".to_string(),
+        };
+        let result = db
+            .create_collection(schema, collection_config2, async |_| Ok(()))
+            .await;
+
+        assert!(result.is_err());
+        match result {
+            Err(DBError::Generic { .. }) => (),
+            _ => panic!("Expected Generic error due to read-only mode"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_database_close() {
+        let object_store = Arc::new(InMemory::new());
+        let config = DBConfig::default();
+        let db = AndaDB::create(object_store, config).await.unwrap();
+
+        let mut schema = Schema::builder();
+        schema
+            .add_field(Fe::new("name".to_string(), Ft::Text).unwrap())
+            .unwrap();
+        let schema = schema.build().unwrap();
+
+        let collection_config = CollectionConfig {
+            name: "test_collection".to_string(),
+            description: "Test Collection".to_string(),
+        };
+
+        db.create_collection(schema, collection_config, async |_| Ok(()))
+            .await
+            .unwrap();
+
+        // Close the database
+        db.close().await.unwrap();
+
+        // Database should be in read-only mode after closing
+        assert!(db.read_only.load(Ordering::Relaxed));
     }
 }
