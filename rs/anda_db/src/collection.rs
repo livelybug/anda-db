@@ -75,6 +75,9 @@ pub struct Collection {
     read_only: AtomicBool,
     /// Last saved version of the collection
     last_saved_version: AtomicU64,
+
+    metadata_version: RwLock<ObjectVersion>,
+    ids_version: RwLock<ObjectVersion>,
 }
 
 /// Bucket identifier for document segments storage
@@ -222,13 +225,17 @@ impl Collection {
             stats,
         };
 
-        match storage.create(Self::METADATA_PATH, &metadata).await {
-            Ok(_) => {
-                // created successfully, and store storage metadata
-                storage.store_metadata(0, unix_ms()).await?;
-            }
-            Err(err) => return Err(err),
-        }
+        let metadata_version = storage.create(Self::METADATA_PATH, &metadata).await?;
+        let doc_ids = Treemap::new();
+        let ids_data = {
+            let mut ids = doc_ids.clone();
+            ids.run_optimize();
+            ids.serialize::<Portable>()
+        };
+        let ids_version = storage.create(Self::IDS_PATH, &ids_data).await?;
+
+        // created successfully, and store storage metadata
+        storage.store_metadata(0, unix_ms()).await?;
 
         let bucket_overload_size = storage.object_chunk_size();
         Ok(Self {
@@ -251,6 +258,8 @@ impl Collection {
             metadata: RwLock::new(metadata),
             read_only: AtomicBool::new(false),
             last_saved_version: AtomicU64::new(0),
+            metadata_version: RwLock::new(metadata_version),
+            ids_version: RwLock::new(ids_version),
         })
     }
 
@@ -277,9 +286,16 @@ impl Collection {
         )
         .await?;
 
-        let (metadata, _) = storage
+        let (metadata, metadata_version) = storage
             .fetch::<CollectionMetadata>(Self::METADATA_PATH)
             .await?;
+
+        let (ids, ids_version) = storage.fetch::<Vec<u8>>(Self::IDS_PATH).await?;
+        let doc_ids =
+            Treemap::try_deserialize::<Portable>(&ids).ok_or_else(|| DBError::Generic {
+                name: name.clone(),
+                source: "Failed to deserialize ids".into(),
+            })?;
 
         let bucket_overload_size = storage.object_chunk_size();
         let mut collection = Self {
@@ -296,16 +312,17 @@ impl Collection {
             get_count: AtomicU64::new(metadata.stats.get_count),
             last_saved_version: AtomicU64::new(metadata.stats.version),
             tokenizer: default_tokenizer(),
-            doc_ids: RwLock::new(Treemap::new()),
+            doc_ids: RwLock::new(doc_ids),
             bucket_overload_size,
             current_bucket: RwLock::new((metadata.stats.max_bucket_id, 0)),
             dirty_buckets: RwLock::new(BTreeMap::new()),
             metadata: RwLock::new(metadata),
             read_only: AtomicBool::new(false),
+            metadata_version: RwLock::new(metadata_version),
+            ids_version: RwLock::new(ids_version),
         };
 
         f(&mut collection).await?;
-        collection.load_ids().await?;
         collection.load_doc_segments().await?;
         collection.load_indexes().await?;
         let fixed = collection.auto_repair_indexes().await?;
@@ -320,22 +337,6 @@ impl Collection {
             collection.flush(unix_ms()).await?;
         }
         Ok(collection)
-    }
-
-    /// Loads document IDs from storage.
-    ///
-    /// # Returns
-    /// Ok(()) if successful, or an error if loading fails
-    async fn load_ids(&mut self) -> Result<(), DBError> {
-        let (ids, _) = self.storage.fetch::<Vec<u8>>(Self::IDS_PATH).await?;
-
-        let treemap =
-            Treemap::try_deserialize::<Portable>(&ids).ok_or_else(|| DBError::Generic {
-                name: self.name.clone(),
-                source: "Failed to deserialize ids".into(),
-            })?;
-        *self.doc_ids.write() = treemap;
-        Ok(())
     }
 
     /// Loads document segments from storage.
@@ -460,7 +461,6 @@ impl Collection {
                                         // ignore errors
                                         let _ = bm25.insert(*sid, text, now_ms);
                                     }
-
                                     if let Some(vector) = Segment::vec_from(seg) {
                                         // ignore errors
                                         let _ = hnsw.insert(*sid, vector.clone(), now_ms);
@@ -592,7 +592,12 @@ impl Collection {
         }
 
         meta.stats.last_saved = now_ms.max(meta.stats.last_saved);
-        self.storage.put(Self::METADATA_PATH, &meta, None).await?;
+        let ver = { self.metadata_version.read().clone() };
+        let ver = self
+            .storage
+            .put(Self::METADATA_PATH, &meta, Some(ver))
+            .await?;
+        *self.metadata_version.write() = ver;
         self.update_metadata(|m| {
             m.stats.last_saved = meta.stats.last_saved.max(m.stats.last_saved);
         });
@@ -610,7 +615,9 @@ impl Collection {
             ids.run_optimize();
             ids.serialize::<Portable>()
         };
-        self.storage.put(Self::IDS_PATH, &data, None).await?;
+        let ver = { self.ids_version.read().clone() };
+        let ver = self.storage.put(Self::IDS_PATH, &data, Some(ver)).await?;
+        *self.ids_version.write() = ver;
         Ok(())
     }
 

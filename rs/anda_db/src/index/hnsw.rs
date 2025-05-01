@@ -1,5 +1,6 @@
 use anda_db_hnsw::HnswIndex;
 use bytes::Bytes;
+use parking_lot::RwLock;
 use std::{fmt::Debug, hash::Hash};
 
 pub use anda_db_hnsw::{HnswConfig, HnswMetadata, HnswStats};
@@ -7,7 +8,7 @@ pub use anda_db_hnsw::{HnswConfig, HnswMetadata, HnswStats};
 use crate::{
     error::DBError,
     schema::{Fe, SegmentId, Vector},
-    storage::{PutMode, Storage},
+    storage::{ObjectVersion, PutMode, Storage},
 };
 
 pub struct Hnsw {
@@ -15,6 +16,8 @@ pub struct Hnsw {
     field: Fe,
     index: HnswIndex,
     storage: Storage, // 与 Collection 共享同一个 Storage 实例
+    metadata_version: RwLock<ObjectVersion>,
+    ids_version: RwLock<ObjectVersion>,
 }
 
 impl Debug for Hnsw {
@@ -62,14 +65,14 @@ impl Hnsw {
         index
             .flush(&mut metadata, &mut ids, now_ms, async |_, _| Ok(true))
             .await?;
-        storage
+        let metadata_version = storage
             .put_bytes(
                 &Hnsw::metadata_path(&name),
                 metadata.into(),
                 PutMode::Create,
             )
             .await?;
-        storage
+        let ids_version = storage
             .put_bytes(&Hnsw::ids_path(&name), ids.into(), PutMode::Create)
             .await?;
         Ok(Self {
@@ -77,12 +80,14 @@ impl Hnsw {
             field,
             index,
             storage,
+            metadata_version: RwLock::new(metadata_version),
+            ids_version: RwLock::new(ids_version),
         })
     }
 
     pub async fn bootstrap(name: String, field: Fe, storage: Storage) -> Result<Self, DBError> {
-        let (metadata, _) = storage.fetch_bytes(&Hnsw::metadata_path(&name)).await?;
-        let (ids, _) = storage.fetch_bytes(&Hnsw::ids_path(&name)).await?;
+        let (metadata, metadata_version) = storage.fetch_bytes(&Hnsw::metadata_path(&name)).await?;
+        let (ids, ids_version) = storage.fetch_bytes(&Hnsw::ids_path(&name)).await?;
         let index = HnswIndex::load_all(&metadata[..], &ids[..], async |id: u64| {
             let path = Hnsw::node_path(&name, id);
             match storage.fetch_bytes(&path).await {
@@ -98,6 +103,8 @@ impl Hnsw {
             field,
             index,
             storage,
+            metadata_version: RwLock::new(metadata_version),
+            ids_version: RwLock::new(ids_version),
         })
     }
 
@@ -108,16 +115,35 @@ impl Hnsw {
         }
 
         let path = Hnsw::metadata_path(&self.name);
-        self.storage
-            .put_bytes(&path, Bytes::copy_from_slice(&data[..]), PutMode::Overwrite)
+        let metadata_version = { self.metadata_version.read().clone() };
+        let metadata_version = self
+            .storage
+            .put_bytes(
+                &path,
+                Bytes::copy_from_slice(&data[..]),
+                PutMode::Update(metadata_version.into()),
+            )
             .await?;
+        {
+            *self.metadata_version.write() = metadata_version;
+        }
 
         data.clear();
         self.index.store_ids(&mut data)?;
         let path = Hnsw::ids_path(&self.name);
-        self.storage
-            .put_bytes(&path, Bytes::copy_from_slice(&data[..]), PutMode::Overwrite)
+        let ids_version = { self.ids_version.read().clone() };
+        let ids_version = self
+            .storage
+            .put_bytes(
+                &path,
+                Bytes::copy_from_slice(&data[..]),
+                PutMode::Update(ids_version.into()),
+            )
             .await?;
+        {
+            *self.ids_version.write() = ids_version;
+        }
+
         self.index
             .store_dirty_nodes(async |id, data| {
                 let path = Hnsw::node_path(&self.name, id);

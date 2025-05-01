@@ -1,5 +1,6 @@
 use anda_db_tfs::BM25Index;
 use bytes::Bytes;
+use parking_lot::RwLock;
 use std::{fmt::Debug, hash::Hash};
 
 pub use anda_db_tfs::{
@@ -10,7 +11,7 @@ pub use anda_db_tfs::{
 use crate::{
     error::DBError,
     schema::{Fe, SegmentId},
-    storage::{PutMode, Storage},
+    storage::{ObjectVersion, PutMode, Storage},
 };
 
 pub struct BM25 {
@@ -18,6 +19,7 @@ pub struct BM25 {
     field: Fe,
     index: BM25Index<TokenizerChain>,
     storage: Storage, // 与 Collection 共享同一个 Storage 实例
+    metadata_version: RwLock<ObjectVersion>,
 }
 
 impl Debug for BM25 {
@@ -73,7 +75,7 @@ impl BM25 {
                 async |_, _| Ok(true),
             )
             .await?;
-        storage
+        let ver = storage
             .put_bytes(&BM25::metadata_path(&name), data.into(), PutMode::Create)
             .await?;
         Ok(Self {
@@ -81,6 +83,7 @@ impl BM25 {
             field,
             index,
             storage,
+            metadata_version: RwLock::new(ver),
         })
     }
 
@@ -90,8 +93,7 @@ impl BM25 {
         tokenizer: TokenizerChain,
         storage: Storage,
     ) -> Result<Self, DBError> {
-        let path = BM25::metadata_path(&name);
-        let (metadata, _) = storage.fetch_bytes(&path).await?;
+        let (metadata, ver) = storage.fetch_bytes(&BM25::metadata_path(&name)).await?;
         let index = BM25Index::load_all(
             tokenizer,
             &metadata[..],
@@ -119,6 +121,7 @@ impl BM25 {
             field,
             index,
             storage,
+            metadata_version: RwLock::new(ver),
         })
     }
 
@@ -129,9 +132,15 @@ impl BM25 {
         }
 
         let path = BM25::metadata_path(&self.name);
-        self.storage
-            .put_bytes(&path, data.into(), PutMode::Overwrite)
+        let ver = { self.metadata_version.read().clone() };
+        let ver = self
+            .storage
+            .put_bytes(&path, data.into(), PutMode::Update(ver.into()))
             .await?;
+        {
+            *self.metadata_version.write() = ver;
+        }
+
         self.index
             .store_dirty_segments(async |id, data| {
                 let path = BM25::segment_path(&self.name, id);

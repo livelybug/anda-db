@@ -1,5 +1,6 @@
 use anda_db_btree::BTreeIndex;
 use bytes::Bytes;
+use parking_lot::RwLock;
 use serde::{Serialize, de::DeserializeOwned};
 use std::{fmt::Debug, hash::Hash};
 
@@ -8,7 +9,7 @@ pub use anda_db_btree::{BTreeConfig, BTreeMetadata, BTreeStats, RangeQuery};
 use crate::{
     error::DBError,
     schema::{DocumentId, Fe, Ft, Fv},
-    storage::{PutMode, Storage},
+    storage::{ObjectVersion, PutMode, Storage},
 };
 
 pub enum BTree {
@@ -61,6 +62,7 @@ where
     field_name: String,
     index: BTreeIndex<u64, FV>,
     storage: Storage, // 与 Collection 共享同一个 Storage 实例
+    metadata_version: RwLock<ObjectVersion>,
 }
 
 impl BTree {
@@ -438,7 +440,7 @@ where
         index
             .flush(&mut data, now_ms, async |_, _| Ok(true))
             .await?;
-        storage
+        let ver = storage
             .put_bytes(&BTree::metadata_path(&name), data.into(), PutMode::Create)
             .await?;
         Ok(InnerBTree {
@@ -446,6 +448,7 @@ where
             field_name,
             index,
             storage,
+            metadata_version: RwLock::new(ver),
         })
     }
 
@@ -455,7 +458,7 @@ where
         storage: Storage,
     ) -> Result<Self, DBError> {
         let path = BTree::metadata_path(&name);
-        let (metadata, _) = storage.fetch_bytes(&path).await?;
+        let (metadata, ver) = storage.fetch_bytes(&path).await?;
         let index = BTreeIndex::<DocumentId, FV>::load_all(&metadata[..], async |id: u32| {
             let path = BTree::posting_path(&name, id);
             match storage.fetch_bytes(&path).await {
@@ -471,6 +474,7 @@ where
             field_name,
             index,
             storage,
+            metadata_version: RwLock::new(ver),
         })
     }
 
@@ -481,9 +485,15 @@ where
         }
 
         let path = BTree::metadata_path(&self.name);
-        self.storage
-            .put_bytes(&path, data.into(), PutMode::Overwrite)
+        let ver = { self.metadata_version.read().clone() };
+        let ver = self
+            .storage
+            .put_bytes(&path, data.into(), PutMode::Update(ver.into()))
             .await?;
+        {
+            *self.metadata_version.write() = ver;
+        }
+
         self.index
             .store_dirty_postings(async |id, data| {
                 let path = BTree::posting_path(&self.name, id);
