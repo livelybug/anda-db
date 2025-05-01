@@ -1,4 +1,4 @@
-use futures::{future::JoinAll, try_join};
+use futures::future::join_all;
 use object_store::ObjectStore;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -112,7 +112,7 @@ impl AndaDB {
         match storage.create(Self::METADATA_PATH, &metadata).await {
             Ok(_) => {
                 // DB created successfully, and store storage metadata
-                storage.store_metadata(unix_ms()).await?;
+                storage.store_metadata(0, unix_ms()).await?;
             }
             Err(err) => return Err(err),
         }
@@ -169,7 +169,7 @@ impl AndaDB {
                 match storage.create(Self::METADATA_PATH, &metadata).await {
                     Ok(_) => {
                         // DB created successfully, and store storage metadata
-                        storage.store_metadata(unix_ms()).await?;
+                        storage.store_metadata(0, unix_ms()).await?;
                     }
                     Err(err) => return Err(err),
                 }
@@ -233,7 +233,7 @@ impl AndaDB {
             .values()
             .cloned()
             .collect::<Vec<_>>();
-        let _rt = JoinAll::from_iter(collections.iter().map(|collection| collection.close())).await;
+        let _rt = join_all(collections.iter().map(|collection| collection.close())).await;
         let start = Instant::now();
         match self.flush(unix_ms()).await {
             Ok(_) => {
@@ -423,11 +423,10 @@ impl AndaDB {
     async fn flush(&self, now_ms: u64) -> Result<(), DBError> {
         let metadata = self.metadata();
 
-        try_join!(
-            self.storage.put(Self::METADATA_PATH, &metadata, None),
-            self.storage.store_metadata(now_ms)
-        )?;
-
+        self.storage
+            .put(Self::METADATA_PATH, &metadata, None)
+            .await?;
+        self.storage.store_metadata(0, now_ms).await?;
         Ok(())
     }
 

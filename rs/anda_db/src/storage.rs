@@ -92,6 +92,7 @@ pub struct StorageMetadata {
 
 /// Atomic version of storage statistics for concurrent updates.
 struct StorageStatsAtomic {
+    check_point: AtomicU64,
     /// Internal version counter, incremented on metadata save.
     version: AtomicU64,
     /// Timestamp (ms) of the last metadata save.
@@ -113,6 +114,7 @@ struct StorageStatsAtomic {
 /// Storage statistics.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct StorageStats {
+    pub check_point: u64,
     /// Internal version counter.
     pub version: u64,
     /// Timestamp (ms) of the last metadata save.
@@ -135,6 +137,7 @@ impl From<&StorageStatsAtomic> for StorageStats {
     /// Creates `StorageStats` from `StorageStatsAtomic` by loading atomic values.
     fn from(stats: &StorageStatsAtomic) -> Self {
         StorageStats {
+            check_point: stats.version.load(Ordering::Relaxed),
             version: stats.version.load(Ordering::Relaxed),
             last_saved: stats.last_saved.load(Ordering::Relaxed),
             total_cache_get_count: stats.total_cache_get_count.load(Ordering::Relaxed),
@@ -151,6 +154,7 @@ impl From<&StorageStats> for StorageStatsAtomic {
     /// Creates `StorageStatsAtomic` from `StorageStats` by initializing atomic values.
     fn from(stats: &StorageStats) -> Self {
         StorageStatsAtomic {
+            check_point: AtomicU64::new(stats.check_point),
             version: AtomicU64::new(stats.version),
             last_saved: AtomicU64::new(stats.last_saved),
             total_cache_get_count: AtomicU64::new(stats.total_cache_get_count),
@@ -252,27 +256,31 @@ impl Storage {
     ///
     /// # Arguments
     ///
+    /// * `check_point` - The current checkpoint value, used for `check_point`.
     /// * `now_ms` - The current timestamp in milliseconds, used for `last_saved`.
     ///
     /// # Errors
     ///
     /// Returns `DBError` if writing the metadata fails.
-    pub async fn store_metadata(&self, now_ms: u64) -> Result<(), DBError> {
-        let prev = self.inner.stats.last_saved.load(Ordering::Acquire);
+    pub async fn store_metadata(&self, check_point: u64, now_ms: u64) -> Result<(), DBError> {
+        let prev = self
+            .inner
+            .stats
+            .last_saved
+            .fetch_max(now_ms, Ordering::Acquire);
         if prev >= now_ms {
             // Don't save if the last saved time is greater than now
             return Ok(());
         }
 
-        let mut metadata = self.metadata();
-        metadata.stats.last_saved = now_ms;
-
-        self.put(Storage::METADATA_PATH, &metadata, None).await?;
-        self.inner.stats.version.fetch_add(1, Ordering::Relaxed);
         self.inner
             .stats
-            .last_saved
-            .fetch_max(now_ms, Ordering::Relaxed);
+            .check_point
+            .store(check_point, Ordering::Release);
+        self.inner.stats.version.fetch_add(1, Ordering::Release);
+
+        let metadata = self.metadata();
+        self.put(Storage::METADATA_PATH, &metadata, None).await?;
 
         Ok(())
     }
@@ -546,13 +554,14 @@ impl Storage {
     where
         T: Serialize,
     {
+        let path = self.full_path(doc_path);
         let mut buf: Vec<u8> = Vec::new();
 
         into_writer(doc, &mut buf).map_err(|err| DBError::Serialization {
             name: self.inner.base_path.to_string(),
             source: err.into(),
         })?;
-        let path = self.full_path(doc_path);
+
         let mode = if let Some(version) = version {
             PutMode::Update(version.into())
         } else {
@@ -930,7 +939,7 @@ mod tests {
 
         // 存储元数据
         storage
-            .store_metadata(now_ms)
+            .store_metadata(0, now_ms)
             .await
             .expect("Failed to store metadata");
 
@@ -941,7 +950,7 @@ mod tests {
 
         // 再次存储，但使用较小的时间戳（应该被忽略）
         storage
-            .store_metadata(now_ms - 1000)
+            .store_metadata(0, now_ms - 1000)
             .await
             .expect("Failed to store metadata");
         let metadata2 = storage.metadata();

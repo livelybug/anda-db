@@ -1,6 +1,9 @@
 use croaring::{Portable, Treemap};
 use dashmap::DashMap;
-use futures::try_join;
+use futures::{
+    future::{try_join, try_join_all},
+    try_join as try_join_await,
+};
 use object_store::path::Path;
 use parking_lot::RwLock;
 use serde::de::DeserializeOwned;
@@ -13,7 +16,13 @@ use std::sync::{
 use std::time::Instant;
 
 use crate::{
-    database::AndaDB, error::DBError, index::*, query::*, schema::*, storage::Storage, unix_ms,
+    database::AndaDB,
+    error::DBError,
+    index::*,
+    query::*,
+    schema::*,
+    storage::{ObjectVersion, Storage},
+    unix_ms,
 };
 
 /// A Collection represents a logical grouping of documents with the same schema.
@@ -216,7 +225,7 @@ impl Collection {
         match storage.create(Self::METADATA_PATH, &metadata).await {
             Ok(_) => {
                 // created successfully, and store storage metadata
-                storage.store_metadata(unix_ms()).await?;
+                storage.store_metadata(0, unix_ms()).await?;
             }
             Err(err) => return Err(err),
         }
@@ -299,7 +308,17 @@ impl Collection {
         collection.load_ids().await?;
         collection.load_doc_segments().await?;
         collection.load_indexes().await?;
-        collection.auto_repair_indexes().await;
+        let fixed = collection.auto_repair_indexes().await?;
+        if fixed > 0 {
+            log::info!(
+                action = "auto_repair_indexes",
+                collection = collection.name;
+                "Auto-repaired {fixed} documents",
+            );
+
+            // flush the fixed documents
+            collection.flush(unix_ms()).await?;
+        }
         Ok(collection)
     }
 
@@ -351,7 +370,7 @@ impl Collection {
     /// Ok(()) if successful, or an error if loading fails
     async fn load_indexes(&mut self) -> Result<(), DBError> {
         let meta = self.metadata.read().clone();
-        let (btree_indexes, bm25_indexes, hnsw_indexes) = try_join!(
+        let (btree_indexes, bm25_indexes, hnsw_indexes) = try_join_await!(
             async {
                 let mut btree_indexes = Vec::new();
                 for (name, field) in meta.btree_indexes.iter() {
@@ -389,7 +408,7 @@ impl Collection {
                     hnsw_indexes.push(index);
                 }
                 Ok::<Vec<Hnsw>, DBError>(hnsw_indexes)
-            }
+            },
         )?;
 
         self.btree_indexes = btree_indexes;
@@ -399,8 +418,93 @@ impl Collection {
 
     /// Automatically repairs indexes if needed.
     /// This is called during collection opening to ensure index integrity.
-    async fn auto_repair_indexes(&mut self) {
-        // TODO
+    async fn auto_repair_indexes(&self) -> Result<usize, DBError> {
+        let persisted_max_document_id = self.storage.stats().check_point;
+        let maybe_max_document_id = self.max_document_id.load(Ordering::Relaxed);
+        let now_ms = unix_ms();
+        let mut id = persisted_max_document_id;
+        let mut fixed = 0;
+
+        loop {
+            id += 1;
+            match self
+                .storage
+                .fetch::<DocumentOwned>(&Self::doc_path(id))
+                .await
+            {
+                Err(_) => {
+                    if id > maybe_max_document_id {
+                        return Ok(fixed);
+                    }
+                }
+                Ok((doc, _)) => {
+                    // dirty document exists
+                    fixed += 1;
+                    let doc = Document::try_from_doc(self.schema(), doc)?;
+                    let mut segment_ids = BTreeSet::new();
+                    // try to repair indexes
+                    for index in &self.btree_indexes {
+                        if let Some(fv) = doc.get_field(index.field_name()) {
+                            if fv == &FieldValue::Null {
+                                continue;
+                            }
+                            let _ = index.insert(id, fv, now_ms); // ignore errors
+                        }
+                    }
+
+                    for (bm25, hnsw) in &self.bm25_hnsw_indexes {
+                        if let Some(Fv::Array(segments)) = doc.get_field(bm25.field_name()) {
+                            for seg in segments {
+                                if let Some(sid) = Segment::id_from(seg) {
+                                    if let Some(text) = Segment::text_from(seg) {
+                                        // ignore errors
+                                        let _ = bm25.insert(*sid, text, now_ms);
+                                    }
+
+                                    if let Some(vector) = Segment::vec_from(seg) {
+                                        // ignore errors
+                                        let _ = hnsw.insert(*sid, vector.clone(), now_ms);
+                                    }
+                                    segment_ids.insert(*sid);
+                                }
+                            }
+                        }
+                    }
+
+                    let segment_ids: Vec<u64> = segment_ids.into_iter().collect();
+                    let max_bucket_id = {
+                        let mut current_bucket = self.current_bucket.write();
+                        let size_increase = CountingWriter::count_cbor(&(&id, &segment_ids)) + 2;
+                        if current_bucket.1 == 0
+                            || current_bucket.1 + size_increase < self.bucket_overload_size
+                        {
+                            current_bucket.1 += size_increase;
+                        } else {
+                            current_bucket.0 += 1;
+                            current_bucket.1 = size_increase;
+                        }
+                        current_bucket.0
+                    };
+
+                    for sid in &segment_ids {
+                        self.inverted_doc_segments.insert(*sid, id);
+                    }
+                    self.doc_ids.write().add(id);
+                    self.doc_segments.write().insert(id, segment_ids.clone());
+
+                    let mut dirty_buckets = self.dirty_buckets.write();
+                    dirty_buckets
+                        .entry(max_bucket_id)
+                        .or_default()
+                        .insert(id, segment_ids);
+                    self.max_document_id.fetch_max(id, Ordering::Release);
+
+                    self.update_metadata(|meta| {
+                        meta.stats.version += 1;
+                    });
+                }
+            }
+        }
     }
 
     /// Sets the collection to read-only mode.
@@ -421,29 +525,32 @@ impl Collection {
     /// # Returns
     /// Ok(()) if successful, or an error if closing fails
     pub async fn close(&self) -> Result<(), DBError> {
+        self.set_read_only(true);
+
         let start = Instant::now();
-        match self.flush(unix_ms()).await {
+        let now_ms = unix_ms();
+        let rt = self.flush(now_ms).await;
+        let elapsed = start.elapsed();
+        match rt {
             Ok(_) => {
-                let elapsed = start.elapsed();
                 log::info!(
                     action = "close",
                     collection = self.name,
                     elapsed = elapsed.as_millis();
                     "Collection closed successfully in {elapsed:?}",
                 );
+                Ok(())
             }
             Err(err) => {
-                let elapsed = start.elapsed();
                 log::error!(
                     action = "close",
                     collection = self.name,
                     elapsed = elapsed.as_millis();
                     "Failed to close collection: {err:?}",
                 );
-                return Err(err);
+                Err(err)
             }
         }
-        Ok(())
     }
 
     /// Flushes all pending changes to storage.
@@ -454,16 +561,16 @@ impl Collection {
     /// # Returns
     /// `true` if changes were flushed, `false` if no changes needed to be flushed
     pub async fn flush(&self, now_ms: u64) -> Result<bool, DBError> {
-        if !self.store_metadata(now_ms).await? {
-            return Ok(false);
-        }
+        let check_point = match self.store_metadata(now_ms).await? {
+            Some(id) => id,
+            None => return Ok(false),
+        };
 
-        try_join!(
-            self.store_ids(),
-            self.store_dirty_segments(),
-            self.store_indexes(now_ms),
-        )?;
+        try_join_await!(self.store_ids(), self.store_dirty_segments())?;
+        self.store_indexes(now_ms).await?;
 
+        // check_point is the last persisted document ID
+        self.storage.store_metadata(check_point, now_ms).await?;
         Ok(true)
     }
 
@@ -474,27 +581,23 @@ impl Collection {
     ///
     /// # Returns
     /// `true` if metadata was stored, `false` if no changes needed to be stored
-    async fn store_metadata(&self, now_ms: u64) -> Result<bool, DBError> {
+    async fn store_metadata(&self, now_ms: u64) -> Result<Option<DocumentId>, DBError> {
         let mut meta = self.metadata();
         let prev_saved_version = self
             .last_saved_version
             .fetch_max(meta.stats.version, Ordering::Release);
         if prev_saved_version >= meta.stats.version {
             // No need to save if the version is not updated
-            return Ok(false);
+            return Ok(None);
         }
 
         meta.stats.last_saved = now_ms.max(meta.stats.last_saved);
-        try_join!(
-            self.storage.put(Self::METADATA_PATH, &meta, None),
-            self.storage.store_metadata(now_ms),
-        )?;
-
+        self.storage.put(Self::METADATA_PATH, &meta, None).await?;
         self.update_metadata(|m| {
             m.stats.last_saved = meta.stats.last_saved.max(m.stats.last_saved);
         });
 
-        Ok(true)
+        Ok(Some(meta.stats.max_document_id))
     }
 
     /// Stores document IDs bitmap to storage.
@@ -547,15 +650,22 @@ impl Collection {
     /// # Returns
     /// Ok(()) if successful, or an error if storing fails
     async fn store_indexes(&self, now_ms: u64) -> Result<(), DBError> {
-        // TODO: concurrently store indexes
-        for index in &self.btree_indexes {
-            index.flush(now_ms).await?;
-        }
+        // for index in &self.btree_indexes {
+        //     index.flush(now_ms).await?;
+        // }
+        // for (bm25, hnsw) in &self.bm25_hnsw_indexes {
+        //     bm25.flush(now_ms).await?;
+        //     hnsw.flush(now_ms).await?;
+        // }
 
-        for (bm25, hnsw) in &self.bm25_hnsw_indexes {
-            bm25.flush(now_ms).await?;
-            hnsw.flush(now_ms).await?;
-        }
+        let _ = try_join_await!(
+            try_join_all(self.btree_indexes.iter().map(|index| index.flush(now_ms))),
+            try_join_all(
+                self.bm25_hnsw_indexes
+                    .iter()
+                    .map(|(bm25, hnsw)| try_join(bm25.flush(now_ms), hnsw.flush(now_ms))),
+            )
+        );
 
         Ok(())
     }
@@ -771,7 +881,7 @@ impl Collection {
                 });
         }
 
-        let (bm25, hnsw) = try_join!(
+        let (bm25, hnsw) = try_join_await!(
             BM25::new(
                 name.to_string(),
                 field.clone(),
