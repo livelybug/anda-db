@@ -138,6 +138,8 @@ impl Document {
                     "field {:?} is required",
                     field.name()
                 )));
+            } else {
+                doc.push((field.name().into(), Cbor::Null));
             }
         }
 
@@ -226,6 +228,20 @@ impl Document {
             "field {:?} not found in schema",
             name
         )))
+    }
+
+    /// Removes a field value by name.
+    ///
+    /// # Arguments
+    /// * `name` - The name of the field to remove
+    ///
+    /// # Returns
+    /// * `Option<Fv>` - The removed field value or None if not found
+    pub fn remove_field(&mut self, name: &str) -> Option<Fv> {
+        if let Some(field) = self.schema.get_field(name) {
+            return self.fields.remove(&field.idx());
+        }
+        None
     }
 
     /// Gets a field value by name and deserializes it to the specified type.

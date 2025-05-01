@@ -118,6 +118,9 @@ pub struct CollectionStats {
     /// Last insertion timestamp (unix ms).
     pub last_inserted: u64,
 
+    /// Last update timestamp (unix ms).
+    pub last_updated: u64,
+
     /// Last deletion timestamp (unix ms).
     pub last_deleted: u64,
 
@@ -138,6 +141,9 @@ pub struct CollectionStats {
 
     /// Number of insert operations performed.
     pub insert_count: u64,
+
+    /// Number of update operations performed.
+    pub update_count: u64,
 
     /// Number of delete operations performed.
     pub delete_count: u64,
@@ -913,7 +919,6 @@ impl Collection {
         let path = Self::doc_path(id);
         if let Err(err) = self.storage.create(&path, &doc).await {
             rollback_indexes();
-
             return Err(err);
         }
 
@@ -950,6 +955,232 @@ impl Collection {
         });
 
         Ok(id)
+    }
+
+    /// Updates an existing document with new field values.
+    ///
+    /// # Arguments
+    /// * `id` - The ID of the document to update
+    /// * `fields` - The new field values to apply
+    ///
+    /// # Returns
+    /// Ok(()) if successful, or an error if update fails
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - The collection is in read-only mode
+    /// - The document doesn't exist
+    /// - The updated document fails schema validation
+    /// - The updated document version not matching the stored version because of concurrent update
+    /// - Any index update fails
+    /// - Storage operations fail
+    pub async fn update(
+        &self,
+        id: DocumentId,
+        fields: BTreeMap<String, Fv>,
+    ) -> Result<(), DBError> {
+        if self.read_only.load(Ordering::Relaxed) {
+            return Err(DBError::Generic {
+                name: self.name.clone(),
+                source: "Collection is read-only".into(),
+            });
+        }
+
+        if !self.doc_ids.read().contains(id) {
+            return Err(DBError::NotFound {
+                name: id.to_string(),
+                path: self.name.clone(),
+                source: format!("Document with ID {id} not found").into(),
+            });
+        }
+
+        if fields.is_empty() {
+            return Ok(());
+        }
+
+        let (doc, ver) = self
+            .storage
+            .get::<DocumentOwned>(&Self::doc_path(id))
+            .await?;
+        let mut doc = Document::try_from_doc(self.schema(), doc)?;
+
+        // keep the old value for rollback
+        let mut old_values = BTreeMap::new();
+        for field_name in fields.keys() {
+            if let Some(old_value) = doc.remove_field(field_name) {
+                old_values.insert(field_name.clone(), old_value);
+            }
+        }
+
+        // apply the new values
+        let mut fields_keys = HashSet::new();
+        for (field_name, fv) in fields {
+            doc.set_field(&field_name, fv)?;
+            fields_keys.insert(field_name);
+        }
+
+        // validate the updated document
+        self.schema.validate(doc.fields())?;
+
+        let now_ms = unix_ms();
+        let mut updated_segment_ids = BTreeSet::new();
+        let mut removed_segment_ids = BTreeSet::new();
+
+        // record the updated and removed indexes for rollback
+        #[allow(clippy::mutable_key_type)]
+        let mut btree_inserted: HashMap<&BTree, &FieldValue> = HashMap::new();
+        #[allow(clippy::mutable_key_type)]
+        let mut bm25_inserted: HashMap<&BM25, (&u64, &str)> = HashMap::new();
+        #[allow(clippy::mutable_key_type)]
+        let mut hnsw_inserted: HashMap<&Hnsw, &u64> = HashMap::new();
+        #[allow(clippy::mutable_key_type)]
+        let mut btree_removed: HashMap<&BTree, &FieldValue> = HashMap::new();
+        #[allow(clippy::mutable_key_type)]
+        let mut bm25_removed: HashMap<&BM25, (&u64, &str)> = HashMap::new();
+        #[allow(clippy::mutable_key_type)]
+        let mut hnsw_removed: HashMap<&Hnsw, (&u64, &Vector)> = HashMap::new();
+
+        // update the indexes
+        let rt: Result<(), DBError> = (|| {
+            for index in &self.btree_indexes {
+                let field_name = index.field_name();
+                if fields_keys.contains(field_name) {
+                    if let Some(old_value) = old_values.get(field_name) {
+                        if old_value != &FieldValue::Null {
+                            index.remove(id, old_value, now_ms);
+                            btree_removed.insert(index, old_value);
+                        }
+                    }
+
+                    if let Some(new_value) = doc.get_field(field_name) {
+                        if new_value != &FieldValue::Null {
+                            index.insert(id, new_value, now_ms)?;
+                            btree_inserted.insert(index, new_value);
+                        }
+                    }
+                }
+            }
+
+            for (bm25, hnsw) in &self.bm25_hnsw_indexes {
+                let field_name = bm25.field_name();
+
+                if fields_keys.contains(field_name) {
+                    if let Some(Fv::Array(old_segments)) = old_values.get(field_name) {
+                        for seg in old_segments {
+                            if let Some(sid) = Segment::id_from(seg) {
+                                removed_segment_ids.insert(*sid);
+
+                                if let Some(text) = Segment::text_from(seg) {
+                                    bm25.remove(*sid, text, now_ms);
+                                    bm25_removed.insert(bm25, (sid, text));
+                                }
+
+                                if let Some(vector) = Segment::vec_from(seg) {
+                                    hnsw.remove(*sid, now_ms);
+                                    hnsw_removed.insert(hnsw, (sid, vector));
+                                }
+                            }
+                        }
+                    }
+
+                    if let Some(Fv::Array(new_segments)) = doc.get_field(field_name) {
+                        for seg in new_segments {
+                            if let Some(sid) = Segment::id_from(seg) {
+                                updated_segment_ids.insert(*sid);
+
+                                if let Some(text) = Segment::text_from(seg) {
+                                    bm25.insert(*sid, text, now_ms)?;
+                                    bm25_inserted.insert(bm25, (sid, text));
+                                }
+
+                                if let Some(vector) = Segment::vec_from(seg) {
+                                    hnsw.insert(*sid, vector.clone(), now_ms)?;
+                                    hnsw_inserted.insert(hnsw, sid);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(())
+        })();
+
+        let rollback_indexes = || {
+            for (k, v) in btree_inserted {
+                k.remove(id, v, now_ms);
+            }
+            for (k, v) in bm25_inserted {
+                k.remove(*v.0, v.1, now_ms);
+            }
+            for (k, v) in hnsw_inserted {
+                k.remove(*v, now_ms);
+            }
+            for (k, v) in btree_removed {
+                let _ = k.insert(id, v, now_ms);
+            }
+            for (k, v) in bm25_removed {
+                let _ = k.insert(*v.0, v.1, now_ms);
+            }
+            for (k, v) in hnsw_removed {
+                let _ = k.insert(*v.0, v.1.to_vec(), now_ms);
+            }
+        };
+
+        if let Err(err) = rt {
+            rollback_indexes();
+            return Err(err);
+        }
+
+        // persist the updated document with update version
+        let path = Self::doc_path(id);
+        if let Err(err) = self.storage.put(&path, &doc, Some(ver)).await {
+            rollback_indexes();
+            return Err(err);
+        }
+
+        if !removed_segment_ids.is_empty() || !updated_segment_ids.is_empty() {
+            let mut doc_segments_write = self.doc_segments.write();
+            if let Some(segments) = doc_segments_write.get_mut(&id) {
+                segments.retain(|sid| !removed_segment_ids.contains(sid));
+
+                let mut seen: HashSet<u64> = HashSet::from_iter(segments.iter().cloned());
+                for sid in &updated_segment_ids {
+                    if seen.insert(*sid) {
+                        segments.push(*sid);
+                    }
+                    self.inverted_doc_segments.insert(*sid, id);
+                }
+
+                let max_bucket_id = {
+                    let mut current_bucket = self.current_bucket.write();
+                    let size_increase = CountingWriter::count_cbor(&(&id, &segments)) + 2;
+
+                    if current_bucket.1 == 0
+                        || current_bucket.1 + size_increase < self.bucket_overload_size
+                    {
+                        current_bucket.1 += size_increase;
+                    } else {
+                        current_bucket.0 += 1;
+                        current_bucket.1 = size_increase;
+                    }
+                    current_bucket.0
+                };
+
+                let mut dirty_buckets = self.dirty_buckets.write();
+                dirty_buckets
+                    .entry(max_bucket_id)
+                    .or_default()
+                    .insert(id, segments.clone());
+            }
+        }
+
+        self.update_metadata(|meta| {
+            meta.stats.last_updated = now_ms;
+            meta.stats.version += 1;
+            meta.stats.update_count += 1;
+        });
+
+        Ok(())
     }
 
     /// Removes a document from the collection by its ID.
@@ -1181,26 +1412,6 @@ impl Collection {
         let obj = doc.try_into()?;
         Ok(obj)
     }
-
-    // Updates an existing document with new field values.
-    //
-    // # Arguments
-    // * `id` - The ID of the document to update
-    // * `fields` - The new field values to apply
-    //
-    // # Returns
-    // Ok(()) if successful, or an error if update fails
-    //
-    // # Errors
-    // Returns an error if:
-    // - The collection is in read-only mode
-    // - The document doesn't exist
-    // - The updated document fails schema validation
-    // - Any index update fails
-    // - Storage operations fail
-    // pub async fn update(&self, filter: Filter, fields: &Fields) -> Result<(), DBError> {
-    //     unimplemented!()
-    // }
 
     /// Filters documents by a field condition.
     ///
@@ -2020,7 +2231,6 @@ mod tests {
 
         // 验证所有文档都被添加
         assert_eq!(ids.len(), 10);
-
         // 验证文档数量
         let stats = collection.stats();
         assert_eq!(stats.num_documents, 10);
@@ -2073,6 +2283,125 @@ mod tests {
         let stats = collection.stats();
         assert_eq!(stats.num_documents, 0);
         assert_eq!(stats.delete_count, 1);
+
+        db.close().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_document_updates() -> Result<(), DBError> {
+        let db = setup_test_db().await?;
+        let collection = create_test_collection(&db, async |collection| {
+            // 创建索引以测试更新对索引的影响
+            collection
+                .create_btree_index_nx("btree_name", "name")
+                .await?;
+            collection.create_btree_index_nx("btree_age", "age").await?;
+            collection
+                .create_btree_index_nx("btree_tags", "tags")
+                .await?;
+            Ok(())
+        })
+        .await?;
+
+        // 添加文档
+        let mut doc = create_test_doc(0, "Alice", 30, vec!["smart", "friendly"]);
+        collection.obtain_segment_ids(&mut doc.segments);
+        let doc_obj = Document::try_from(collection.schema(), &doc)?;
+        let id = collection.add(doc_obj).await?;
+
+        // 更新文档
+        let mut update_fields = BTreeMap::new();
+        update_fields.insert("name".to_string(), Fv::Text("Alice Updated".to_string()));
+        update_fields.insert("age".to_string(), Fv::U64(31));
+        update_fields.insert(
+            "tags".to_string(),
+            Fv::Array(vec![
+                Fv::Text("smart".to_string()),
+                Fv::Text("friendly".to_string()),
+                Fv::Text("updated".to_string()),
+            ]),
+        );
+
+        collection.update(id, update_fields.clone()).await?;
+
+        // 获取并验证更新后的文档
+        let updated_doc: TestDoc = collection.get_as(id).await?;
+        assert_eq!(updated_doc.name, "Alice Updated");
+        assert_eq!(updated_doc.age, 31);
+        assert_eq!(updated_doc.tags.len(), 3);
+        assert!(updated_doc.tags.contains(&"updated".to_string()));
+
+        // 通过索引验证更新是否生效
+        let result: Vec<TestDoc> = collection
+            .search_as(Query {
+                filter: Some(Filter::Field((
+                    "name".to_string(),
+                    RangeQuery::Eq(Fv::Text("Alice Updated".to_string())),
+                ))),
+                ..Default::default()
+            })
+            .await?;
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].age, 31);
+
+        // 验证原来的值不再能被索引查询到
+        let result: Vec<TestDoc> = collection
+            .search_as(Query {
+                filter: Some(Filter::Field((
+                    "name".to_string(),
+                    RangeQuery::Eq(Fv::Text("Alice".to_string())),
+                ))),
+                ..Default::default()
+            })
+            .await?;
+
+        assert_eq!(result.len(), 0);
+
+        // 测试部分更新
+        let mut partial_update = BTreeMap::new();
+        partial_update.insert("age".to_string(), Fv::U64(32));
+
+        collection.update(id, partial_update).await?;
+
+        let partially_updated: TestDoc = collection.get_as(id).await?;
+        assert_eq!(partially_updated.name, "Alice Updated"); // 未更改
+        assert_eq!(partially_updated.age, 32); // 已更改
+
+        // 测试更新不存在的文档
+        let result = collection.update(999, update_fields.clone()).await;
+        assert!(result.is_err());
+
+        // 测试只读模式下的更新失败
+        collection.set_read_only(true);
+        let result = collection.update(id, update_fields.clone()).await;
+        assert!(result.is_err());
+
+        // 恢复读写模式
+        collection.set_read_only(false);
+
+        // 测试更新元数据字段
+        let mut metadata_update = BTreeMap::new();
+        let mut metadata_map = BTreeMap::new();
+        metadata_map.insert("key1".to_string(), Fv::Text("value1".to_string()));
+        metadata_map.insert("key2".to_string(), Fv::U64(42));
+        metadata_update.insert("metadata".to_string(), Fv::Map(metadata_map));
+
+        collection.update(id, metadata_update).await?;
+
+        let doc_with_metadata: TestDoc = collection.get_as(id).await?;
+        assert_eq!(doc_with_metadata.metadata.len(), 2);
+        assert!(
+            matches!(doc_with_metadata.metadata.get("key1"), Some(Json::String(s)) if s == "value1")
+        );
+        assert!(
+            matches!(doc_with_metadata.metadata.get("key2"), Some(Json::Number(n)) if n.as_i64() == Some(42))
+        );
+
+        // 验证统计信息已更新
+        let stats = collection.stats();
+        assert_eq!(stats.update_count, 3); // 初始更新 + 部分更新 + 元数据更新，只读失败不计数
 
         db.close().await?;
         Ok(())
