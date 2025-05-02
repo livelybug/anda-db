@@ -1,0 +1,30 @@
+[package]
+name = "anda_object_store"
+version = "0.1.0"
+description = "A Rust library that extends the functionality of the object_store crate with metadata management and encryption."
+keywords = ["database", "object_store", "encryption", "anda", "Anda DB"]
+categories = ["database", "data-structures", "text-processing"]
+repository = "https://github.com/ldclabs/anda_db/tree/main/rs/anda_object_store"
+publish = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+base64 = { workspace = true }
+bytes = { workspace = true }
+ciborium = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_bytes = { workspace = true }
+sha3 = { workspace = true }
+tokio = { workspace = true, features = ["sync", "parking_lot", "io-util"] }
+object_store = { workspace = true }
+moka = { workspace = true }
+rand = { workspace = true }
+aes-gcm = "0.10"
+
+[dev-dependencies]
+tempfile = "3.1.0"
+tokio = { workspace = true, features = ["full"] }
+object_store = { workspace = true, features = ["integration", "rand"] }

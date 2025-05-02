@@ -24,7 +24,7 @@ Add Anda DB to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-anda_db = { version = "0.2" } # Replace with the desired version
+anda_db = { version = "0.3" } # Replace with the desired version
 # Add other necessary dependencies like tokio, object_store implementation, etc.
 ```
 
@@ -46,7 +46,7 @@ use anda_db::{
 };
 use anda_db_tfs::jieba_tokenizer;
 use ic_auth_types::Xid;
-use object_store::local::LocalFileSystem;
+use object_store::memory::InMemory;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, sync::Arc};
 use structured_logger::unix_ms;
@@ -81,7 +81,7 @@ async fn main() -> Result<(), DBError> {
     // create an in-memory object store
     // It's a simple in-memory storage for testing purposes.
     // In a real application, you would use a persistent storage backend.
-    let object_store = LocalFileSystem::new_with_prefix("./debug")?;
+    let object_store = InMemory::new();
 
     let db_config = DBConfig {
         name: "anda_db_demo".to_string(),

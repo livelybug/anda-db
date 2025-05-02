@@ -8,6 +8,7 @@ use anda_db::{
     storage::StorageConfig,
 };
 use anda_db_tfs::jieba_tokenizer;
+use anda_object_store::MetaStoreBuilder;
 use ic_auth_types::Xid;
 use object_store::local::LocalFileSystem;
 use serde::{Deserialize, Serialize};
@@ -44,7 +45,12 @@ async fn main() -> Result<(), DBError> {
     // create an in-memory object store
     // It's a simple in-memory storage for testing purposes.
     // In a real application, you would use a persistent storage backend.
-    let object_store = LocalFileSystem::new_with_prefix("./debug")?;
+    // let object_store = InMemory::new();
+    let object_store = MetaStoreBuilder::new(
+        LocalFileSystem::new_with_prefix("./debug/metastore")?,
+        10000,
+    )
+    .build();
 
     let db_config = DBConfig {
         name: "anda_db_demo".to_string(),

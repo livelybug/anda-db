@@ -24,7 +24,6 @@ const-hex = "1.14"
 croaring = "2.3"
 futures = { version = "0.3" }
 tokio = { version = "1.44" }
-tokio-util = { version = "0.7" }
 ciborium = "0.2"
 dashmap = "6.1"
 rand = "0.9"
@@ -36,6 +35,7 @@ half = { version = "2.5", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_bytes = "0.11"
 serde_json = "1.0"
+sha3 = "0.10"
 thiserror = "1.0"
 parking_lot = "0.12"
 log = { version = "0.4", features = ["kv_serde"] }
@@ -50,7 +50,6 @@ object_store = { version = "0.12" }
 moka = { version = "0.12", features = ["future"] }
 zstd-safe = "7"
 async-compression = { version = "0.4", features = ["tokio", "zstd"] }
-unicode-segmentation = "1"
 
 [workspace.metadata.cargo-shear]
 ignored = ["blas-src"]

@@ -1,6 +1,6 @@
 [package]
 name = "anda_db"
-version = "0.2.3"
+version = "0.3.0"
 description = "Anda DB is a Rust library designed as a specialized database for AI Agents, focusing on knowledge memory."
 keywords = ["database", "vector", "search", "embedding", "ai"]
 categories = ["database", "data-structures", "text-processing"]
@@ -14,39 +14,28 @@ anda_db_schema = { path = "../anda_db_schema", version = "0.2" }
 anda_db_btree = { path = "../anda_db_btree", version = "0.3" }
 anda_db_hnsw = { path = "../anda_db_hnsw", version = "0.4" }
 anda_db_tfs = { path = "../anda_db_tfs", version = "0.4", features = ["full"] }
-async-trait = { workspace = true }
 bytes = { workspace = true }
 ciborium = { workspace = true }
 croaring = { workspace = true }
 dashmap = { workspace = true, features = ["serde"] }
 futures = { workspace = true }
-half = { workspace = true }
 log = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
-serde_bytes = { workspace = true }
-rayon = { workspace = true }
-tantivy-tokenizer-api = { workspace = true }
-tantivy = { workspace = true, optional = true }
-tantivy-jieba = { workspace = true, optional = true }
 thiserror = { workspace = true }
 parking_lot = { workspace = true }
 tokio = { workspace = true, features = ["sync", "parking_lot", "io-util"] }
-tokio-util = { workspace = true, features = ["compat"] }
 ic_auth_types = { workspace = true, features = ["xid"] }
 object_store = { workspace = true }
 moka = { workspace = true }
-unicode-segmentation = { workspace = true }
 zstd-safe = { workspace = true }
 async-compression = { workspace = true }
-const-hex = { workspace = true }
+tantivy = { workspace = true, optional = true }
+tantivy-jieba = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
 structured-logger = { workspace = true }
-tantivy = { workspace = true }
-tantivy-jieba = { workspace = true }
-criterion = { workspace = true }
+anda_object_store = { path = "../anda_object_store", version = "0.1" }
 
 [features]
 default = []
@@ -57,3 +46,6 @@ tantivy-jieba = ["dep:tantivy-jieba", "dep:tantivy"]
 [[example]]
 name = "db_demo"
 required-features = ["full"]
+
+[package.metadata.cargo-shear]
+ignored = ["tantivy", "tantivy-jieba"]

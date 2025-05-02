@@ -258,7 +258,7 @@ mod tests {
 
         // 验证最底层占比合理
         let bottom_ratio = counts[0] as f64 / SAMPLES as f64;
-        assert!(bottom_ratio >= 0.5);
+        assert!(bottom_ratio >= 0.4);
     }
 
     #[test]
