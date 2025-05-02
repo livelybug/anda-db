@@ -6,7 +6,7 @@ Anda DB is a Rust library designed as a specialized database for AI Agents, focu
 
 -   **Embedded Library:** Functions as a Rust library, not a standalone remote database service, enabling direct integration into AI Agent builds.
 -   **Object Store Backend:** Leverages an [Object Store](https://docs.rs/object_store) interface, supporting various backends like AWS S3, Google Cloud Storage, Azure Blob Storage, local filesystem, and even the [ICP blockchain](https://internetcomputer.org/).
--   **Encrypted Storage:** Offers optional encrypted storage, writing all data as ciphertext to the Object Store (currently supported for the ICP backend) to ensure data privacy.
+-   **Encrypted Storage:** Offers optional encrypted storage, writing all data encrypted with AES-256-GCM to the Object Store to ensure data privacy, powered by [`anda_object_store`](https://docs.rs/anda_object_store).
 -   **Multimodal Data:** Natively handles storage and retrieval of diverse data types including text, images, audio, video, and arbitrary binary data within a flexible document structure.
 -   **Flexible Schema & ORM:** Document-oriented design with a flexible schema supporting various field types like `bfloat16` vectors, binary data, JSON, etc. Includes built-in ORM support via procedural macros.
 -   **Advanced Indexing:**
