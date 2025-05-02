@@ -1,4 +1,5 @@
 use aes_gcm::{AeadInPlace, Aes256Gcm, Key, Nonce, Tag};
+use async_stream::try_stream;
 use async_trait::async_trait;
 use base64::{Engine, prelude::BASE64_URL_SAFE};
 use bytes::Bytes;
@@ -26,6 +27,19 @@ use crate::{map_arc_error, sha3_256};
 /// - Chunked encryption for large objects
 /// - Metadata caching for improved performance
 /// - Optional conditional put operations
+///
+/// # Security considerations
+///
+/// This implementation uses AES-256-GCM for encryption which provides:
+/// - Confidentiality: Data is encrypted and cannot be read without the key
+/// - Integrity: Tampering with encrypted data will be detected
+/// - Authentication: Only possessors of the key can modify data
+///
+/// # Performance considerations
+///
+/// - Chunk size affects both storage efficiency and random access performance
+/// - Increasing chunk size improves throughput but reduces random access efficiency
+/// - For large objects with frequent random access, consider using smaller chunks
 ///
 /// # Example
 /// ```rust,no_run
@@ -75,8 +89,9 @@ pub struct EncryptedStoreBuilder<T: ObjectStore> {
     meta_cache: Cache<Path, Arc<Metadata>>,
 }
 
+/// Metadata structure for storing encryption details.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-struct Metadata {
+pub struct Metadata {
     #[serde(rename = "s")]
     size: u64,
 
@@ -149,7 +164,24 @@ impl<T: ObjectStore> EncryptedStoreBuilder<T> {
             meta_cache: Cache::builder()
                 .max_capacity(meta_cache_capacity)
                 .time_to_live(Duration::from_secs(60 * 60))
+                .time_to_idle(Duration::from_secs(20 * 60))
                 .build(),
+        }
+    }
+
+    /// Sets the cache for metadata.
+    ///
+    /// This cache is used to store metadata for objects, improving performance.
+    ///
+    /// # Parameters
+    /// - `cache`: The cache to use for metadata
+    ///
+    /// # Returns
+    /// The builder with the updated metadata cache
+    pub fn with_meta_cache(self, cache: Cache<Path, Arc<Metadata>>) -> Self {
+        Self {
+            meta_cache: cache,
+            ..self
         }
     }
 
@@ -434,46 +466,34 @@ impl<T: ObjectStore> ObjectStore for EncryptedStore<T> {
             options.range = Some(GetRange::Bounded(rr.clone()));
         }
 
-        let mut res = self.inner.store.get_opts(&full_path, options).await?;
-        // assert_eq!(rr, res.range);
-
-        res.meta.location = self.inner.strip_prefix(res.meta.location);
+        let res = self.inner.store.get_opts(&full_path, options).await?;
+        let mut obj = res.meta.clone();
+        obj.location = self.inner.strip_prefix(obj.location);
         if self.inner.conditional_put {
-            res.meta.e_tag = meta.e_tag;
+            obj.e_tag = meta.e_tag;
         }
 
-        let obj = res.meta.clone();
         let attributes = res.attributes.clone();
-        let payload = res.bytes().await?;
-        let mut payload: Vec<u8> = payload.into();
-        let mut idx = (rr.start / self.inner.chunk_size) as usize;
-        let nonce = Nonce::from_slice(meta.aes_nonce.as_slice());
-        for chunk in payload.chunks_mut(self.inner.chunk_size as usize) {
-            let tag = meta
-                .aes_tags
-                .get(idx as usize)
-                .ok_or_else(|| Error::Generic {
-                    store: "EncryptedStore",
-                    source: format!("missing AES256 tag for chunk {idx} for path {location}")
-                        .into(),
-                })?;
-            self.inner
-                .cipher
-                .decrypt_in_place_detached(nonce, &[], chunk, Tag::from_slice(tag.as_slice()))
-                .map_err(|err| Error::Generic {
-                    store: "EncryptedStore",
-                    source: format!("AES256 decrypt failed for path {location}: {err:?}").into(),
-                })?;
-            idx += 1;
-        }
 
-        let start = (range.start - rr.start) as usize;
-        let end = start + (range.end - range.start) as usize;
-        let payload: Bytes = payload.into();
+        let chunk_size = self.inner.chunk_size as usize;
+        let start_idx = rr.start as usize / chunk_size;
+        let start_offset = (range.start - rr.start) as usize;
+        let size = (range.end - range.start) as usize;
 
-        let stream = futures::stream::once(futures::future::ready(Ok(payload.slice(start..end))));
+        let stream = create_decryption_stream(
+            res,
+            self.inner.cipher.clone(),
+            meta.aes_tags.clone(),
+            meta.aes_nonce.as_slice().to_vec(),
+            location.clone(),
+            chunk_size,
+            start_idx,
+            start_offset,
+            size,
+        );
+
         Ok(GetResult {
-            payload: GetResultPayload::Stream(stream.boxed()),
+            payload: GetResultPayload::Stream(stream),
             meta: obj,
             range,
             attributes,
@@ -794,7 +814,10 @@ impl<T: ObjectStore> MultipartUpload for EncryptedStoreUploader<T> {
         }
 
         Box::pin(async move {
-            let _ = futures::future::try_join_all(parts).await?;
+            for part in parts {
+                part.await?;
+            }
+
             Ok(())
         })
     }
@@ -843,6 +866,85 @@ impl<T: ObjectStore> MultipartUpload for EncryptedStoreUploader<T> {
     async fn abort(&mut self) -> Result<()> {
         self.inner.abort().await
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn create_decryption_stream(
+    res: GetResult,
+    cipher: Arc<Aes256Gcm>,
+    aes_tags: Vec<ByteArray<16>>,
+    nonce: Vec<u8>,
+    location: Path,
+    chunk_size: usize,
+    start_idx: usize,
+    start_offset: usize,
+    size: usize,
+) -> BoxStream<'static, Result<Bytes>> {
+    try_stream! {
+        let mut stream = res.into_stream();
+        // 预分配足够大的缓冲区以减少重新分配次数
+        let mut buf = Vec::with_capacity(chunk_size * 2);
+        let mut idx = start_idx;
+        let mut remaining = size;
+        let nonce_ref = Nonce::from_slice(&nonce);
+
+        while let Some(data) = stream.next().await {
+            let data = data?;
+            buf.extend_from_slice(&data);
+
+            while buf.len() >= chunk_size {
+                let mut chunk = buf.drain(..chunk_size).collect::<Vec<u8>>();
+
+                let tag = aes_tags.get(idx).ok_or_else(|| Error::Generic {
+                    store: "EncryptedStore",
+                    source: format!("missing AES256 tag for chunk {idx} for path {location}").into(),
+                })?;
+
+                cipher.decrypt_in_place_detached(
+                    nonce_ref,
+                    &[],
+                    &mut chunk,
+                    Tag::from_slice(tag.as_slice())
+                )
+                .map_err(|err| Error::Generic {
+                    store: "EncryptedStore",
+                    source: format!("AES256 decrypt failed for path {location}: {err:?}").into(),
+                })?;
+
+                if idx == start_idx {
+                    chunk = chunk[start_offset..].to_vec();
+                }
+
+                remaining = remaining.saturating_sub(chunk.len());
+                yield Bytes::from(chunk);
+
+                idx += 1;
+            }
+        }
+
+        if !buf.is_empty() {
+            let tag = aes_tags.get(idx).ok_or_else(|| Error::Generic {
+                store: "EncryptedStore",
+                source: format!("missing AES256 tag for chunk {idx} for path {location}").into(),
+            })?;
+            cipher.decrypt_in_place_detached(
+                nonce_ref,
+                &[],
+                &mut buf,
+                Tag::from_slice(tag.as_slice())
+            )
+            .map_err(|err| Error::Generic {
+                store: "EncryptedStore",
+                source: format!("AES256 decrypt failed for path {location}: {err:?}").into(),
+            })?;
+
+            if idx == start_idx {
+                buf = buf[start_offset..].to_vec();
+            }
+            buf.truncate(remaining);
+            yield Bytes::from(buf);
+        }
+    }.boxed()
 }
 
 fn ranges_is_valid(ranges: &[Range<u64>], len: u64) -> Result<()> {
