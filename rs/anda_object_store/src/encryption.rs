@@ -518,6 +518,7 @@ impl<T: ObjectStore> ObjectStore for EncryptedStore<T> {
 
         let mut result: Vec<Bytes> = Vec::with_capacity(ranges.len());
         let mut chunk_cache: Option<(usize, Vec<u8>)> = None; // cache the last chunk read
+        let nonce_ref = Nonce::from_slice(meta.aes_nonce.as_slice());
         for &Range { start, end } in ranges {
             let mut buf = Vec::with_capacity((end - start) as usize);
             // Calculate the chunk indices we need to read
@@ -556,7 +557,7 @@ impl<T: ObjectStore> ObjectStore for EncryptedStore<T> {
                         self.inner
                             .cipher
                             .decrypt_in_place_detached(
-                                Nonce::from_slice(meta.aes_nonce.as_slice()),
+                                nonce_ref,
                                 &[],
                                 &mut chunk,
                                 Tag::from_slice(tag.as_slice()),
@@ -786,8 +787,10 @@ impl<T: ObjectStore> MultipartUpload for EncryptedStoreUploader<T> {
         let mut parts: Vec<UploadPart> = Vec::new();
         let nonce = Nonce::from_slice(&self.aes_nonce);
         while self.buf.len() >= self.store.chunk_size as usize {
-            let mut chunk = Vec::with_capacity(self.store.chunk_size as usize);
-            chunk.extend_from_slice(self.buf.drain(..self.store.chunk_size as usize).as_slice());
+            let mut chunk = self
+                .buf
+                .drain(..self.store.chunk_size as usize)
+                .collect::<Vec<u8>>();
 
             match self
                 .store
@@ -840,6 +843,7 @@ impl<T: ObjectStore> MultipartUpload for EncryptedStoreUploader<T> {
             self.inner.put_part(chunk.to_vec().into()).await?;
         }
 
+        self.buf.clear();
         let hash: [u8; 32] = self.hasher.clone().finalize().into();
         let mut rt = self.inner.complete().await?;
         let obj = self
@@ -892,7 +896,7 @@ fn create_decryption_stream(
             let data = data?;
             buf.extend_from_slice(&data);
 
-            while buf.len() >= chunk_size {
+            while buf.len() > chunk_size {
                 let mut chunk = buf.drain(..chunk_size).collect::<Vec<u8>>();
 
                 let tag = aes_tags.get(idx).ok_or_else(|| Error::Generic {
@@ -911,8 +915,8 @@ fn create_decryption_stream(
                     source: format!("AES256 decrypt failed for path {location}: {err:?}").into(),
                 })?;
 
-                if idx == start_idx {
-                    chunk = chunk[start_offset..].to_vec();
+                if idx == start_idx && start_offset > 0 {
+                    chunk.drain(..start_offset);
                 }
 
                 remaining = remaining.saturating_sub(chunk.len());
@@ -938,9 +942,10 @@ fn create_decryption_stream(
                 source: format!("AES256 decrypt failed for path {location}: {err:?}").into(),
             })?;
 
-            if idx == start_idx {
-                buf = buf[start_offset..].to_vec();
+            if idx == start_idx && start_offset > 0 {
+                buf.drain(..start_offset);
             }
+
             buf.truncate(remaining);
             yield Bytes::from(buf);
         }

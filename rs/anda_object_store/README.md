@@ -91,7 +91,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-anda_object_store = "0.1.0"
+anda_object_store = "0.1"
 ```
 
 ## License
