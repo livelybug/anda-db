@@ -246,10 +246,13 @@ mod tests {
 
         // 生成大量样本以验证分布
         const SAMPLES: usize = 100_000;
+        let mut current_max_layer = 0;
         for _ in 0..SAMPLES {
-            let level = lg.generate(15) as usize;
-            counts[level] += 1;
+            let level = lg.generate(current_max_layer);
+            current_max_layer = level.max(current_max_layer);
+            counts[level as usize] += 1;
         }
+        println!("Max layer: {}", current_max_layer);
 
         // 验证层级分布是递减的
         for i in 1..16 {
@@ -258,7 +261,8 @@ mod tests {
 
         // 验证最底层占比合理
         let bottom_ratio = counts[0] as f64 / SAMPLES as f64;
-        assert!(bottom_ratio >= 0.4);
+        println!("Bottom layer ratio: {}", bottom_ratio);
+        assert!(bottom_ratio >= 0.5);
     }
 
     #[test]

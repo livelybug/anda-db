@@ -7,7 +7,8 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
-use std::time::Instant;
+use std::time::{Duration, Instant};
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     collection::{Collection, CollectionConfig},
@@ -259,6 +260,57 @@ impl AndaDB {
         Ok(())
     }
 
+    /// Automatically flushes the database at regular intervals.
+    ///
+    /// This method runs in a loop, waiting for the specified interval
+    /// before flushing the database. When the cancellation token is triggered,
+    /// the loop will exit and the database will be closed.
+    ///
+    /// # Arguments
+    /// * `cancel_token` - A cancellation token to stop the loop
+    /// * `interval` - The time interval between flushes
+    ///
+    pub async fn auto_flush(&self, cancel_token: CancellationToken, interval: Duration) {
+        loop {
+            tokio::select! {
+                _ = cancel_token.cancelled() => {
+                    let _ = self.close().await;
+                    return;
+                }
+                _ = tokio::time::sleep(interval) => {}
+            };
+
+            let collections = self
+                .collections
+                .read()
+                .values()
+                .cloned()
+                .collect::<Vec<_>>();
+            let _rt = join_all(collections.iter().map(|collection| collection.close())).await;
+            let start = Instant::now();
+            match self.flush(unix_ms()).await {
+                Ok(_) => {
+                    let elapsed = start.elapsed();
+                    log::info!(
+                        action = "auto_flush",
+                        database = self.name,
+                        elapsed = elapsed.as_millis();
+                        "Database auto-flushed successfully in {elapsed:?}",
+                    );
+                }
+                Err(err) => {
+                    let elapsed = start.elapsed();
+                    log::error!(
+                        action = "auto_flush",
+                        database = self.name,
+                        elapsed = elapsed.as_millis();
+                        "Failed to auto-flush database: {err:?}",
+                    );
+                }
+            }
+        }
+    }
+
     /// Creates a new collection in the database.
     ///
     /// This method creates a new collection with the given schema and configuration.
@@ -493,7 +545,7 @@ mod tests {
         };
 
         let collection = db
-            .create_collection(schema, collection_config, async |_| Ok(()))
+            .create_collection(schema.clone(), collection_config.clone(), async |_| Ok(()))
             .await
             .unwrap();
 
@@ -519,7 +571,7 @@ mod tests {
         };
 
         // Create collection first
-        db.create_collection(schema, collection_config.clone(), async |_| Ok(()))
+        db.create_collection(schema.clone(), collection_config.clone(), async |_| Ok(()))
             .await
             .unwrap();
 
@@ -559,7 +611,7 @@ mod tests {
 
         // Second call should open the existing collection
         let collection2 = db
-            .open_or_create_collection(schema, collection_config, async |_| Ok(()))
+            .open_or_create_collection(schema.clone(), collection_config.clone(), async |_| Ok(()))
             .await
             .unwrap();
 
