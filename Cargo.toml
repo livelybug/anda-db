@@ -17,7 +17,9 @@ edition = "2024"
 license = "MIT"
 
 [workspace.dependencies]
+aes-gcm = "0.10"
 async-trait = "0.1"
+async-stream = "0.3"
 bytes = "1"
 base64 = "0.22"
 const-hex = "1.14"
@@ -28,25 +30,24 @@ tokio-util = { version = "0.7" }
 ciborium = "0.2"
 dashmap = "6.1"
 rand = "0.9"
-rayon = "1.10"
-ordered-float = "5.0"
+ordered-float = "5"
 ndarray = { version = "0.16" }
-blas-src = { version = "0.10" }
-half = { version = "2.5", features = ["serde"] }
-serde = { version = "1.0", features = ["derive"] }
+blas-src = { version = "0.11" }
+half = { version = "2.6", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
 serde_bytes = "0.11"
-serde_json = "1.0"
+serde_json = "1"
 sha3 = "0.10"
-thiserror = "1.0"
+thiserror = "2"
 parking_lot = "0.12"
-log = { version = "0.4", features = ["kv_serde"] }
-tantivy-tokenizer-api = "0.3"
-tantivy = "0.22"
-tantivy-jieba = "0.11"
+log = { version = "0.4", features = ["kv", "kv_serde"] }
+tantivy-tokenizer-api = "0.5"
+tantivy = "0.24"
+tantivy-jieba = "0.13"
 structured-logger = "1"
-smallvec = "1.14"
-criterion = "0.5"
-ic_auth_types = { version = "0.2" }
+smallvec = "1.15"
+criterion = "0.6"
+ic_auth_types = { version = "0.4" }
 object_store = { version = "0.12" }
 moka = { version = "0.12", features = ["future"] }
 zstd-safe = "7"

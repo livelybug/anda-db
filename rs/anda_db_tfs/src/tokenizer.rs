@@ -132,52 +132,6 @@ pub fn collect_tokens<T: Tokenizer>(
     tokens
 }
 
-/// Tokenizes text in parallel using multiple threads
-///
-/// # Arguments
-///
-/// * `tokenizer` - Tokenizer to use for processing text
-/// * `text` - Text to tokenize, will be split by "\n\n"
-/// * `inclusive` - Optional list of tokens to include (if provided, only tokens in this list will be returned)
-///
-/// # Returns
-///
-/// A HashMap of tokens and their counts.
-/// The keys are the token strings and the values are their counts.
-#[cfg(any(test, feature = "parallel"))]
-pub fn collect_tokens_parallel<T: Tokenizer + Send>(
-    tokenizer: &mut T,
-    text: &str,
-    inclusive: Option<&HashMap<String, usize>>,
-) -> HashMap<String, usize> {
-    use rayon::prelude::*;
-    const MIN_PARALLEL_SIZE: usize = 1024 * 10; // 10KB
-
-    if text.len() < MIN_PARALLEL_SIZE {
-        return collect_tokens(tokenizer, text, inclusive);
-    }
-
-    // Split the text into chunks for parallel processing
-    // TODO: splitting strategy
-    let chunks: Vec<&str> = text.split("\n\n").collect();
-    let tokens: Vec<HashMap<String, usize>> = chunks
-        .par_iter()
-        .map(|chunk| {
-            let mut local_tokenizer = tokenizer.clone();
-            collect_tokens(&mut local_tokenizer, chunk, inclusive)
-        })
-        .collect();
-
-    tokens
-        .into_iter()
-        .fold(HashMap::new(), |mut acc, token_map| {
-            for (token, count) in token_map {
-                *acc.entry(token).or_default() += count;
-            }
-            acc
-        })
-}
-
 /// Performs a simple full-text search by finding matching tokens in a segment
 ///
 /// # Arguments
@@ -257,26 +211,5 @@ mod tests {
         assert_eq!(tokens.len(), 2);
         assert_eq!(tokens.get("quick"), Some(&1));
         assert_eq!(tokens.get("fox"), Some(&2));
-    }
-
-    #[test]
-    fn test_collect_tokens_parallel() {
-        let mut tokenizer = default_tokenizer();
-
-        // 创建一个大文本，确保触发并行处理
-        let large_text = "The quick brown fox\n\njumps over\n\nthe lazy dog".repeat(1024 * 10);
-
-        // 测试并行分词
-        let tokens = collect_tokens_parallel(&mut tokenizer, &large_text, None);
-        assert!(!tokens.is_empty());
-        assert!(tokens.contains_key("quick"));
-        assert!(tokens.contains_key("fox"));
-        assert!(tokens.contains_key("jump"));
-        assert!(tokens.contains_key("dog"));
-
-        // 测试小文本（应该使用串行处理）
-        let small_text = "The quick brown fox";
-        let tokens = collect_tokens_parallel(&mut tokenizer, small_text, None);
-        assert_eq!(tokens.len(), 4);
     }
 }

@@ -243,7 +243,7 @@ impl<T: ObjectStore> EncryptedStoreBuilder<T> {
         let data = self.store.get(&meta_path).await?;
         let data = data.bytes().await?;
         let meta: Metadata = from_reader(&data[..]).map_err(|err| Error::Generic {
-            store: "MetaStore",
+            store: "EncryptedStore",
             source: format!("Failed to deserialize Metadata for path {location}: {err:?}").into(),
         })?;
         Ok(meta)
@@ -266,7 +266,7 @@ impl<T: ObjectStore> EncryptedStoreBuilder<T> {
         let meta_path = self.meta_path(location);
         let mut data = Vec::new();
         into_writer(&meta, &mut data).map_err(|err| Error::Generic {
-            store: "MetaStore",
+            store: "EncryptedStore",
             source: format!("Failed to serialize Metadata: {err:?}").into(),
         })?;
         self.meta_cache
@@ -299,7 +299,7 @@ impl<T: ObjectStore> EncryptedStoreBuilder<T> {
                 let meta_path = self.meta_path(location);
                 let mut data = Vec::new();
                 into_writer(&val, &mut data).map_err(|err| Error::Generic {
-                    store: "MetaStore",
+                    store: "EncryptedStore",
                     source: format!("Failed to serialize Metadata for path {location}: {err:?}")
                         .into(),
                 })?;
@@ -451,7 +451,11 @@ impl<T: ObjectStore> ObjectStore for EncryptedStore<T> {
 
         // 原始 range
         let range = if let Some(r) = &options.range {
-            as_range(r, meta.size)?
+            r.as_range(meta.size)
+                .map_err(|source| object_store::Error::Generic {
+                    store: "EncryptedStore",
+                    source: source.into(),
+                })?
         } else {
             0..meta.size
         };
@@ -968,34 +972,6 @@ fn ranges_is_valid(ranges: &[Range<u64>], len: u64) -> Result<()> {
         }
     }
     Ok(())
-}
-
-fn as_range(r: &GetRange, len: u64) -> Result<Range<u64>> {
-    match r {
-        GetRange::Bounded(r) => {
-            if r.start >= len {
-                Err(Error::Generic {
-                    store: "EncryptedStore",
-                    source: format!("start {} is larger than length {}", r.start, len).into(),
-                })
-            } else if r.end > len {
-                Ok(r.start..len)
-            } else {
-                Ok(r.clone())
-            }
-        }
-        GetRange::Offset(o) => {
-            if *o >= len {
-                Err(Error::Generic {
-                    store: "EncryptedStore",
-                    source: format!("offset {} is larger than length {}", o, len).into(),
-                })
-            } else {
-                Ok(*o..len)
-            }
-        }
-        GetRange::Suffix(n) => Ok(len.saturating_sub(*n)..len),
-    }
 }
 
 fn rand_bytes<const N: usize>() -> [u8; N] {

@@ -1,5 +1,6 @@
-use anda_db_tfs::{collect_tokens, collect_tokens_parallel, default_tokenizer};
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use anda_db_tfs::{collect_tokens, default_tokenizer};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use std::hint::black_box;
 
 const SMALL_TEXT: &str = include_str!("../README.md");
 const LARGE_TEXT: &str = include_str!("../../../Cargo.lock");
@@ -40,18 +41,6 @@ pub fn criterion_benchmark(c: &mut Criterion) {
                 let mut tokenizer = default_tokenizer();
                 b.iter(|| {
                     let tokens = collect_tokens(&mut tokenizer, black_box(text), None);
-                    black_box(assert!(!tokens.is_empty()));
-                })
-            },
-        );
-
-        group.bench_with_input(
-            BenchmarkId::new("parallel", case.name),
-            &case.text,
-            |b, &text| {
-                let mut tokenizer = default_tokenizer();
-                b.iter(|| {
-                    let tokens = collect_tokens_parallel(&mut tokenizer, black_box(text), None);
                     black_box(assert!(!tokens.is_empty()));
                 })
             },
