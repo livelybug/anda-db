@@ -6,7 +6,7 @@ mod schema;
 mod segment;
 mod value_serde;
 
-pub use anda_db_derive::FieldTyped;
+pub use anda_db_derive::{AndaDBSchema, FieldTyped};
 
 pub use document::*;
 pub use error::*;

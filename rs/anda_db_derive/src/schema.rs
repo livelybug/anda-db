@@ -6,13 +6,9 @@ use syn::{
     parse_macro_input,
 };
 
-/// A derive macro that generates a `field_type()` function for structs.
-/// FieldType represents field types in AndaDB schema.
-///
-/// This macro analyzes the struct fields and their types, mapping them to the
-/// appropriate `FieldType` enum variants. It supports common Rust types and
-/// handles Option<T> wrappers.
-pub fn field_typed_derive(input: TokenStream) -> TokenStream {
+/// A derive macro that generates a `schema()` function for structs.
+/// This generates an AndaDB Schema definition based on the struct fields.
+pub fn anda_db_schema_derive(input: TokenStream) -> TokenStream {
     // Parse the input tokens into a syntax tree
     let input = parse_macro_input!(input as DeriveInput);
     let name = &input.ident;
@@ -23,23 +19,26 @@ pub fn field_typed_derive(input: TokenStream) -> TokenStream {
             Fields::Named(fields_named) => &fields_named.named,
             _ => {
                 return TokenStream::from(quote! {
-                    compile_error!("FieldTyped only supports structs with named fields");
+                    compile_error!("AndaDBSchema only supports structs with named fields");
                 });
             }
         }
     } else {
         return TokenStream::from(quote! {
-            compile_error!("FieldTyped only supports structs");
+            compile_error!("AndaDBSchema only supports structs");
         });
     };
 
-    // Generate field type mappings
-    let field_type_mappings = fields.iter().map(|field| {
+    // Generate field entries for schema builder
+    let field_entries = fields.iter().filter_map(|field| {
         let field_name = field.ident.as_ref().unwrap();
         let field_name_str = field_name.to_string();
 
         // Get renamed field from serde attribute if present
         let rename_attr = find_rename_attr(&field.attrs).unwrap_or_else(|| field_name_str.clone());
+
+        // Check for field description from doc comments
+        let description = extract_doc_comments(&field.attrs);
 
         // Check if there's a custom field_type attribute
         let custom_field_type = find_field_type_attr(&field.attrs);
@@ -52,29 +51,66 @@ pub fn field_typed_derive(input: TokenStream) -> TokenStream {
                 Ok(field_type) => field_type,
                 Err(err_msg) => {
                     // Generate a compile error for unsupported types
-                    return quote! {
-                        compile_error!(#err_msg)
-                    };
+                    return Some(quote! {
+                        compile_error!(#err_msg);
+                    });
                 }
             }
         };
 
-        quote! {
-            (#rename_attr.to_string(), #field_type)
+        // Skip the '_id' field as it's automatically added by SchemaBuilder
+        if field_name_str == "_id" {
+            // Check if _id field is u64 type by examining the actual Rust type
+            if !is_u64_type(&field.ty) {
+                return Some(quote! {
+                    compile_error!("The '_id' field must be of type u64");
+                });
+            }
+
+            return None;
         }
+
+        // Check if field is unique (from unique attribute)
+        let is_unique = has_unique_attr(&field.attrs);
+
+        // Generate field entry creation
+        let field_entry_creation = if description.is_empty() {
+            if is_unique {
+                quote! {
+                    FieldEntry::new(#rename_attr.to_string(), #field_type)?.with_unique()
+                }
+            } else {
+                quote! {
+                    FieldEntry::new(#rename_attr.to_string(), #field_type)?
+                }
+            }
+        } else if is_unique {
+            quote! {
+                FieldEntry::new(#rename_attr.to_string(), #field_type)?
+                    .with_description(#description.to_string())
+                    .with_unique()
+            }
+        } else {
+            quote! {
+                FieldEntry::new(#rename_attr.to_string(), #field_type)?
+                    .with_description(#description.to_string())
+            }
+        };
+
+        Some(quote! {
+            builder.add_field(#field_entry_creation)?;
+        })
     });
 
-    // Generate the field_type function implementation
+    // Generate the schema function implementation
     let expanded = quote! {
         impl #name {
-            pub fn field_type() -> FieldType {
-                FieldType::Map(
-                    vec![
-                        #(#field_type_mappings),*
-                    ]
-                    .into_iter()
-                    .collect(),
-                )
+            pub fn schema() -> Result<Schema, SchemaError> {
+                let mut builder = Schema::builder();
+
+                #(#field_entries)*
+
+                builder.build()
             }
         }
     };
@@ -82,7 +118,7 @@ pub fn field_typed_derive(input: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
-// 查找并解析 serde 的 rename 属性解析
+// 查找并解析 serde 的 rename 属性
 fn find_rename_attr(attrs: &[Attribute]) -> Option<String> {
     for attr in attrs {
         if !attr.path().is_ident("serde") {
@@ -128,6 +164,33 @@ fn find_field_type_attr(attrs: &[Attribute]) -> Option<proc_macro2::TokenStream>
     None
 }
 
+// 检查是否有 unique 属性
+fn has_unique_attr(attrs: &[Attribute]) -> bool {
+    attrs.iter().any(|attr| attr.path().is_ident("unique"))
+}
+
+// 提取文档注释作为描述
+fn extract_doc_comments(attrs: &[Attribute]) -> String {
+    let mut doc_comments = Vec::new();
+
+    for attr in attrs {
+        if attr.path().is_ident("doc") {
+            if let Ok(meta_name_value) = attr.meta.require_name_value() {
+                if let Expr::Lit(expr_lit) = &meta_name_value.value {
+                    if let Lit::Str(lit_str) = &expr_lit.lit {
+                        let comment = lit_str.value().trim().to_string();
+                        if !comment.is_empty() {
+                            doc_comments.push(comment);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    doc_comments.join(" ")
+}
+
 // 解析类型字符串为 TokenStream
 fn parse_field_type_str(type_str: &str) -> proc_macro2::TokenStream {
     match type_str {
@@ -155,7 +218,7 @@ fn parse_field_type_str(type_str: &str) -> proc_macro2::TokenStream {
         }
 
         // 默认或不支持的类型
-        _ => quote! { FieldType::Any },
+        _ => quote! { FieldType::Json },
     }
 }
 
@@ -175,7 +238,7 @@ fn determine_field_type(ty: &Type) -> Result<proc_macro2::TokenStream, String> {
                             return Ok(quote! { FieldType::Option(Box::new(#inner_field_type)) });
                         }
                     }
-                    Ok(quote! { FieldType::Option(Box::new(FieldType::U64)) })
+                    Ok(quote! { FieldType::Option(Box::new(FieldType::Json)) })
                 }
                 "String" | "str" => Ok(quote! { FieldType::Text }),
                 "Vec" => {
@@ -233,27 +296,7 @@ fn determine_field_type(ty: &Type) -> Result<proc_macro2::TokenStream, String> {
                     Err(format!("Invalid map type: {}", type_name))
                 }
                 _ => {
-                    // 处理嵌套路径
-                    // if path.segments.len() > 1 {
-                    //     // 尝试检查完整路径
-                    //     let full_path = path
-                    //         .segments
-                    //         .iter()
-                    //         .map(|seg| seg.ident.to_string())
-                    //         .collect::<Vec<_>>()
-                    //         .join("::");
-
-                    //     match full_path.as_str() {
-                    //         "half::bf16" => return Ok(quote! { FieldType::Bf16 }),
-                    //         "serde_bytes::ByteArray" | "serde_bytes::ByteBuf" => {
-                    //             return Ok(quote! { FieldType::Bytes });
-                    //         }
-                    //         _ => {}
-                    //     }
-                    // }
-
                     // 处理自定义结构体类型 - 尝试使用该结构体的 field_type 方法
-                    // 将其他结构体类型也映射为 FieldType::Map
                     let type_ident = Ident::new(&type_name, Span::call_site());
                     Ok(quote! {
                         #type_ident::field_type()
@@ -295,6 +338,15 @@ fn is_bf16_type(ty: &Type) -> bool {
     if let Type::Path(type_path) = ty {
         if let Some(segment) = type_path.path.segments.first() {
             return segment.ident == "bf16";
+        }
+    }
+    false
+}
+
+fn is_u64_type(ty: &Type) -> bool {
+    if let Type::Path(type_path) = ty {
+        if let Some(segment) = type_path.path.segments.first() {
+            return segment.ident == "u64";
         }
     }
     false

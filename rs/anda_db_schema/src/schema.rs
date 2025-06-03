@@ -14,8 +14,8 @@ pub struct Schema {
 }
 
 impl Schema {
-    /// The key name for the ID field
-    pub const ID_KEY: &str = "id"; // with idx 0
+    /// The key name for the ID field. it is a special u64 field used as an internal unique identifier in a collection. It is always present in the schema with idx 0.
+    pub const ID_KEY: &str = "_id";
 
     /// Creates a new SchemaBuilder instance.
     ///
@@ -26,6 +26,7 @@ impl Schema {
     }
 
     /// Returns the number of fields in the schema.
+    /// This includes the "_id" field and any other fields defined in the schema.
     ///
     /// # Returns
     /// The number of fields.
@@ -294,7 +295,7 @@ mod tests {
         assert_eq!(builder.fields.len(), 1); // 只有 ID 字段
 
         // 测试添加 ID 字段
-        let id_field = Fe::new("id".to_string(), Ft::U64).unwrap();
+        let id_field = Fe::new("_id".to_string(), Ft::U64).unwrap();
         // ID 字段已经存在，添加失败
         assert!(builder.add_field(id_field).is_err());
 
@@ -446,7 +447,7 @@ mod tests {
         // 验证迭代器返回的字段
         let field_names: Vec<&str> = fields.iter().map(|f| f.name()).collect();
         println!("Field names: {:?}", field_names);
-        assert!(field_names.contains(&"id"));
+        assert!(field_names.contains(&"_id"));
         assert!(field_names.contains(&"name"));
     }
 }

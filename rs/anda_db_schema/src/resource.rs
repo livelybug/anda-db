@@ -4,7 +4,7 @@ use crate::{FieldType, FieldTyped};
 
 /// Represents a resource for AI Agents.
 /// It can be a file, a URL, or any other type of resource.
-#[derive(Debug, Default, Clone, Serialize, Deserialize, FieldTyped)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize, FieldTyped, PartialEq)]
 pub struct Resource {
     /// A tag that identifies the type of this resource.
     #[serde(rename = "t")]

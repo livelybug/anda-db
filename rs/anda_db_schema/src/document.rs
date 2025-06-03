@@ -326,60 +326,96 @@ impl Serialize for Document {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Fe, Ft, Fv};
+    use crate::{AndaDBSchema, FieldEntry, FieldType, Fv, Resource};
     use serde::{Deserialize, Serialize};
     use std::collections::BTreeMap;
 
-    #[derive(Debug, Serialize, Deserialize, PartialEq)]
+    #[derive(Debug, Serialize, Deserialize, PartialEq, AndaDBSchema)]
     struct TestUser {
-        id: u64, // 9m4e2mr0ui3e8a215n4g
+        _id: u64,
+        /// User's display name
         name: String,
+        /// User's age in years
         age: u64,
-        active: bool,
-        tags: Vec<String>,
-        meta: BTreeMap<String, u64>,
-    }
-
-    fn create_test_schema() -> Arc<Schema> {
-        let mut builder = Schema::builder();
-
-        // 添加必填字段
-        let name_field = Fe::new("name".to_string(), Ft::Text).unwrap();
-        builder.add_field(name_field).unwrap();
-
-        let age_field = Fe::new("age".to_string(), Ft::U64).unwrap();
-        builder.add_field(age_field).unwrap();
-
-        // 添加普通字段
-        let active_field = Fe::new("active".to_string(), Ft::Option(Box::new(Ft::Bool))).unwrap();
-        builder.add_field(active_field).unwrap();
-
-        let tags_field = Fe::new(
-            "tags".to_string(),
-            Ft::Option(Box::new(Ft::Array(vec![Ft::Text]))),
-        )
-        .unwrap();
-        builder.add_field(tags_field).unwrap();
-
-        let meta_field = Fe::new(
-            "meta".to_string(),
-            Ft::Option(Box::new(Ft::Map(BTreeMap::from([
-                ("created".to_string(), Ft::U64),
-                ("updated".to_string(), Ft::U64),
-            ])))),
-        )
-        .unwrap();
-        builder.add_field(meta_field).unwrap();
-
-        Arc::new(builder.build().unwrap())
+        /// Whether the user account is active
+        active: Option<bool>,
+        /// User tags for categorization
+        tags: Option<Vec<String>>,
+        /// User metadata with creation and update timestamps
+        meta: Option<BTreeMap<String, u64>>,
+        /// Optional profile picture resource
+        picture: Option<Resource>,
     }
 
     #[test]
     fn test_document_with_id() {
-        let schema = create_test_schema();
+        let schema = Arc::new(TestUser::schema().unwrap());
         let id = 99u64;
+        println!("Schema: {:#?}", schema);
+        // Schema: Schema {
+        //     idx: {
+        //         0,
+        //         1,
+        //         2,
+        //         3,
+        //         4,
+        //         5,
+        //         6,
+        //     },
+        //     fields: {
+        //         "_id": FieldEntry {
+        //             name: "_id",
+        //             description: "\"_id\" is a u64 field, used as an internal unique identifier",
+        //             type: U64,
+        //             unique: true,
+        //             idx: 0,
+        //         },
+        //         "active": FieldEntry {
+        //             name: "active",
+        //             description: "Whether the user account is active",
+        //             type: Option(Bool),
+        //             unique: false,
+        //             idx: 3,
+        //         },
+        //         "age": FieldEntry {
+        //             name: "age",
+        //             description: "User's age in years",
+        //             type: U64,
+        //             unique: false,
+        //             idx: 2,
+        //         },
+        //         "meta": FieldEntry {
+        //             name: "meta",
+        //             description: "User metadata with creation and update timestamps",
+        //             type: Option(Map({"*": U64})),
+        //             unique: false,
+        //             idx: 5,
+        //         },
+        //         "name": FieldEntry {
+        //             name: "name",
+        //             description: "User's display name",
+        //             type: Text,
+        //             unique: false,
+        //             idx: 1,
+        //         },
+        //         "picture": FieldEntry {
+        //             name: "picture",
+        //             description: "Optional profile picture resource",
+        //             type: Option(Map({"b": Option(Bytes), "d": Option(Text), "h": Option(Bytes), "m": Option(Text), "n": Option(Text), "s": Option(U64), "t": Text, "u": Option(Text)})),
+        //             unique: false,
+        //             idx: 6,
+        //         },
+        //         "tags": FieldEntry {
+        //             name: "tags",
+        //             description: "User tags for categorization",
+        //             type: Option(Array([Text])),
+        //             unique: false,
+        //             idx: 4,
+        //         },
+        //     },
+        // }
 
-        let mut doc = Document::new(schema.clone());
+        let mut doc = Document::new(schema);
         assert!(doc.fields.is_empty());
         assert_eq!(doc.id(), 0);
         doc.set_id(id);
@@ -388,7 +424,7 @@ mod tests {
 
     #[test]
     fn test_document_try_from_doc() {
-        let schema = create_test_schema();
+        let schema = Arc::new(TestUser::schema().unwrap());
         let id = 99u64;
 
         // 创建有效的字段值
@@ -409,18 +445,19 @@ mod tests {
 
     #[test]
     fn test_document_try_from() {
-        let schema = create_test_schema();
+        let schema = Arc::new(TestUser::schema().unwrap());
 
         let test_user = TestUser {
-            id: 99,
+            _id: 99,
             name: "John Doe".to_string(),
             age: 30,
-            active: true,
-            tags: vec!["user".to_string(), "admin".to_string()],
-            meta: BTreeMap::from([
+            active: Some(true),
+            tags: Some(vec!["user".to_string(), "admin".to_string()]),
+            meta: Some(BTreeMap::from([
                 ("created".to_string(), 1625097600),
                 ("updated".to_string(), 1625097600),
-            ]),
+            ])),
+            picture: None,
         };
 
         let doc = Document::try_from(schema.clone(), &test_user).unwrap();
@@ -454,18 +491,19 @@ mod tests {
 
     #[test]
     fn test_document_try_as() {
-        let schema = create_test_schema();
+        let schema = Arc::new(TestUser::schema().unwrap());
 
         let test_user = TestUser {
-            id: 99,
+            _id: 99,
             name: "John Doe".to_string(),
             age: 30,
-            active: true,
-            tags: vec!["user".to_string(), "admin".to_string()],
-            meta: BTreeMap::from([
+            active: Some(true),
+            tags: Some(vec!["user".to_string(), "admin".to_string()]),
+            meta: Some(BTreeMap::from([
                 ("created".to_string(), 1625097600),
                 ("updated".to_string(), 1625097600),
-            ]),
+            ])),
+            picture: None,
         };
 
         let doc = Document::try_from(schema.clone(), &test_user).unwrap();
@@ -478,7 +516,7 @@ mod tests {
 
     #[test]
     fn test_document_get_set_field() {
-        let schema = create_test_schema();
+        let schema = Arc::new(TestUser::schema().unwrap());
         let mut doc = Document::new(schema.clone());
 
         // 测试设置字段
@@ -506,7 +544,7 @@ mod tests {
 
     #[test]
     fn test_document_get_set_field_as() {
-        let schema = create_test_schema();
+        let schema = Arc::new(TestUser::schema().unwrap());
 
         let mut doc = Document::new(schema.clone());
 
@@ -534,7 +572,7 @@ mod tests {
 
     #[test]
     fn test_document_set_doc() {
-        let schema = create_test_schema();
+        let schema = Arc::new(TestUser::schema().unwrap());
 
         let mut doc = Document::new(schema.clone());
 
@@ -564,7 +602,7 @@ mod tests {
 
     #[test]
     fn test_document_from_to_owned() {
-        let schema = create_test_schema();
+        let schema = Arc::new(TestUser::schema().unwrap());
 
         let mut doc = Document::new(schema.clone());
         doc.set_id(99);
@@ -593,11 +631,11 @@ mod tests {
 
     #[test]
     fn test_document_validation_errors() {
-        let schema = create_test_schema();
+        let schema = Arc::new(TestUser::schema().unwrap());
 
         // 测试缺少必填字段
         let test_user_missing_required = serde_json::json!({
-            "id": "9m4e2mr0ui3e8a215n4g",
+            "_id": 18,
             "name": "John Doe",
             // 缺少必填的 age 字段
             "active": true
@@ -608,7 +646,7 @@ mod tests {
 
         // 测试字段类型不匹配
         let test_user_wrong_type = serde_json::json!({
-            "id": "9m4e2mr0ui3e8a215n4g",
+            "_id": "18",
             "name": "John Doe",
             "age": "thirty", // 应该是数字
             "active": true

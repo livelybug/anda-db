@@ -17,7 +17,7 @@ use structured_logger::unix_ms;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Knowledge {
-    pub id: u64,
+    pub _id: u64,
     // thread ID, thread is a conversation that multi agents can join.
     pub thread: Xid,
     // seconds since epoch
@@ -156,7 +156,7 @@ async fn add_knowledges_and_query(collection: &Arc<Collection>) -> Result<(), DB
 
     let knowledges = vec![
         Knowledge {
-            id: 0,
+            _id: 0,
             thread: thread.clone(),
             created_at: unix_ms() / 1000,
             authors: vec!["Anda".to_string(), "Bill".to_string()],
@@ -178,7 +178,7 @@ async fn add_knowledges_and_query(collection: &Arc<Collection>) -> Result<(), DB
             hash: None,
         },
         Knowledge {
-            id: 0,
+            _id: 0,
             thread: thread.clone(),
             created_at: unix_ms() / 1000,
             authors: vec!["Charlie".to_string()],
@@ -219,7 +219,7 @@ async fn add_knowledges_and_query(collection: &Arc<Collection>) -> Result<(), DB
     let result: Vec<Knowledge> = collection
         .search_as(Query {
             filter: Some(Filter::Field((
-                "id".to_string(),
+                "_id".to_string(),
                 RangeQuery::Eq(Fv::U64(1)),
             ))),
             ..Default::default()
@@ -289,7 +289,7 @@ async fn add_knowledges_and_query(collection: &Arc<Collection>) -> Result<(), DB
                 ..Default::default()
             }),
             filter: Some(Filter::Field((
-                "id".to_string(),
+                "_id".to_string(),
                 RangeQuery::Gt(Fv::U64(1)),
             ))),
             ..Default::default()

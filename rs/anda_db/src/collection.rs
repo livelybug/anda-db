@@ -1820,7 +1820,7 @@ mod tests {
     // 测试用的文档结构
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
     struct TestDoc {
-        pub id: u64,
+        pub _id: u64,
         pub name: String,
         pub age: u32,
         pub tags: Vec<String>,
@@ -1884,9 +1884,9 @@ mod tests {
     }
 
     // 创建测试文档的辅助函数
-    fn create_test_doc(id: u64, name: &str, age: u32, tags: Vec<&str>) -> TestDoc {
+    fn create_test_doc(_id: u64, name: &str, age: u32, tags: Vec<&str>) -> TestDoc {
         TestDoc {
-            id,
+            _id,
             name: name.to_string(),
             age,
             tags: tags.iter().map(|s| s.to_string()).collect(),
@@ -1958,7 +1958,7 @@ mod tests {
         let result: Vec<TestDoc> = collection
             .search_as(Query {
                 filter: Some(Filter::Field((
-                    "id".to_string(),
+                    "_id".to_string(),
                     RangeQuery::Eq(Fv::U64(1)),
                 ))),
                 ..Default::default()

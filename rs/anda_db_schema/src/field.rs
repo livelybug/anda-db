@@ -90,6 +90,11 @@ impl fmt::Debug for FieldType {
 }
 
 impl FieldType {
+    /// Check if this field type allows null values
+    pub fn allows_null(&self) -> bool {
+        matches!(self, FieldType::Option(_))
+    }
+
     /// Extract a FieldValue from a CBOR value according to this field type
     ///
     /// # Arguments
@@ -138,7 +143,7 @@ impl FieldType {
             (FieldType::Json, FieldValue::Json(_)) => Ok(()),
             (FieldType::Vector, FieldValue::Vector(_)) => Ok(()),
             (FieldType::Vector, FieldValue::Array(values)) => {
-                if let Some(FieldValue::U64(_)) = values.iter().next() {
+                if values.iter().all(|v| matches!(v, FieldValue::U64(_))) {
                     return Ok(());
                 }
                 Err(SchemaError::FieldValue(format!(
@@ -178,26 +183,31 @@ impl FieldType {
             },
             (FieldType::Map(types), FieldValue::Map(values)) => match types.len() {
                 0 => Ok(()),
-                1 => {
-                    let ft = types.values().next().unwrap();
-                    for fv in values.iter() {
-                        ft.validate(fv.1)?;
-                    }
-                    Ok(())
-                }
                 _ => {
+                    if let Some(ft) = as_wildcard_map(types) {
+                        // Special case for wildcard map
+                        for fv in values.values() {
+                            ft.validate(fv)?;
+                        }
+                        return Ok(());
+                    }
+
                     if let Some(k) = values.keys().find(|k| !types.contains_key(*k)) {
                         return Err(SchemaError::FieldValue(format!("invalid map key {:?}", k)));
                     }
 
                     for (k, ft) in types.iter() {
-                        ft.validate(values.get(k).unwrap_or(&FieldValue::Null))
-                            .map_err(|err| {
-                                SchemaError::FieldValue(format!(
-                                    "invalid map value at key {:?}, error: {}",
-                                    k, err
-                                ))
-                            })?;
+                        let rt = match values.get(k) {
+                            None => ft.validate(&FieldValue::Null),
+                            Some(v) => ft.validate(v),
+                        };
+
+                        rt.map_err(|err| {
+                            SchemaError::FieldValue(format!(
+                                "invalid map value at key {:?}, error: {}",
+                                k, err
+                            ))
+                        })?;
                     }
                     Ok(())
                 }
@@ -538,7 +548,7 @@ impl<const N: usize> TryFrom<FieldValue> for [bf16; N] {
             FieldValue::Vector(v) => Ok(v.try_into().map_err(|v: Vec<bf16>| {
                 SchemaError::FieldValue(format!("expected {N} elements, got {}", v.len()))
             })?),
-            _ => Err(SchemaError::FieldValue(format!("expected Bytes, got {value:?}")).into()),
+            _ => Err(SchemaError::FieldValue(format!("expected Vector, got {value:?}")).into()),
         }
     }
 }
@@ -800,7 +810,7 @@ impl FieldValue {
                     SchemaError::FieldValue(format!("expected u16, got {v:?}"))
                 })?))
             }
-            v => Err(SchemaError::FieldValue(format!("expected bf64, got {v:?}"))),
+            v => Err(SchemaError::FieldValue(format!("expected bf16, got {v:?}"))),
         }
     }
 
@@ -879,33 +889,43 @@ impl FieldValue {
                     ));
                 }
 
-                let mut vals: BTreeMap<String, Cbor> = BTreeMap::new();
+                let wildcard_map = as_wildcard_map(types);
+
+                let mut vals: BTreeMap<String, FieldValue> = BTreeMap::new();
                 for (k, v) in values {
                     let k = k.into_text().map_err(|v| {
                         SchemaError::FieldValue(format!("invalid map key: {:?}", v))
                     })?;
-                    if !types.contains_key(&k) {
-                        return Err(SchemaError::FieldValue(format!("invalid map key {:?}", k)));
-                    }
                     if vals.contains_key(&k) {
                         return Err(SchemaError::FieldValue(format!(
                             "duplicate map key {:?}",
                             k
                         )));
                     }
-                    vals.insert(k, v);
+
+                    match wildcard_map {
+                        Some(ft) => {
+                            // Special case for wildcard map
+                            let v = ft.extract(v)?;
+                            vals.insert(k, v);
+                            continue;
+                        }
+                        None => match types.get(&k) {
+                            None => {
+                                return Err(SchemaError::FieldValue(format!(
+                                    "invalid map key {:?}",
+                                    k
+                                )));
+                            }
+                            Some(ft) => {
+                                let v = ft.extract(v)?;
+                                vals.insert(k, v);
+                            }
+                        },
+                    }
                 }
 
-                let mut rt: BTreeMap<String, FieldValue> = BTreeMap::new();
-                for (k, ft) in types.iter() {
-                    let (key, val) = vals
-                        .remove_entry(k)
-                        .unwrap_or_else(|| (k.clone(), Cbor::Null));
-                    let val = ft.extract(val)?;
-                    rt.insert(key, val);
-                }
-
-                Ok(FieldValue::Map(rt))
+                Ok(FieldValue::Map(vals))
             }
             v => Err(SchemaError::FieldValue(format!("expected Map, got {v:?}"))),
         }
@@ -973,6 +993,12 @@ impl FieldValue {
     }
 
     /// Get a field value from a map as a reference T
+    ///
+    /// # Arguments
+    /// * `field` - The field name to look up
+    ///
+    /// # Returns
+    /// * `Option<&T>` - The field value if found and convertible, None otherwise
     pub fn get_field_as<'a, T: ?Sized>(&'a self, field: &str) -> Option<&'a T>
     where
         &'a T: TryFrom<&'a FieldValue>,
@@ -1160,6 +1186,13 @@ impl FieldEntry {
     }
 }
 
+fn as_wildcard_map(m: &BTreeMap<String, FieldType>) -> Option<&FieldType> {
+    match m.len() {
+        1 => m.get("*"),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1301,12 +1334,12 @@ mod tests {
 
         // Map
         let mut map_type = BTreeMap::new();
-        map_type.insert("id".to_string(), FieldType::U64);
+        map_type.insert("_id".to_string(), FieldType::U64);
         map_type.insert("name".to_string(), FieldType::Text);
         let map_type = FieldType::Map(map_type);
 
         let map_cbor = Cbor::Map(vec![
-            (Cbor::Text("id".to_string()), Cbor::Integer(1.into())),
+            (Cbor::Text("_id".to_string()), Cbor::Integer(1.into())),
             (
                 Cbor::Text("name".to_string()),
                 Cbor::Text("test".to_string()),
@@ -1315,7 +1348,7 @@ mod tests {
 
         let map_val = map_type.extract(map_cbor).unwrap();
         let mut expected_map = BTreeMap::new();
-        expected_map.insert("id".to_string(), FieldValue::U64(1));
+        expected_map.insert("_id".to_string(), FieldValue::U64(1));
         expected_map.insert("name".to_string(), FieldValue::Text("test".to_string()));
         assert_eq!(map_val, FieldValue::Map(expected_map));
 
@@ -1428,18 +1461,18 @@ mod tests {
 
         // Map
         let mut map_type = BTreeMap::new();
-        map_type.insert("id".to_string(), FieldType::U64);
+        map_type.insert("_id".to_string(), FieldType::U64);
         map_type.insert("name".to_string(), FieldType::Text);
         let map_type = FieldType::Map(map_type);
 
         let mut map_val = BTreeMap::new();
-        map_val.insert("id".to_string(), FieldValue::U64(1));
+        map_val.insert("_id".to_string(), FieldValue::U64(1));
         map_val.insert("name".to_string(), FieldValue::Text("test".to_string()));
         let map_val = FieldValue::Map(map_val);
         assert!(map_type.validate(&map_val).is_ok());
 
         let mut invalid_map_val = BTreeMap::new();
-        invalid_map_val.insert("id".to_string(), FieldValue::Text("invalid".to_string()));
+        invalid_map_val.insert("_id".to_string(), FieldValue::Text("invalid".to_string()));
         invalid_map_val.insert("name".to_string(), FieldValue::Text("test".to_string()));
         let invalid_map_val = FieldValue::Map(invalid_map_val);
         assert!(map_type.validate(&invalid_map_val).is_err());
