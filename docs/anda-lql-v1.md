@@ -39,7 +39,7 @@ Defines the query's output.
 `FIND ?var1 (?agg_func(?var2) AS ?result_var) ...`
 
 *   **Multi-variable Return**: Specifies one or more variables to return, e.g., `FIND ?drug ?symptom`.
-*   **Aggregate Return**: Uses aggregation functions (see Section 7) to perform calculations. An alias must be assigned using the `AS` keyword.
+*   **Aggregate Return**: Uses aggregation functions to perform calculations. An alias must be assigned using the `AS` keyword.
 
 **Aggregation Functions:**
 
