@@ -1,4 +1,6 @@
-# Anda-LQL (Anda Logic Query Language) Specification v1.0
+# Anda-LQL (Anda Logic Query Language) Specification v1.0 [DEPRECATED]
+
+## Anda-LQL is now [KIP (Knowledge Interaction Protocol)](https://github.com/ldclabs/KIP).
 
 ## 1. Introduction
 
