@@ -52,6 +52,9 @@ object_store = { version = "0.12" }
 moka = { version = "0.12", features = ["future"] }
 zstd-safe = "7"
 async-compression = { version = "0.4", features = ["tokio", "zstd"] }
+nom = "7.1"
+regex = "1.11"
+itertools = "0.14"
 
 [workspace.metadata.cargo-shear]
 ignored = ["blas-src"]
