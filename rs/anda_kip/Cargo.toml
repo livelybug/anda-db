@@ -22,3 +22,6 @@ itertools = { workspace = true }
 regex = { workspace = true }
 nom = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }

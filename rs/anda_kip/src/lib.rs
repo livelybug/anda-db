@@ -1,12 +1,13 @@
 mod ast;
 mod error;
 mod executor;
-mod nexus;
 mod parser;
 mod response;
 
+pub mod nexus;
+
+pub use ast::*;
 pub use error::*;
 pub use executor::*;
-pub use nexus::*;
 pub use parser::*;
 pub use response::*;

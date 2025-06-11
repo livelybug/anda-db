@@ -12,8 +12,7 @@ use nom::{
 };
 use std::collections::HashMap;
 
-use crate::ast::KeyValue;
-use crate::nexus::KipValue;
+use crate::ast::{KeyValue, Value};
 
 /// Consumes whitespace around a parser.
 pub fn ws<'a, F, O>(inner: F) -> impl FnMut(&'a str) -> IResult<&'a str, O>
@@ -88,15 +87,15 @@ pub fn quoted_string(input: &str) -> IResult<&str, String> {
 // }
 
 /// Parses any KIP value (string, integer, float, boolean, null).
-pub fn kip_value(input: &str) -> IResult<&str, KipValue> {
+pub fn kip_value(input: &str) -> IResult<&str, Value> {
     alt((
-        map(double, KipValue::Float),
-        map(parse_u64, KipValue::Uint),
-        map(parse_i64, KipValue::Int),
-        map(quoted_string, KipValue::String),
-        map(tag_no_case("true"), |_| KipValue::Bool(true)),
-        map(tag_no_case("false"), |_| KipValue::Bool(false)),
-        map(tag_no_case("null"), |_| KipValue::Null),
+        map(double, Value::Float),
+        map(parse_u64, Value::Uint),
+        map(parse_i64, Value::Int),
+        map(quoted_string, Value::String),
+        map(tag_no_case("true"), |_| Value::Bool(true)),
+        map(tag_no_case("false"), |_| Value::Bool(false)),
+        map(tag_no_case("null"), |_| Value::Null),
     ))(input)
 }
 
@@ -112,7 +111,7 @@ pub fn key_value_pair(input: &str) -> IResult<&str, KeyValue> {
 }
 
 /// Parses a list of key-value pairs inside braces, like `{ key1: val1, key2: val2 }`.
-pub fn key_value_map(input: &str) -> IResult<&str, HashMap<String, KipValue>> {
+pub fn key_value_map(input: &str) -> IResult<&str, HashMap<String, Value>> {
     map(
         delimited(
             ws(char('{')),

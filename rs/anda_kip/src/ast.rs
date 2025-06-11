@@ -1,9 +1,31 @@
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::nexus::KipValue;
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Value {
+    String(String),
+    Uint(u64),
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+    Null,
+}
+
+impl std::fmt::Display for Value {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Value::String(s) => write!(f, "\"{}\"", s),
+            Value::Uint(i) => write!(f, "{}", i),
+            Value::Int(i) => write!(f, "{}", i),
+            Value::Float(fl) => write!(f, "{}", fl),
+            Value::Bool(b) => write!(f, "{}", b),
+            Value::Null => write!(f, "null"),
+        }
+    }
+}
 
 #[derive(Debug, PartialEq, Clone)]
-pub enum KipCommand {
+pub enum Command {
     Kql(KqlQuery),
     Kml(KmlStatement),
     Meta(MetaCommand),
@@ -14,7 +36,7 @@ pub enum KipCommand {
 #[derive(Debug, PartialEq, Clone)]
 pub struct KeyValue {
     pub key: String,
-    pub value: KipValue,
+    pub value: Value,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -137,7 +159,7 @@ pub enum KmlStatement {
 #[derive(Debug, PartialEq, Clone)]
 pub struct UpsertBlock {
     pub items: Vec<UpsertItem>,
-    pub metadata: Option<HashMap<String, KipValue>>,
+    pub metadata: Option<HashMap<String, Value>>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -150,16 +172,16 @@ pub enum UpsertItem {
 pub struct ConceptBlock {
     pub handle: String,
     pub on: OnClause,
-    pub set_attributes: Option<HashMap<String, KipValue>>,
+    pub set_attributes: Option<HashMap<String, Value>>,
     pub set_propositions: Option<Vec<SetProposition>>,
-    pub metadata: Option<HashMap<String, KipValue>>,
+    pub metadata: Option<HashMap<String, Value>>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct SetProposition {
     pub predicate: String,
     pub object: PropObject,
-    pub metadata: Option<HashMap<String, KipValue>>,
+    pub metadata: Option<HashMap<String, Value>>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -168,7 +190,7 @@ pub struct PropositionBlock {
     pub subject: OnClause,
     pub predicate: String,
     pub object: PropObject,
-    pub metadata: Option<HashMap<String, KipValue>>,
+    pub metadata: Option<HashMap<String, Value>>,
 }
 
 #[derive(Debug, PartialEq, Clone)]

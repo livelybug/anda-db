@@ -12,7 +12,6 @@ use std::collections::HashMap;
 use super::common::*;
 use super::kql::parse_where_clause_list;
 use crate::ast::*;
-use crate::nexus::KipValue;
 
 // --- Top Level KML Parser ---
 
@@ -25,7 +24,7 @@ pub fn parse_kml_statement(input: &str) -> IResult<&str, KmlStatement> {
 
 // --- UPSERT ---
 
-fn parse_with_metadata(input: &str) -> IResult<&str, HashMap<String, KipValue>> {
+fn parse_with_metadata(input: &str) -> IResult<&str, HashMap<String, Value>> {
     preceded(ws(tag_no_case("WITH METADATA")), key_value_map)(input)
 }
 

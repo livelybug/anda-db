@@ -1,10 +1,11 @@
-use anda_kip::CognitiveNexus;
 use anda_kip::execute_kip;
+use anda_kip::nexus::CognitiveNexus;
 use serde_json;
 
-fn main() {
+#[tokio::main]
+async fn main() {
     // 1. 初始化一个空的认知中枢
-    let mut nexus = CognitiveNexus::new();
+    let nexus = CognitiveNexus::new();
     println!("--- Initializing Cognitive Nexus ---\n");
 
     // 2. 使用 KML UPSERT 命令填充初始知识（来自规范中的知识胶囊）
@@ -56,7 +57,7 @@ fn main() {
         "--- Executing KML UPSERT ---\nCMD:\n{}\n",
         kml_upsert_command
     );
-    let response = execute_kip(&mut nexus, kml_upsert_command).unwrap();
+    let response = execute_kip(&nexus, kml_upsert_command).await.unwrap();
     println!(
         "RES:\n{}\n",
         serde_json::to_string_pretty(&response).unwrap()
@@ -68,7 +69,7 @@ fn main() {
         "--- Executing META DESCRIBE ---\nCMD:\n{}\n",
         meta_describe_types
     );
-    let response = execute_kip(&mut nexus, meta_describe_types).unwrap();
+    let response = execute_kip(&nexus, meta_describe_types).await.unwrap();
     println!(
         "RES:\n{}\n",
         serde_json::to_string_pretty(&response).unwrap()
@@ -76,7 +77,7 @@ fn main() {
 
     let meta_search = r#"SEARCH CONCEPT "Cognizine""#;
     println!("--- Executing META SEARCH ---\nCMD:\n{}\n", meta_search);
-    let response = execute_kip(&mut nexus, meta_search).unwrap();
+    let response = execute_kip(&nexus, meta_search).await.unwrap();
     println!(
         "RES:\n{}\n",
         serde_json::to_string_pretty(&response).unwrap()
@@ -92,7 +93,7 @@ fn main() {
         }
     "#;
     println!("--- Executing KQL FIND ---\nCMD:\n{}\n", kql_find_drug);
-    let response = execute_kip(&mut nexus, kql_find_drug).unwrap();
+    let response = execute_kip(&nexus, kql_find_drug).await.unwrap();
     println!(
         "RES:\n{}\n",
         serde_json::to_string_pretty(&response).unwrap()
@@ -132,7 +133,7 @@ fn main() {
         )
     "#;
     println!("--- Executing KML DELETE ---\nCMD:\n{}\n", kml_delete_prop);
-    let response = execute_kip(&mut nexus, kml_delete_prop).unwrap();
+    let response = execute_kip(&nexus, kml_delete_prop).await.unwrap();
     println!(
         "RES:\n{}\n",
         serde_json::to_string_pretty(&response).unwrap()
@@ -152,7 +153,7 @@ fn main() {
         "--- Verifying Deletion with KQL ---\nCMD:\n{}\n",
         kql_verify_delete
     );
-    let response = execute_kip(&mut nexus, kql_verify_delete).unwrap();
+    let response = execute_kip(&nexus, kql_verify_delete).await.unwrap();
     println!(
         "RES (should be empty):\n{}\n",
         serde_json::to_string_pretty(&response).unwrap()
