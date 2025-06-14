@@ -1,25 +1,24 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+pub use serde_json::Number;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Value {
-    String(String),
-    Uint(u64),
-    Int(i64),
-    Float(f64),
-    Bool(bool),
     Null,
+    Bool(bool),
+    Number(Number),
+    String(String),
 }
 
 impl std::fmt::Display for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Value::String(s) => write!(f, "\"{}\"", s),
-            Value::Uint(i) => write!(f, "{}", i),
-            Value::Int(i) => write!(f, "{}", i),
-            Value::Float(fl) => write!(f, "{}", fl),
-            Value::Bool(b) => write!(f, "{}", b),
             Value::Null => write!(f, "null"),
+            Value::Bool(b) => write!(f, "{}", b),
+            Value::Number(n) => write!(f, "{}", n),
+            // format as JSON string (format_escaped_str)
+            Value::String(s) => write!(f, "{}", serde_json::Value::String(s.clone())),
         }
     }
 }
@@ -95,12 +94,7 @@ pub enum WhereClause {
     Filter(FilterCondition),
     Not(Vec<WhereClause>),
     Optional(Vec<WhereClause>),
-    Union {
-        left: Vec<WhereClause>,
-        right: Vec<WhereClause>,
-    },
-    // For simplicity, Subquery and BIND are treated as advanced features
-    // that might be handled by a more complex executor or parser extension.
+    Union(Vec<Vec<WhereClause>>),
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -133,7 +127,7 @@ pub struct AttributePattern {
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct FilterCondition {
-    pub expression: String, // For simplicity, we parse the expression as a string
+    pub expression: String, // TODO, For simplicity, we parse the expression as a string
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -199,18 +193,16 @@ pub enum DeleteStatement {
         attributes: Vec<String>,
         from: OnClause,
     },
+    DeleteConcept {
+        on: OnClause,
+    },
     DeleteProposition {
         subject: OnClause,
         predicate: String,
         object: OnClause,
     },
     // For `DELETE PROPOSITIONS WHERE`, we can reuse the KQL WHERE parser.
-    DeletePropositionsWhere {
-        where_clauses: Vec<WhereClause>,
-    },
-    DeleteConcept {
-        on: OnClause,
-    },
+    DeletePropositionsWhere(Vec<WhereClause>),
 }
 
 // --- META AST ---

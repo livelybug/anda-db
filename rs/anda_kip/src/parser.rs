@@ -1,5 +1,5 @@
 use nom::{
-    IResult,
+    IResult, Parser,
     branch::alt,
     combinator::{all_consuming, map},
 };
@@ -29,5 +29,17 @@ pub fn parse_kip_command(input: &str) -> IResult<&str, Command> {
         map(kql::parse_kql_query, Command::Kql),
         map(kml::parse_kml_statement, Command::Kml),
         map(meta::parse_meta_command, Command::Meta),
-    ))))(input)
+    ))))
+    .parse(input)
+}
+
+pub fn quote_str(s: &str) -> String {
+    serde_json::Value::String(s.to_string()).to_string()
+}
+
+pub fn unquote_str(s: &str) -> Option<String> {
+    match common::quoted_string(s) {
+        Ok((res, value)) if res.is_empty() => Some(value),
+        _ => None,
+    }
 }
