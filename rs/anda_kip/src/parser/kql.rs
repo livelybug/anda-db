@@ -331,7 +331,7 @@ mod tests {
         "#;
 
         let result = parse_kql_query(input);
-        println!("Result: {:?}", result);
+        println!("Result: {result:?}");
         assert!(result.is_ok());
 
         let (_, query) = result.unwrap();
@@ -416,16 +416,16 @@ mod tests {
         ];
 
         for (func_str, expected_func) in functions {
-            let input = format!("FIND({}) WHERE {{ ?x(type: \"Test\") }}", func_str);
+            let input = format!("FIND({func_str}) WHERE {{ ?x(type: \"Test\") }}");
             let result = parse_kql_query(&input);
-            assert!(result.is_ok(), "Failed to parse: {}", func_str);
+            assert!(result.is_ok(), "Failed to parse: {func_str}");
 
             let (_, query) = result.unwrap();
             match &query.find_clause.expressions[0] {
                 FindExpression::Aggregation { func, .. } => {
                     assert_eq!(*func, expected_func);
                 }
-                _ => panic!("Expected aggregation for: {}", func_str),
+                _ => panic!("Expected aggregation for: {func_str}"),
             }
         }
     }
@@ -877,7 +877,7 @@ mod tests {
 
         for input in invalid_inputs {
             let result = parse_kql_query(input);
-            assert!(result.is_err(), "Should fail to parse: {}", input);
+            assert!(result.is_err(), "Should fail to parse: {input}");
         }
     }
 
@@ -896,7 +896,7 @@ mod tests {
         "#;
 
         let result = parse_kql_query(input_with_extra_whitespace);
-        println!("Result: {:?}", result);
+        println!("Result: {result:?}");
 
         assert!(result.is_ok());
 

@@ -452,8 +452,8 @@ where
                 if !self.config.allow_duplicates {
                     return Err(BTreeError::AlreadyExists {
                         name: self.name.clone(),
-                        id: format!("{:?}", doc_id),
-                        value: format!("{:?}", field_value),
+                        id: format!("{doc_id:?}"),
+                        value: format!("{field_value:?}"),
                     });
                 }
 
@@ -652,8 +652,8 @@ where
                 if self.postings.contains_key(field_value) {
                     return Err(BTreeError::AlreadyExists {
                         name: self.name.clone(),
-                        id: format!("{:?}", doc_id),
-                        value: format!("{:?}", field_value),
+                        id: format!("{doc_id:?}"),
+                        value: format!("{field_value:?}"),
                     });
                 }
             }
@@ -753,13 +753,12 @@ where
                     posting.0 = next_bucket_id;
                 }
 
-                if let Some(mut ob) = self.buckets.get_mut(&old_bucket_id) {
-                    if let Some(pos) = ob.2.iter().position(|k| &field_value == k) {
+                if let Some(mut ob) = self.buckets.get_mut(&old_bucket_id)
+                    && let Some(pos) = ob.2.iter().position(|k| &field_value == k) {
                         ob.0 = ob.0.saturating_sub(size);
                         // ob.1 = true; // do not need to set dirty
                         ob.2.swap_remove(pos);
                     }
-                }
 
                 let mut new_bucket = false;
                 if let Some(mut nb) = self.buckets.get_mut(&next_bucket_id) {
@@ -908,11 +907,10 @@ where
 
                 // Remove field values that are completely removed
                 for fv in &values_to_remove {
-                    if field_values.contains(fv) {
-                        if let Some(pos) = bucket.2.iter().position(|k| k == fv) {
+                    if field_values.contains(fv)
+                        && let Some(pos) = bucket.2.iter().position(|k| k == fv) {
                             bucket.2.swap_remove(pos);
                         }
-                    }
                 }
             }
         }
@@ -1956,7 +1954,7 @@ mod tests {
 
         // 插入足够多的数据以触发 bucket 溢出
         for i in 0..100 {
-            let key = format!("key_{}", i);
+            let key = format!("key_{i}");
             let _ = index.insert(i, key, now_ms());
         }
 
@@ -1966,7 +1964,7 @@ mod tests {
 
         // 验证所有数据都可以被搜索到
         for i in 0..100 {
-            let key = format!("key_{}", i);
+            let key = format!("key_{i}");
             let result = index.search_with(&key, |ids| Some(ids.clone()));
             assert!(result.is_some());
             let ids = result.unwrap();
@@ -2045,7 +2043,7 @@ mod tests {
             BTreeIndex::new("overflow_test".to_string(), Some(small_bucket_config));
 
         // Create large values that will cause bucket overflow
-        let large_values: Vec<_> = (0..20).map(|i| format!("large_value_{}", i)).collect();
+        let large_values: Vec<_> = (0..20).map(|i| format!("large_value_{i}")).collect();
 
         let result = overflow_index.insert_array(1, large_values.clone(), now_ms());
         assert!(result.is_ok());
@@ -2059,7 +2057,7 @@ mod tests {
 
         // Verify bucket overflow occurred and created multiple buckets
         let stats = overflow_index.stats();
-        println!("Overflow index stats: {:?}", stats);
+        println!("Overflow index stats: {stats:?}");
         assert!(stats.max_bucket_id > 0);
 
         // Verify all values can still be found
@@ -2173,7 +2171,7 @@ mod tests {
             BTreeIndex::new("overflow_test".to_string(), Some(small_bucket_config));
 
         // 插入足够多的数据以触发桶溢出
-        let large_values: Vec<_> = (0..20).map(|i| format!("large_value_{}", i)).collect();
+        let large_values: Vec<_> = (0..20).map(|i| format!("large_value_{i}")).collect();
         let _ = overflow_index.insert_array(1, large_values.clone(), now_ms());
         let _ = overflow_index.insert_array(2, large_values.clone(), now_ms());
 
@@ -2248,19 +2246,17 @@ mod tests {
             for i in 0..n_keys_per_thread {
                 let key = format!("key_{}", base + i);
                 let result = index.search_with(&key, |ids| Some(ids.clone()));
-                assert!(result.is_some(), "key {} not found", key);
+                assert!(result.is_some(), "key {key} not found");
 
                 // 验证该键包含5个文档ID
                 let ids = result.unwrap();
-                assert_eq!(ids.len(), 5, "key {} should have 5 doc IDs", key);
+                assert_eq!(ids.len(), 5, "key {key} should have 5 doc IDs");
 
                 for j in 0..5 {
                     let doc_id = (base + j) as u64;
                     assert!(
                         ids.contains(&doc_id),
-                        "id {} not found for key {}",
-                        doc_id,
-                        key
+                        "id {doc_id} not found for key {key}"
                     );
                 }
             }
@@ -2269,7 +2265,7 @@ mod tests {
         // 记录当前索引的大小
         let size_before_remove = index.len();
         assert_eq!(size_before_remove, n_threads * n_keys_per_thread);
-        println!("索引大小 (删除前): {}", size_before_remove);
+        println!("索引大小 (删除前): {size_before_remove}");
 
         // 第二阶段：多线程同时批量删除数据
         let barrier = Arc::new(Barrier::new(n_threads));
@@ -2293,8 +2289,7 @@ mod tests {
                     let removed = index.remove_array(doc_id, items.clone(), now_ms());
                     assert_eq!(
                         removed, n_keys_per_thread,
-                        "应删除 {} 个键，实际删除 {}",
-                        n_keys_per_thread, removed
+                        "应删除 {n_keys_per_thread} 个键，实际删除 {removed}"
                     );
                 }
             }));
@@ -2311,20 +2306,20 @@ mod tests {
             for i in 0..n_keys_per_thread {
                 let key = format!("key_{}", base + i);
                 let result = index.search_with(&key, |ids| Some(ids.clone()));
-                assert!(result.is_some(), "删除后键 {} 不应该被完全移除", key);
+                assert!(result.is_some(), "删除后键 {key} 不应该被完全移除");
 
                 let ids = result.unwrap();
-                assert_eq!(ids.len(), 2, "删除后键 {} 应该有2个文档ID", key);
+                assert_eq!(ids.len(), 2, "删除后键 {key} 应该有2个文档ID");
 
                 // 验证文档ID 0,1,2已被删除，3,4仍然存在
                 for j in 0..3 {
                     let doc_id = (base + j) as u64;
-                    assert!(!ids.contains(&doc_id), "文档ID {} 应该已被删除", doc_id);
+                    assert!(!ids.contains(&doc_id), "文档ID {doc_id} 应该已被删除");
                 }
 
                 for j in 3..5 {
                     let doc_id = (base + j) as u64;
-                    assert!(ids.contains(&doc_id), "文档ID {} 应该仍然存在", doc_id);
+                    assert!(ids.contains(&doc_id), "文档ID {doc_id} 应该仍然存在");
                 }
             }
         }
@@ -2360,7 +2355,7 @@ mod tests {
             for i in 0..n_keys_per_thread {
                 let key = format!("key_{}", base + i);
                 let result = index.search_with(&key, |ids| Some(ids.clone()));
-                assert!(result.is_none(), "键 {} 应该已完全从索引中移除", key);
+                assert!(result.is_none(), "键 {key} 应该已完全从索引中移除");
             }
         }
     }

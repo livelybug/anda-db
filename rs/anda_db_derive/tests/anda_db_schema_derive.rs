@@ -110,7 +110,7 @@ mod tests {
     #[test]
     fn test_generated_schema() {
         let schema = TestUser::schema().unwrap();
-        println!("{:#?}", schema);
+        println!("{schema:#?}");
 
         // 验证字段数量 (包含 _id 字段)
         assert_eq!(schema.len(), 7);

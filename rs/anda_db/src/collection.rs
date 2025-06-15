@@ -173,7 +173,7 @@ impl Collection {
 
     /// Generates the storage path for a document with the given ID
     fn doc_path(id: DocumentId) -> String {
-        format!("data/{}.cbor", id)
+        format!("data/{id}.cbor")
     }
 
     /// Generates the storage path for document segments in the given bucket
@@ -1162,19 +1162,17 @@ impl Collection {
             for index in &self.btree_indexes {
                 let field_name = index.field_name();
                 if fields_keys.contains(field_name) {
-                    if let Some(old_value) = old_values.get(field_name) {
-                        if old_value != &FieldValue::Null {
+                    if let Some(old_value) = old_values.get(field_name)
+                        && old_value != &FieldValue::Null {
                             index.remove(id, old_value, now_ms);
                             btree_removed.insert(index, old_value);
                         }
-                    }
 
-                    if let Some(new_value) = doc.get_field(field_name) {
-                        if new_value != &FieldValue::Null {
+                    if let Some(new_value) = doc.get_field(field_name)
+                        && new_value != &FieldValue::Null {
                             index.insert(id, new_value, now_ms)?;
                             btree_inserted.insert(index, new_value);
                         }
-                    }
                 }
             }
 
@@ -1892,7 +1890,7 @@ mod tests {
             tags: tags.iter().map(|s| s.to_string()).collect(),
             metadata: BTreeMap::new(),
             segments: vec![
-                Segment::new(format!("This is a segment for {}", name), None)
+                Segment::new(format!("This is a segment for {name}"), None)
                     .with_vec_f32(vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]),
             ],
         }
@@ -2331,7 +2329,7 @@ mod tests {
         for i in 0..10 {
             let collection_clone = collection.clone();
             let handle = tokio::spawn(async move {
-                let mut doc = create_test_doc(0, &format!("Person{}", i), 20 + i, vec!["tag"]);
+                let mut doc = create_test_doc(0, &format!("Person{i}"), 20 + i, vec!["tag"]);
                 collection_clone.obtain_segment_ids(&mut doc.segments);
                 let doc_obj = Document::try_from(collection_clone.schema(), &doc).unwrap();
                 collection_clone.add(doc_obj).await

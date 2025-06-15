@@ -335,8 +335,8 @@ impl<T: ObjectStore> ObjectStore for EncryptedStore<T> {
         let rt = self
             .inner
             .update_meta_with(location, async |meta| {
-                if self.inner.conditional_put {
-                    if let PutMode::Update(v) = &opts.mode {
+                if self.inner.conditional_put
+                    && let PutMode::Update(v) = &opts.mode {
                         match meta {
                             Some(m) => {
                                 if m.e_tag != v.e_tag {
@@ -360,7 +360,6 @@ impl<T: ObjectStore> ObjectStore for EncryptedStore<T> {
 
                         opts.mode = PutMode::Overwrite;
                     }
-                }
 
                 let full_path = self.inner.full_path(location);
                 let payload = Bytes::from(payload);

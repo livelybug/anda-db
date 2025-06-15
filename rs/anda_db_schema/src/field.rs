@@ -82,9 +82,9 @@ impl fmt::Debug for FieldType {
             FieldType::Text => write!(f, "Text"),
             FieldType::Json => write!(f, "Json"),
             FieldType::Vector => write!(f, "Vector"),
-            FieldType::Array(v) => write!(f, "Array({:?})", v),
-            FieldType::Map(v) => write!(f, "Map({:?})", v),
-            FieldType::Option(v) => write!(f, "Option({:?})", v),
+            FieldType::Array(v) => write!(f, "Array({v:?})"),
+            FieldType::Map(v) => write!(f, "Map({v:?})"),
+            FieldType::Option(v) => write!(f, "Option({v:?})"),
         }
     }
 }
@@ -173,8 +173,7 @@ impl FieldType {
                             ft.validate(fv)?;
                         } else {
                             return Err(SchemaError::FieldValue(format!(
-                                "no value at array[{}], expected type {:?}",
-                                i, ft,
+                                "no value at array[{i}], expected type {ft:?}",
                             )));
                         }
                     }
@@ -193,7 +192,7 @@ impl FieldType {
                     }
 
                     if let Some(k) = values.keys().find(|k| !types.contains_key(*k)) {
-                        return Err(SchemaError::FieldValue(format!("invalid map key {:?}", k)));
+                        return Err(SchemaError::FieldValue(format!("invalid map key {k:?}")));
                     }
 
                     for (k, ft) in types.iter() {
@@ -204,8 +203,7 @@ impl FieldType {
 
                         rt.map_err(|err| {
                             SchemaError::FieldValue(format!(
-                                "invalid map value at key {:?}, error: {}",
-                                k, err
+                                "invalid map value at key {k:?}, error: {err}"
                             ))
                         })?;
                     }
@@ -219,8 +217,7 @@ impl FieldType {
                 ft.validate(val)
             }
             _ => Err(SchemaError::FieldValue(format!(
-                "expected type {:?}, got value {:?}",
-                self, value
+                "expected type {self:?}, got value {value:?}"
             ))),
         }
     }
@@ -637,17 +634,17 @@ impl fmt::Debug for FieldValue {
     /// Debug formatting for FieldValue
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            FieldValue::Bool(v) => write!(f, "Bool({})", v),
-            FieldValue::I64(v) => write!(f, "I64({})", v),
-            FieldValue::U64(v) => write!(f, "U64({})", v),
-            FieldValue::F64(v) => write!(f, "F64({})", v),
-            FieldValue::F32(v) => write!(f, "F32({})", v),
-            FieldValue::Bytes(v) => write!(f, "Bytes({:?})", v),
-            FieldValue::Text(v) => write!(f, "Text({:?})", v),
-            FieldValue::Json(v) => write!(f, "Json({:?})", v),
-            FieldValue::Vector(v) => write!(f, "Vector({:?})", v),
-            FieldValue::Array(v) => write!(f, "Array({:?})", v),
-            FieldValue::Map(v) => write!(f, "Map({:?})", v),
+            FieldValue::Bool(v) => write!(f, "Bool({v})"),
+            FieldValue::I64(v) => write!(f, "I64({v})"),
+            FieldValue::U64(v) => write!(f, "U64({v})"),
+            FieldValue::F64(v) => write!(f, "F64({v})"),
+            FieldValue::F32(v) => write!(f, "F32({v})"),
+            FieldValue::Bytes(v) => write!(f, "Bytes({v:?})"),
+            FieldValue::Text(v) => write!(f, "Text({v:?})"),
+            FieldValue::Json(v) => write!(f, "Json({v:?})"),
+            FieldValue::Vector(v) => write!(f, "Vector({v:?})"),
+            FieldValue::Array(v) => write!(f, "Array({v:?})"),
+            FieldValue::Map(v) => write!(f, "Map({v:?})"),
             FieldValue::Null => write!(f, "Null"),
         }
     }
@@ -881,7 +878,7 @@ impl FieldValue {
                             .into_iter()
                             .map(|(k, v)| {
                                 let k = k.into_text().map_err(|v| {
-                                    SchemaError::FieldValue(format!("invalid map key: {:?}", v))
+                                    SchemaError::FieldValue(format!("invalid map key: {v:?}"))
                                 })?;
                                 Ok::<_, SchemaError>((k, FieldValue::try_from(v)?))
                             })
@@ -894,12 +891,11 @@ impl FieldValue {
                 let mut vals: BTreeMap<String, FieldValue> = BTreeMap::new();
                 for (k, v) in values {
                     let k = k.into_text().map_err(|v| {
-                        SchemaError::FieldValue(format!("invalid map key: {:?}", v))
+                        SchemaError::FieldValue(format!("invalid map key: {v:?}"))
                     })?;
                     if vals.contains_key(&k) {
                         return Err(SchemaError::FieldValue(format!(
-                            "duplicate map key {:?}",
-                            k
+                            "duplicate map key {k:?}"
                         )));
                     }
 
@@ -913,8 +909,7 @@ impl FieldValue {
                         None => match types.get(&k) {
                             None => {
                                 return Err(SchemaError::FieldValue(format!(
-                                    "invalid map key {:?}",
-                                    k
+                                    "invalid map key {k:?}"
                                 )));
                             }
                             Some(ft) => {
@@ -1003,11 +998,10 @@ impl FieldValue {
     where
         &'a T: TryFrom<&'a FieldValue>,
     {
-        if let Fv::Map(m) = self {
-            if let Some(v) = m.get(field) {
+        if let Fv::Map(m) = self
+            && let Some(v) = m.get(field) {
                 return v.try_into().ok();
             }
-        }
         None
     }
 }
@@ -1213,15 +1207,15 @@ mod tests {
         assert_eq!(format!("{:?}", FieldType::Vector), "Vector");
 
         let array_type = FieldType::Array(vec![FieldType::U64]);
-        assert_eq!(format!("{:?}", array_type), "Array([U64])");
+        assert_eq!(format!("{array_type:?}"), "Array([U64])");
 
         let mut map = BTreeMap::new();
         map.insert("key".to_string(), FieldType::Text);
         let map_type = FieldType::Map(map);
-        assert_eq!(format!("{:?}", map_type), "Map({\"key\": Text})");
+        assert_eq!(format!("{map_type:?}"), "Map({\"key\": Text})");
 
         let option_type = FieldType::Option(Box::new(FieldType::Bool));
-        assert_eq!(format!("{:?}", option_type), "Option(Bool)");
+        assert_eq!(format!("{option_type:?}"), "Option(Bool)");
     }
 
     #[test]
@@ -1242,7 +1236,7 @@ mod tests {
 
         let json_val = FieldValue::Json(json!({"name": "test"}));
         assert_eq!(
-            format!("{:?}", json_val),
+            format!("{json_val:?}"),
             "Json(Object {\"name\": String(\"test\")})"
         );
 
@@ -1252,12 +1246,12 @@ mod tests {
         );
 
         let array_val = FieldValue::Array(vec![FieldValue::U64(1), FieldValue::U64(2)]);
-        assert_eq!(format!("{:?}", array_val), "Array([U64(1), U64(2)])");
+        assert_eq!(format!("{array_val:?}"), "Array([U64(1), U64(2)])");
 
         let mut map = BTreeMap::new();
         map.insert("key".to_string(), FieldValue::Text("value".to_string()));
         let map_val = FieldValue::Map(map);
-        assert_eq!(format!("{:?}", map_val), "Map({\"key\": Text(\"value\")})");
+        assert_eq!(format!("{map_val:?}"), "Map({\"key\": Text(\"value\")})");
 
         assert_eq!(format!("{:?}", FieldValue::Null), "Null");
     }
@@ -1621,7 +1615,7 @@ mod tests {
         // 测试 FieldType 序列化和反序列化
         let field_type = Ft::Array(vec![Ft::U64, Ft::Text]);
         let serialized = serde_json::to_string(&field_type).unwrap();
-        println!("Serialized FieldType: {}", serialized);
+        println!("Serialized FieldType: {serialized}");
         let deserialized: Ft = serde_json::from_str(&serialized).unwrap();
         assert_eq!(field_type, deserialized);
         let mut serialized = Vec::new();

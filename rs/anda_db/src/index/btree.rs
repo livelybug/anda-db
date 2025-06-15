@@ -138,7 +138,7 @@ impl BTree {
             _ => {
                 return Err(DBError::Index {
                     name,
-                    source: format!("BTree: unsupported field: {:?}", field).into(),
+                    source: format!("BTree: unsupported field: {field:?}").into(),
                 });
             }
         };
@@ -172,7 +172,7 @@ impl BTree {
             }
             _ => Err(DBError::Index {
                 name,
-                source: format!("BTree: unsupported field: {:?}", field).into(),
+                source: format!("BTree: unsupported field: {field:?}").into(),
             }),
         }
     }

@@ -9,7 +9,7 @@ pub trait Executor {
 
 pub async fn execute_kip(executor: &impl Executor, command: &str) -> Result<Response, KipError> {
     let (_, cmd) = parse_kip_command(command)
-        .map_err(|e| KipError::Parse(format!("Failed to parse command: {}", e)))?;
+        .map_err(|e| KipError::Parse(format!("Failed to parse command: {e}")))?;
 
     executor.execute(cmd).await
 }

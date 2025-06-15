@@ -252,7 +252,7 @@ mod tests {
             current_max_layer = level.max(current_max_layer);
             counts[level as usize] += 1;
         }
-        println!("Max layer: {}", current_max_layer);
+        println!("Max layer: {current_max_layer}");
 
         // 验证层级分布是递减的
         for i in 1..16 {
@@ -261,7 +261,7 @@ mod tests {
 
         // 验证最底层占比合理
         let bottom_ratio = counts[0] as f64 / SAMPLES as f64;
-        println!("Bottom layer ratio: {}", bottom_ratio);
+        println!("Bottom layer ratio: {bottom_ratio}");
         assert!(bottom_ratio >= 0.5);
     }
 
@@ -310,9 +310,7 @@ mod tests {
         let scalar_euclidean = euclidean_distance_scalar(&v1, &v2);
         assert!(
             (simd_euclidean - scalar_euclidean).abs() < 1e-4,
-            "欧几里得距离: SIMD={}, 标量={}",
-            simd_euclidean,
-            scalar_euclidean
+            "欧几里得距离: SIMD={simd_euclidean}, 标量={scalar_euclidean}"
         );
 
         // 测试余弦距离
@@ -320,9 +318,7 @@ mod tests {
         let scalar_cosine = cosine_distance_scalar(&v1, &v2);
         assert!(
             (simd_cosine - scalar_cosine).abs() < 1e-4,
-            "余弦距离: SIMD={}, 标量={}",
-            simd_cosine,
-            scalar_cosine
+            "余弦距离: SIMD={simd_cosine}, 标量={scalar_cosine}"
         );
 
         // 测试内积
@@ -330,9 +326,7 @@ mod tests {
         let scalar_inner = inner_product_scalar(&v1, &v2);
         assert!(
             (simd_inner - scalar_inner).abs() < 1e-4,
-            "内积: SIMD={}, 标量={}",
-            simd_inner,
-            scalar_inner
+            "内积: SIMD={simd_inner}, 标量={scalar_inner}"
         );
 
         // 测试曼哈顿距离
@@ -340,9 +334,7 @@ mod tests {
         let scalar_manhattan = manhattan_distance_scalar(&v1, &v2);
         assert!(
             (simd_manhattan - scalar_manhattan).abs() < 1e-4,
-            "曼哈顿距离: SIMD={}, 标量={}",
-            simd_manhattan,
-            scalar_manhattan
+            "曼哈顿距离: SIMD={simd_manhattan}, 标量={scalar_manhattan}"
         );
     }
 }

@@ -121,11 +121,10 @@ pub fn collect_tokens<T: Tokenizer>(
     let mut stream = tokenizer.token_stream(text);
     let mut tokens = HashMap::new();
     while let Some(token) = stream.next() {
-        if let Some(inclusive) = inclusive {
-            if !inclusive.contains_key(&token.text) {
+        if let Some(inclusive) = inclusive
+            && !inclusive.contains_key(&token.text) {
                 continue;
             }
-        }
 
         *tokens.entry(token.text.to_owned()).or_default() += 1;
     }

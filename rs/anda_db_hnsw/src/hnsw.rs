@@ -521,13 +521,12 @@ impl HnswIndex {
                 1, // Only need the closest one for entry point search
                 &mut distance_cache,
             )?;
-            if let Some(&(nearest_id, nearest_dist, nearest_layer)) = nearest.first() {
-                if nearest_dist < entry_point_dist {
+            if let Some(&(nearest_id, nearest_dist, nearest_layer)) = nearest.first()
+                && nearest_dist < entry_point_dist {
                     entry_point_node = nearest_id;
                     entry_point_layer = nearest_layer;
                     entry_point_dist = nearest_dist;
                 }
-            }
         }
 
         #[allow(clippy::type_complexity)]
@@ -567,12 +566,10 @@ impl HnswIndex {
             if let Some(closest_in_layer) = selected_neighbors
                 .iter()
                 .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(cmp::Ordering::Equal))
-            {
-                if closest_in_layer.1 < entry_point_dist {
+                && closest_in_layer.1 < entry_point_dist {
                     entry_point_node = closest_in_layer.0;
                     entry_point_dist = closest_in_layer.1;
                 }
-            }
 
             // 记录新节点需要连接的邻居，并收集反向连接信息
             for (neighbor_id, dist, layer) in selected_neighbors {
@@ -687,15 +684,14 @@ impl HnswIndex {
                 ) {
                     // select_neighbors 会读取 self.nodes
                     // 修改 self.nodes 必须在 select_neighbors 之后
-                    if let Some(mut node) = self.nodes.get_mut(&neighbor_id) {
-                        if let Some(n_layer) = node.neighbors.get_mut(layer as usize) {
+                    if let Some(mut node) = self.nodes.get_mut(&neighbor_id)
+                        && let Some(n_layer) = node.neighbors.get_mut(layer as usize) {
                             // Update neighbor connections
                             *n_layer = selected
                                 .into_iter()
                                 .map(|(id, dist, _)| (id, bf16::from_f32(dist)))
                                 .collect();
                         }
-                    }
                 }
             }
         }
@@ -810,13 +806,12 @@ impl HnswIndex {
                 1,
                 &mut distance_cache,
             )?;
-            if let Some(node) = nearest.first() {
-                if node.1 < current_dist {
+            if let Some(node) = nearest.first()
+                && node.1 < current_dist {
                     current_dist = node.1;
                     current_node = node.0;
                     current_node_layer = node.2;
                 }
-            }
         }
 
         // 在底层搜索最近的邻居
@@ -912,15 +907,14 @@ impl HnswIndex {
 
         // Get nearest candidates
         while let Some((Reverse(OrderedFloat(dist)), point, _)) = candidates.pop() {
-            if let Some((OrderedFloat(max_dist), _, _)) = results.peek() {
-                if &dist > max_dist && results.len() >= ef {
+            if let Some((OrderedFloat(max_dist), _, _)) = results.peek()
+                && &dist > max_dist && results.len() >= ef {
                     break;
                 };
-            }
 
             // Check neighbors of current node
-            if let Some(node) = self.nodes.get(&point) {
-                if let Some(neighbors) = node.neighbors.get(layer as usize) {
+            if let Some(node) = self.nodes.get(&point)
+                && let Some(neighbors) = node.neighbors.get(layer as usize) {
                     for &(neighbor, _) in neighbors {
                         if !visited.contains(&neighbor) {
                             visited.insert(neighbor);
@@ -964,7 +958,7 @@ impl HnswIndex {
                                         }
                                     }
                                     Err(e) => {
-                                        log::warn!("Distance calculation error: {:?}", e);
+                                        log::warn!("Distance calculation error: {e:?}");
                                         distance_cache.insert(neighbor, f32::MAX);
                                     }
                                 };
@@ -972,7 +966,6 @@ impl HnswIndex {
                         }
                     }
                 }
-            }
         }
 
         Ok(results
@@ -1338,7 +1331,7 @@ mod tests {
 
         let data = index.get_node_with(1, serialize_node).unwrap();
         let node: HnswNode = ciborium::from_reader(&data[..]).unwrap();
-        println!("Node data: {:?}", node);
+        println!("Node data: {node:?}");
         assert_eq!(node.vector, vec![bf16::from_f32(1.0), bf16::from_f32(1.0)]);
         assert!(!node.neighbors[0].is_empty());
 
@@ -1346,7 +1339,7 @@ mod tests {
         let results = index.search_f32(&[1.1, 1.1], 2).unwrap();
         assert_eq!(results.len(), 2);
         assert!(results[0].1 < results[1].1);
-        println!("Search results: {:?}", results);
+        println!("Search results: {results:?}");
 
         // 测试持久化
         let mut metadata = Vec::new();
@@ -1651,8 +1644,7 @@ mod tests {
             // 允许一定的误差范围
             assert!(
                 (orig - converted).abs() < 0.1,
-                "Too much precision loss at index {}",
-                i
+                "Too much precision loss at index {i}"
             );
         }
     }

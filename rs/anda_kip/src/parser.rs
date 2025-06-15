@@ -39,7 +39,7 @@ pub fn quote_str(s: &str) -> String {
 
 pub fn unquote_str(s: &str) -> Option<String> {
     match common::quoted_string(s) {
-        Ok((res, value)) if res.is_empty() => Some(value),
+        Ok(("", value)) => Some(value),
         _ => None,
     }
 }

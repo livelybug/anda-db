@@ -145,7 +145,7 @@ impl Document {
 
         Cbor::Map(doc)
             .deserialized()
-            .map_err(|err| SchemaError::Serialization(format!("Failed to deserialize: {}", err)))
+            .map_err(|err| SchemaError::Serialization(format!("Failed to deserialize: {err}")))
     }
 
     /// Gets the document's unique identifier.
@@ -203,8 +203,7 @@ impl Document {
             })
         } else {
             Err(SchemaError::Validation(format!(
-                "field {:?} not found in schema",
-                name
+                "field {name:?} not found in schema"
             )))
         }
     }
@@ -225,8 +224,7 @@ impl Document {
         }
 
         Err(SchemaError::Validation(format!(
-            "field {:?} not found in schema",
-            name
+            "field {name:?} not found in schema"
         )))
     }
 
@@ -263,14 +261,12 @@ impl Document {
                 return value.to_owned().deserialized();
             } else {
                 return Err(SchemaError::Validation(format!(
-                    "field {:?} not found in document",
-                    name
+                    "field {name:?} not found in document"
                 )));
             }
         }
         Err(SchemaError::Validation(format!(
-            "field {:?} not found in schema",
-            name
+            "field {name:?} not found in schema"
         )))
     }
 
@@ -351,7 +347,7 @@ mod tests {
     fn test_document_with_id() {
         let schema = Arc::new(TestUser::schema().unwrap());
         let id = 99u64;
-        println!("Schema: {:#?}", schema);
+        println!("Schema: {schema:#?}");
         // Schema: Schema {
         //     idx: {
         //         0,

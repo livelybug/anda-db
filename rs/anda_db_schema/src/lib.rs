@@ -42,8 +42,7 @@ pub fn validate_field_name(s: &str) -> Result<(), SchemaError> {
     for c in s.chars() {
         if !matches!(c, 'a'..='z' | '0'..='9' | '_' ) {
             return Err(SchemaError::FieldName(format!(
-                "Invalid character {:?} in {:?}",
-                c, s
+                "Invalid character {c:?} in {s:?}"
             )));
         }
     }

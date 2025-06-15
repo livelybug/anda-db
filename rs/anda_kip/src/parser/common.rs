@@ -290,8 +290,8 @@ mod tests {
         assert_eq!(kip_value("42"), Ok(("", Value::Number(Number::from(42)))));
         assert_eq!(kip_value("-42"), Ok(("", Value::Number(Number::from(-42)))));
         assert_eq!(
-            kip_value("3.14"),
-            Ok(("", Value::Number(Number::from_f64(3.14f64).unwrap())))
+            kip_value("0.618"),
+            Ok(("", Value::Number(Number::from_f64(0.618f64).unwrap())))
         );
         assert_eq!(
             kip_value(r#""hello""#),

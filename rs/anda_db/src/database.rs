@@ -210,8 +210,7 @@ impl AndaDB {
         log::info!(
             action = "set_read_only",
             database = self.name;
-            "Database is set to read-only: {}",
-            read_only
+            "Database is set to read-only: {read_only}"
         );
 
         for collection in self.collections.read().values() {

@@ -436,18 +436,18 @@ impl Storage {
     where
         T: DeserializeOwned,
     {
-        if let Some(cache) = &self.inner.cache {
-            if let Some(arc) = cache.get(path).await {
-                let doc: T = from_reader(&arc.0[..]).map_err(|err| DBError::Serialization {
-                    name: self.inner.base_path.to_string(),
-                    source: err.into(),
-                })?;
-                self.inner
-                    .stats
-                    .total_cache_get_count
-                    .fetch_add(1, Ordering::Relaxed);
-                return Ok((doc, arc.1.clone()));
-            }
+        if let Some(cache) = &self.inner.cache
+            && let Some(arc) = cache.get(path).await
+        {
+            let doc: T = from_reader(&arc.0[..]).map_err(|err| DBError::Serialization {
+                name: self.inner.base_path.to_string(),
+                source: err.into(),
+            })?;
+            self.inner
+                .stats
+                .total_cache_get_count
+                .fetch_add(1, Ordering::Relaxed);
+            return Ok((doc, arc.1.clone()));
         }
 
         let (bytes, version) = self.inner_fetch(path).await?;
@@ -456,13 +456,13 @@ impl Storage {
             source: err.into(),
         })?;
 
-        if let Some(cache) = &self.inner.cache {
-            if bytes.len() < self.inner.max_small_object_size {
-                // Cache the document if it is small enough
-                cache
-                    .insert(path.clone(), Arc::new((bytes, version.clone())))
-                    .await;
-            }
+        if let Some(cache) = &self.inner.cache
+            && bytes.len() < self.inner.max_small_object_size
+        {
+            // Cache the document if it is small enough
+            cache
+                .insert(path.clone(), Arc::new((bytes, version.clone())))
+                .await;
         }
 
         Ok((doc, version))
@@ -685,7 +685,7 @@ impl Storage {
         &self,
         prefix: Option<&str>,
         offset: Option<&str>,
-    ) -> BoxStream<Result<(T, ObjectVersion), DBError>>
+    ) -> BoxStream<'_, Result<(T, ObjectVersion), DBError>>
     where
         T: DeserializeOwned + Send,
     {
@@ -704,7 +704,8 @@ impl Storage {
         } else {
             self.inner.object_store.list(Some(&path_prefix))
         };
-        let stream = stream
+
+        (stream
             .map_err(DBError::from)
             .try_filter_map(|meta| {
                 let this = self.clone();
@@ -713,8 +714,7 @@ impl Storage {
                     Ok(Some(result))
                 }
             })
-            .boxed();
-        stream
+            .boxed()) as _
     }
 }
 
@@ -820,7 +820,7 @@ impl futures::io::AsyncWrite for SingleWriter {
                 }
                 Poll::Ready(Err(e)) => {
                     this.flushing = None;
-                    Poll::Ready(Err(io::Error::new(io::ErrorKind::Other, e)))
+                    Poll::Ready(Err(io::Error::other(e)))
                 }
                 Poll::Pending => Poll::Pending,
             }
@@ -999,7 +999,7 @@ mod tests {
             .put("doc1", &updated_doc, Some(fetched_version.clone()))
             .await
             .expect("Failed to update document");
-        println!("Updated version: {:?}", new_version);
+        println!("Updated version: {new_version:?}");
 
         // 获取更新后的文档
         let (fetched_updated_doc, _) = storage
@@ -1012,7 +1012,7 @@ mod tests {
 
         // 验证统计信息
         let stats = storage.stats();
-        println!("Stats: {:?}", stats);
+        println!("Stats: {stats:?}");
         assert_eq!(stats.total_fetch_count, 2);
         assert_eq!(stats.total_put_count, 2);
         assert_eq!(stats.total_cache_get_count, 0);

@@ -63,7 +63,7 @@ impl Schema {
     pub fn get_field_or_err(&self, name: &str) -> Result<&FieldEntry, SchemaError> {
         self.fields
             .get(name)
-            .ok_or_else(|| SchemaError::Validation(format!("field {:?} not found in schema", name)))
+            .ok_or_else(|| SchemaError::Validation(format!("field {name:?} not found in schema")))
     }
 
     /// Returns an iterator over all fields in the schema.
@@ -92,8 +92,7 @@ impl Schema {
         for idx in values.keys() {
             if !self.idx.contains(idx) {
                 return Err(SchemaError::Validation(format!(
-                    "field index {:?} not found in schema",
-                    idx
+                    "field index {idx:?} not found in schema"
                 )));
             }
         }
@@ -198,8 +197,7 @@ impl SchemaBuilder {
         };
         let entry = FieldEntry::new(field.to_string(), FieldType::Array(vec![ft]))?
             .with_description(format!(
-                "{:?} is a field of type Segment, used to store segments",
-                field
+                "{field:?} is a field of type Segment, used to store segments"
             ));
         self.add_field(entry)
     }
@@ -212,8 +210,7 @@ impl SchemaBuilder {
             FieldType::Option(Box::new(ft))
         };
         let entry = FieldEntry::new(field.to_string(), ft)?.with_description(format!(
-            "{:?} is a field of type Resource, used to store resources",
-            field
+            "{field:?} is a field of type Resource, used to store resources"
         ));
 
         self.add_field(entry)
@@ -446,7 +443,7 @@ mod tests {
 
         // 验证迭代器返回的字段
         let field_names: Vec<&str> = fields.iter().map(|f| f.name()).collect();
-        println!("Field names: {:?}", field_names);
+        println!("Field names: {field_names:?}");
         assert!(field_names.contains(&"_id"));
         assert!(field_names.contains(&"name"));
     }

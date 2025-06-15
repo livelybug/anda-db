@@ -533,13 +533,12 @@ where
                     posting.0 = next_bucket_id;
                 }
 
-                if let Some(mut ob) = self.buckets.get_mut(&old_bucket_id) {
-                    if let Some(pos) = ob.2.iter().position(|k| &token == k) {
+                if let Some(mut ob) = self.buckets.get_mut(&old_bucket_id)
+                    && let Some(pos) = ob.2.iter().position(|k| &token == k) {
                         ob.0 = ob.0.saturating_sub(size);
                         // ob.1 = true; // do not need to set dirty
                         ob.2.swap_remove(pos);
                     }
-                }
 
                 let mut new_bucket = false;
                 if let Some(mut nb) = self.buckets.get_mut(&next_bucket_id) {
@@ -633,11 +632,10 @@ where
                 // bucket.1 = true; // do not need to set dirty
                 for (token, size_decrease) in val {
                     b.0 = b.0.saturating_sub(size_decrease);
-                    if tokens_to_remove.contains(&token) {
-                        if let Some(pos) = b.2.iter().position(|k| &token == k) {
+                    if tokens_to_remove.contains(&token)
+                        && let Some(pos) = b.2.iter().position(|k| &token == k) {
                             b.2.swap_remove(pos);
                         }
-                    }
                 }
             }
         }
