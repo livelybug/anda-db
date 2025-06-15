@@ -57,11 +57,13 @@ impl<'de> de::Deserialize<'de> for FieldValue {
         let is_human_readable = deserializer.is_human_readable();
         let val = deserializer.deserialize_any(Visitor)?;
 
-        if is_human_readable
-            && let FieldValue::Text(x) = &val
-                && let Ok(decoded) = BASE64_URL_SAFE.decode(x) {
+        if is_human_readable {
+            if let FieldValue::Text(x) = &val {
+                if let Ok(decoded) = BASE64_URL_SAFE.decode(x) {
                     return Ok(FieldValue::Bytes(decoded));
                 }
+            }
+        }
         Ok(val)
     }
 }

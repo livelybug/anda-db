@@ -1162,17 +1162,19 @@ impl Collection {
             for index in &self.btree_indexes {
                 let field_name = index.field_name();
                 if fields_keys.contains(field_name) {
-                    if let Some(old_value) = old_values.get(field_name)
-                        && old_value != &FieldValue::Null {
+                    if let Some(old_value) = old_values.get(field_name) {
+                        if old_value != &FieldValue::Null {
                             index.remove(id, old_value, now_ms);
                             btree_removed.insert(index, old_value);
                         }
+                    }
 
-                    if let Some(new_value) = doc.get_field(field_name)
-                        && new_value != &FieldValue::Null {
+                    if let Some(new_value) = doc.get_field(field_name) {
+                        if new_value != &FieldValue::Null {
                             index.insert(id, new_value, now_ms)?;
                             btree_inserted.insert(index, new_value);
                         }
+                    }
                 }
             }
 

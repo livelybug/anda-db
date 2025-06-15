@@ -436,18 +436,18 @@ impl Storage {
     where
         T: DeserializeOwned,
     {
-        if let Some(cache) = &self.inner.cache
-            && let Some(arc) = cache.get(path).await
-        {
-            let doc: T = from_reader(&arc.0[..]).map_err(|err| DBError::Serialization {
-                name: self.inner.base_path.to_string(),
-                source: err.into(),
-            })?;
-            self.inner
-                .stats
-                .total_cache_get_count
-                .fetch_add(1, Ordering::Relaxed);
-            return Ok((doc, arc.1.clone()));
+        if let Some(cache) = &self.inner.cache {
+            if let Some(arc) = cache.get(path).await {
+                let doc: T = from_reader(&arc.0[..]).map_err(|err| DBError::Serialization {
+                    name: self.inner.base_path.to_string(),
+                    source: err.into(),
+                })?;
+                self.inner
+                    .stats
+                    .total_cache_get_count
+                    .fetch_add(1, Ordering::Relaxed);
+                return Ok((doc, arc.1.clone()));
+            }
         }
 
         let (bytes, version) = self.inner_fetch(path).await?;
@@ -456,13 +456,13 @@ impl Storage {
             source: err.into(),
         })?;
 
-        if let Some(cache) = &self.inner.cache
-            && bytes.len() < self.inner.max_small_object_size
-        {
-            // Cache the document if it is small enough
-            cache
-                .insert(path.clone(), Arc::new((bytes, version.clone())))
-                .await;
+        if let Some(cache) = &self.inner.cache {
+            if bytes.len() < self.inner.max_small_object_size {
+                // Cache the document if it is small enough
+                cache
+                    .insert(path.clone(), Arc::new((bytes, version.clone())))
+                    .await;
+            }
         }
 
         Ok((doc, version))
@@ -704,8 +704,7 @@ impl Storage {
         } else {
             self.inner.object_store.list(Some(&path_prefix))
         };
-
-        (stream
+        let stream = stream
             .map_err(DBError::from)
             .try_filter_map(|meta| {
                 let this = self.clone();
@@ -714,7 +713,8 @@ impl Storage {
                     Ok(Some(result))
                 }
             })
-            .boxed()) as _
+            .boxed();
+        stream
     }
 }
 

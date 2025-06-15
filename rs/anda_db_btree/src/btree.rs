@@ -753,12 +753,13 @@ where
                     posting.0 = next_bucket_id;
                 }
 
-                if let Some(mut ob) = self.buckets.get_mut(&old_bucket_id)
-                    && let Some(pos) = ob.2.iter().position(|k| &field_value == k) {
+                if let Some(mut ob) = self.buckets.get_mut(&old_bucket_id) {
+                    if let Some(pos) = ob.2.iter().position(|k| &field_value == k) {
                         ob.0 = ob.0.saturating_sub(size);
                         // ob.1 = true; // do not need to set dirty
                         ob.2.swap_remove(pos);
                     }
+                }
 
                 let mut new_bucket = false;
                 if let Some(mut nb) = self.buckets.get_mut(&next_bucket_id) {
@@ -907,10 +908,11 @@ where
 
                 // Remove field values that are completely removed
                 for fv in &values_to_remove {
-                    if field_values.contains(fv)
-                        && let Some(pos) = bucket.2.iter().position(|k| k == fv) {
+                    if field_values.contains(fv) {
+                        if let Some(pos) = bucket.2.iter().position(|k| k == fv) {
                             bucket.2.swap_remove(pos);
                         }
+                    }
                 }
             }
         }
