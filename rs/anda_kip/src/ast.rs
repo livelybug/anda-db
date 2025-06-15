@@ -111,9 +111,15 @@ pub enum PropTerm {
 }
 
 #[derive(Debug, PartialEq, Clone)]
+pub enum PredTerm {
+    Variable(String),
+    Literal(String),
+}
+
+#[derive(Debug, PartialEq, Clone)]
 pub struct PropositionPattern {
     pub subject: PropTerm,
-    pub predicate: String, // Simplified, path expressions can be added here
+    pub predicate: PredTerm,
     pub object: PropTerm,
     pub metadata_constraints: Option<Vec<KeyValue>>,
 }
@@ -127,7 +133,67 @@ pub struct AttributePattern {
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct FilterCondition {
-    pub expression: String, // TODO, For simplicity, we parse the expression as a string
+    pub expression: FilterExpression,
+    pub subquery: Option<SubqueryExpression>,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum FilterExpression {
+    // 比较运算符
+    Comparison {
+        left: FilterOperand,
+        operator: ComparisonOperator,
+        right: FilterOperand,
+    },
+    // 逻辑运算符
+    Logical {
+        left: Box<FilterExpression>,
+        operator: LogicalOperator,
+        right: Box<FilterExpression>,
+    },
+    // 一元逻辑运算符（NOT）
+    Not(Box<FilterExpression>),
+    // 函数
+    Function {
+        func: FilterFunction,
+        args: Vec<FilterOperand>,
+    },
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum FilterOperand {
+    Variable(String),
+    Literal(Value),
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum ComparisonOperator {
+    Equal,        // ==
+    NotEqual,     // !=
+    LessThan,     // <
+    GreaterThan,  // >
+    LessEqual,    // <=
+    GreaterEqual, // >=
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum LogicalOperator {
+    And, // &&
+    Or,  // ||
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum FilterFunction {
+    Contains,   // CONTAINS(?str, "sub")
+    StartsWith, // STARTS_WITH(?str, "prefix")
+    EndsWith,   // ENDS_WITH(?str, "suffix")
+    Regex,      // REGEX(?str, "pattern")
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct SubqueryExpression {
+    pub select_clause: FindClause,
+    pub where_clauses: Vec<WhereClause>,
 }
 
 #[derive(Debug, PartialEq, Clone)]

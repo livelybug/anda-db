@@ -502,11 +502,10 @@ mod tests {
 
     #[test]
     fn test_parse_delete_propositions_where() {
-        // TODO: test with PROP(?s, ?p, ?o)
         let input = r#"
         DELETE PROPOSITIONS
         WHERE {
-            PROP(?s, "*", ?o) { source: "untrusted_source" }
+            PROP(?s, ?p, ?o) { source: "untrusted_source" }
         }
         "#;
 

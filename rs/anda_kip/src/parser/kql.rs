@@ -4,7 +4,7 @@ use nom::{
     bytes::complete::tag,
     character::complete::{char, multispace1},
     combinator::{map, opt},
-    multi::{many1, separated_list1},
+    multi::{fold, many1, separated_list1},
     sequence::{pair, preceded, terminated},
 };
 
@@ -144,6 +144,14 @@ fn parse_prop_term(input: &str) -> IResult<&str, PropTerm> {
     .parse(input)
 }
 
+fn parse_pred_term(input: &str) -> IResult<&str, PredTerm> {
+    alt((
+        map(variable, PredTerm::Variable),
+        map(quoted_string, PredTerm::Literal),
+    ))
+    .parse(input)
+}
+
 fn parse_prop_pattern(input: &str) -> IResult<&str, PropositionPattern> {
     map(
         (
@@ -152,7 +160,7 @@ fn parse_prop_pattern(input: &str) -> IResult<&str, PropositionPattern> {
                 parenthesized_block((
                     ws(parse_prop_term),
                     ws(char(',')),
-                    ws(quoted_string), // Simplified predicate
+                    ws(parse_pred_term),
                     ws(char(',')),
                     ws(parse_prop_term),
                 )),
@@ -175,7 +183,7 @@ fn parse_nested_prop_pattern(input: &str) -> IResult<&str, PropositionPattern> {
             parenthesized_block((
                 ws(parse_prop_term),
                 ws(char(',')),
-                ws(quoted_string), // Simplified predicate
+                ws(parse_pred_term),
                 ws(char(',')),
                 ws(parse_prop_term),
             )),
@@ -216,42 +224,162 @@ fn parse_filter_clause(input: &str) -> IResult<&str, FilterCondition> {
     map(
         preceded(
             ws(tag("FILTER")),
-            parenthesized_block(parse_filter_expression),
+            (
+                parenthesized_block(parse_filter_expression),
+                opt(braced_block(parse_subquery_expression)),
+            ),
         ),
-        |expr| FilterCondition {
-            expression: expr.trim().to_string(),
+        |(expression, subquery)| FilterCondition {
+            expression,
+            subquery,
         },
     )
     .parse(input)
 }
 
-fn parse_filter_expression(input: &str) -> IResult<&str, &str> {
-    let mut depth = 0;
-    let mut pos = 0;
-    let chars: Vec<char> = input.chars().collect();
+fn parse_filter_expression(input: &str) -> IResult<&str, FilterExpression> {
+    parse_logical_or_expression(input)
+}
 
-    while pos < chars.len() {
-        match chars[pos] {
-            '(' => depth += 1,
-            ')' => {
-                if depth == 0 {
-                    break;
-                }
-                depth -= 1;
-            }
-            _ => {}
-        }
-        pos += 1;
-    }
+// 解析逻辑 OR 表达式（最低优先级）
+fn parse_logical_or_expression(input: &str) -> IResult<&str, FilterExpression> {
+    let (input, left) = parse_logical_and_expression(input)?;
 
-    if pos == 0 {
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Char,
-        )));
-    }
+    fold(
+        0..,
+        preceded(ws(tag("||")), parse_logical_and_expression),
+        move || left.clone(),
+        |acc, right| FilterExpression::Logical {
+            left: Box::new(acc),
+            operator: LogicalOperator::Or,
+            right: Box::new(right),
+        },
+    )
+    .parse(input)
+}
 
-    Ok((&input[pos..], &input[..pos]))
+// 解析逻辑 AND 表达式
+fn parse_logical_and_expression(input: &str) -> IResult<&str, FilterExpression> {
+    let (input, left) = parse_unary_expression(input)?;
+
+    fold(
+        0..,
+        preceded(ws(tag("&&")), parse_unary_expression),
+        move || left.clone(),
+        |acc, right| FilterExpression::Logical {
+            left: Box::new(acc),
+            operator: LogicalOperator::And,
+            right: Box::new(right),
+        },
+    )
+    .parse(input)
+}
+
+// 解析一元表达式（NOT）
+fn parse_unary_expression(input: &str) -> IResult<&str, FilterExpression> {
+    alt((
+        map(preceded(ws(char('!')), parse_primary_expression), |expr| {
+            FilterExpression::Not(Box::new(expr))
+        }),
+        parse_primary_expression,
+    ))
+    .parse(input)
+}
+
+// 解析基本表达式（比较、函数、括号）
+fn parse_primary_expression(input: &str) -> IResult<&str, FilterExpression> {
+    alt((
+        // 括号表达式
+        parenthesized_block(parse_filter_expression),
+        // 函数调用
+        parse_function_expression,
+        // 比较表达式
+        parse_comparison_expression,
+    ))
+    .parse(input)
+}
+
+// 解析比较表达式
+fn parse_comparison_expression(input: &str) -> IResult<&str, FilterExpression> {
+    map(
+        (
+            parse_filter_operand,
+            ws(parse_comparison_operator),
+            parse_filter_operand,
+        ),
+        |(left, operator, right)| FilterExpression::Comparison {
+            left,
+            operator,
+            right,
+        },
+    )
+    .parse(input)
+}
+
+// 解析函数表达式
+fn parse_function_expression(input: &str) -> IResult<&str, FilterExpression> {
+    map(
+        (
+            parse_filter_function,
+            parenthesized_block(separated_list1(ws(char(',')), parse_filter_operand)),
+        ),
+        |(func, args)| FilterExpression::Function { func, args },
+    )
+    .parse(input)
+}
+
+// 解析过滤器操作数
+fn parse_filter_operand(input: &str) -> IResult<&str, FilterOperand> {
+    alt((
+        map(variable, FilterOperand::Variable),
+        map(kip_value, FilterOperand::Literal),
+    ))
+    .parse(input)
+}
+
+// 解析比较运算符
+fn parse_comparison_operator(input: &str) -> IResult<&str, ComparisonOperator> {
+    alt((
+        map(tag("=="), |_| ComparisonOperator::Equal),
+        map(tag("!="), |_| ComparisonOperator::NotEqual),
+        map(tag("<="), |_| ComparisonOperator::LessEqual),
+        map(tag(">="), |_| ComparisonOperator::GreaterEqual),
+        map(tag("<"), |_| ComparisonOperator::LessThan),
+        map(tag(">"), |_| ComparisonOperator::GreaterThan),
+    ))
+    .parse(input)
+}
+
+// 解析过滤器函数
+fn parse_filter_function(input: &str) -> IResult<&str, FilterFunction> {
+    alt((
+        map(tag("CONTAINS"), |_| FilterFunction::Contains),
+        map(tag("STARTS_WITH"), |_| FilterFunction::StartsWith),
+        map(tag("ENDS_WITH"), |_| FilterFunction::EndsWith),
+        map(tag("REGEX"), |_| FilterFunction::Regex),
+    ))
+    .parse(input)
+}
+
+// 解析子查询表达式
+fn parse_subquery_expression(input: &str) -> IResult<&str, SubqueryExpression> {
+    map(
+        (
+            map(
+                preceded(
+                    ws(tag("SELECT")),
+                    parenthesized_block(separated_list1(ws(char(',')), parse_find_expression)),
+                ),
+                |expressions| FindClause { expressions },
+            ),
+            ws(parse_where_block),
+        ),
+        |(select_clause, where_clauses)| SubqueryExpression {
+            select_clause,
+            where_clauses,
+        },
+    )
+    .parse(input)
 }
 
 fn parse_optional_clause(input: &str) -> IResult<&str, Vec<WhereClause>> {
@@ -331,7 +459,6 @@ mod tests {
         "#;
 
         let result = parse_kql_query(input);
-        println!("Result: {result:?}");
         assert!(result.is_ok());
 
         let (_, query) = result.unwrap();
@@ -358,6 +485,11 @@ mod tests {
 
         let (_, query) = result.unwrap();
         assert_eq!(query.find_clause.expressions.len(), 2);
+
+        match &query.find_clause.expressions[0] {
+            FindExpression::Variable(var) => assert_eq!(var, "drug_class"),
+            _ => panic!("Expected variable expression"),
+        }
 
         match &query.find_clause.expressions[1] {
             FindExpression::Aggregation {
@@ -472,7 +604,7 @@ mod tests {
         let (_, query) = result.unwrap();
         match &query.where_clauses[0] {
             WhereClause::Proposition(prop) => {
-                assert_eq!(prop.predicate, "treats");
+                assert_eq!(prop.predicate, PredTerm::Literal("treats".to_string()));
                 match &prop.subject {
                     PropTerm::Variable(var) => assert_eq!(var, "drug"),
                     _ => panic!("Expected variable subject"),
@@ -558,10 +690,16 @@ mod tests {
         match &query.where_clauses[0] {
             WhereClause::Proposition(prop) => match &prop.object {
                 PropTerm::NestedProp(nested) => {
-                    assert_eq!(nested.predicate, "cites_as_evidence");
+                    assert_eq!(
+                        nested.predicate,
+                        PredTerm::Literal("cites_as_evidence".to_string())
+                    );
                     match &nested.object {
                         PropTerm::NestedProp(inner_nested) => {
-                            assert_eq!(inner_nested.predicate, "treats");
+                            assert_eq!(
+                                inner_nested.predicate,
+                                PredTerm::Literal("treats".to_string())
+                            );
                         }
                         _ => panic!("Expected nested proposition"),
                     }
@@ -597,6 +735,331 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_simple_comparison_filter() {
+        let input = "FILTER(?risk < 3)";
+        let result = parse_filter_clause(input);
+        assert!(result.is_ok());
+
+        let (_, filter) = result.unwrap();
+        match filter.expression {
+            FilterExpression::Comparison {
+                left,
+                operator,
+                right,
+            } => {
+                match left {
+                    FilterOperand::Variable(var) => assert_eq!(var, "risk"),
+                    _ => panic!("Expected variable operand"),
+                }
+                assert_eq!(operator, ComparisonOperator::LessThan);
+                match right {
+                    FilterOperand::Literal(Value::Number(_)) => {}
+                    _ => panic!("Expected number literal"),
+                }
+            }
+            _ => panic!("Expected comparison expression"),
+        }
+        assert!(filter.subquery.is_none());
+    }
+
+    #[test]
+    fn test_parse_all_comparison_operators() {
+        let test_cases = vec![
+            ("FILTER(?a == ?b)", ComparisonOperator::Equal),
+            ("FILTER(?a != ?b)", ComparisonOperator::NotEqual),
+            ("FILTER(?a < ?b)", ComparisonOperator::LessThan),
+            ("FILTER(?a > ?b)", ComparisonOperator::GreaterThan),
+            ("FILTER(?a <= ?b)", ComparisonOperator::LessEqual),
+            ("FILTER(?a >= ?b)", ComparisonOperator::GreaterEqual),
+        ];
+
+        for (input, expected_op) in test_cases {
+            let result = parse_filter_clause(input);
+            assert!(result.is_ok(), "Failed to parse: {input}");
+
+            let (_, filter) = result.unwrap();
+            match filter.expression {
+                FilterExpression::Comparison { operator, .. } => {
+                    assert_eq!(operator, expected_op);
+                }
+                _ => panic!("Expected comparison expression for: {input}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_logical_and_filter() {
+        let input = "FILTER(?risk < 3 && ?score > 0.5)";
+        let result = parse_filter_clause(input);
+        assert!(result.is_ok());
+
+        let (_, filter) = result.unwrap();
+        match filter.expression {
+            FilterExpression::Logical {
+                left,
+                operator,
+                right,
+            } => {
+                assert_eq!(operator, LogicalOperator::And);
+                match left.as_ref() {
+                    FilterExpression::Comparison { operator, .. } => {
+                        assert_eq!(*operator, ComparisonOperator::LessThan);
+                    }
+                    _ => panic!("Expected comparison in left side"),
+                }
+                match right.as_ref() {
+                    FilterExpression::Comparison { operator, .. } => {
+                        assert_eq!(*operator, ComparisonOperator::GreaterThan);
+                    }
+                    _ => panic!("Expected comparison in right side"),
+                }
+            }
+            _ => panic!("Expected logical expression"),
+        }
+    }
+
+    #[test]
+    fn test_parse_logical_or_filter() {
+        let input = "FILTER(?type == \"Drug\" || ?type == \"Medicine\")";
+        let result = parse_filter_clause(input);
+        assert!(result.is_ok());
+
+        let (_, filter) = result.unwrap();
+        match filter.expression {
+            FilterExpression::Logical { operator, .. } => {
+                assert_eq!(operator, LogicalOperator::Or);
+            }
+            _ => panic!("Expected logical OR expression"),
+        }
+    }
+
+    #[test]
+    fn test_parse_not_filter() {
+        let input = "FILTER(!(?risk > 5))";
+        let result = parse_filter_clause(input);
+        assert!(result.is_ok());
+
+        let (_, filter) = result.unwrap();
+        match filter.expression {
+            FilterExpression::Not(inner) => match inner.as_ref() {
+                FilterExpression::Comparison { operator, .. } => {
+                    assert_eq!(*operator, ComparisonOperator::GreaterThan);
+                }
+                _ => panic!("Expected comparison inside NOT"),
+            },
+            _ => panic!("Expected NOT expression"),
+        }
+    }
+
+    #[test]
+    fn test_parse_function_filter() {
+        let test_cases = vec![
+            (
+                "FILTER(CONTAINS(?name, \"acid\"))",
+                FilterFunction::Contains,
+            ),
+            (
+                "FILTER(STARTS_WITH(?name, \"pre\"))",
+                FilterFunction::StartsWith,
+            ),
+            (
+                "FILTER(ENDS_WITH(?name, \"ine\"))",
+                FilterFunction::EndsWith,
+            ),
+            ("FILTER(REGEX(?name, \"[A-Z]+\"))", FilterFunction::Regex),
+        ];
+
+        for (input, expected_func) in test_cases {
+            let result = parse_filter_clause(input);
+            assert!(result.is_ok(), "Failed to parse: {input}");
+
+            let (_, filter) = result.unwrap();
+            match filter.expression {
+                FilterExpression::Function { func, args } => {
+                    assert_eq!(func, expected_func);
+                    assert_eq!(args.len(), 2);
+                    match &args[0] {
+                        FilterOperand::Variable(_) => {}
+                        _ => panic!("Expected variable as first argument"),
+                    }
+                    match &args[1] {
+                        FilterOperand::Literal(Value::String(_)) => {}
+                        _ => panic!("Expected string literal as second argument"),
+                    }
+                }
+                _ => panic!("Expected function expression for: {input}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_complex_logical_filter() {
+        let input = "FILTER(?risk < 3 && (CONTAINS(?name, \"acid\") || ?score > 0.8))";
+        let result = parse_filter_clause(input);
+        assert!(result.is_ok());
+
+        let (_, filter) = result.unwrap();
+        match filter.expression {
+            FilterExpression::Logical {
+                left,
+                operator,
+                right,
+            } => {
+                assert_eq!(operator, LogicalOperator::And);
+                // Left side should be a comparison
+                match left.as_ref() {
+                    FilterExpression::Comparison { .. } => {}
+                    _ => panic!("Expected comparison on left side"),
+                }
+                // Right side should be a logical OR
+                match right.as_ref() {
+                    FilterExpression::Logical { operator, .. } => {
+                        assert_eq!(*operator, LogicalOperator::Or);
+                    }
+                    _ => panic!("Expected logical OR on right side"),
+                }
+            }
+            _ => panic!("Expected logical AND expression"),
+        }
+    }
+
+    #[test]
+    fn test_parse_filter_with_different_operand_types() {
+        let input = "FILTER(?active == true && ?count != null && ?score >= 3.14)";
+        let result = parse_filter_clause(input);
+        assert!(result.is_ok());
+
+        let (_, filter) = result.unwrap();
+        // This tests that we can parse different value types (boolean, null, float)
+        match filter.expression {
+            FilterExpression::Logical { .. } => {}
+            _ => panic!("Expected logical expression"),
+        }
+    }
+
+    #[test]
+    fn test_parse_filter_with_subquery() {
+        let input = r#"FILTER(?symptom_count > 3) {
+            SELECT(COUNT(?symptom) AS ?symptom_count)
+            WHERE { PROP(?drug, "treats", ?symptom) }
+        }"#;
+        let result = parse_filter_clause(input);
+        assert!(result.is_ok());
+
+        let (_, filter) = result.unwrap();
+        match filter.expression {
+            FilterExpression::Comparison { .. } => {}
+            _ => panic!("Expected comparison expression"),
+        }
+        assert!(filter.subquery.is_some());
+
+        let subquery = filter.subquery.unwrap();
+        assert_eq!(subquery.select_clause.expressions.len(), 1);
+        match &subquery.select_clause.expressions[0] {
+            FindExpression::Aggregation { func, alias, .. } => {
+                assert_eq!(*func, AggregationFunction::Count);
+                assert_eq!(alias, "symptom_count");
+            }
+            _ => panic!("Expected aggregation in subquery"),
+        }
+        assert_eq!(subquery.where_clauses.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_operator_precedence() {
+        // Test that AND has higher precedence than OR
+        let input = "FILTER(?a == 1 || ?b == 2 && ?c == 3)";
+        let result = parse_filter_clause(input);
+        assert!(result.is_ok());
+
+        let (_, filter) = result.unwrap();
+        match filter.expression {
+            FilterExpression::Logical {
+                operator,
+                left,
+                right,
+            } => {
+                // Should be parsed as: (?a == 1) || (?b == 2 && ?c == 3)
+                assert_eq!(operator, LogicalOperator::Or);
+                match left.as_ref() {
+                    FilterExpression::Comparison { .. } => {}
+                    _ => panic!("Expected comparison on left"),
+                }
+                match right.as_ref() {
+                    FilterExpression::Logical { operator, .. } => {
+                        assert_eq!(*operator, LogicalOperator::And);
+                    }
+                    _ => panic!("Expected AND expression on right"),
+                }
+            }
+            _ => panic!("Expected OR expression at top level"),
+        }
+    }
+
+    #[test]
+    fn test_parse_parentheses_override_precedence() {
+        // Test that parentheses can override operator precedence
+        let input = "FILTER((?a == 1 || ?b == 2) && ?c == 3)";
+        let result = parse_filter_clause(input);
+        assert!(result.is_ok());
+
+        let (_, filter) = result.unwrap();
+        match filter.expression {
+            FilterExpression::Logical {
+                operator,
+                left,
+                right,
+            } => {
+                // Should be parsed as: (?a == 1 || ?b == 2) && (?c == 3)
+                assert_eq!(operator, LogicalOperator::And);
+                match left.as_ref() {
+                    FilterExpression::Logical { operator, .. } => {
+                        assert_eq!(*operator, LogicalOperator::Or);
+                    }
+                    _ => panic!("Expected OR expression on left"),
+                }
+                match right.as_ref() {
+                    FilterExpression::Comparison { .. } => {}
+                    _ => panic!("Expected comparison on right"),
+                }
+            }
+            _ => panic!("Expected AND expression at top level"),
+        }
+    }
+
+    #[test]
+    fn test_parse_filter_error_cases() {
+        let invalid_inputs = vec![
+            "FILTER()",                 // Empty filter
+            "FILTER(?a <)",             // Incomplete comparison
+            "FILTER(?a == && ?b)",      // Invalid logical expression
+            "FILTER(UNKNOWN_FUNC(?a))", // Unknown function
+            "FILTER(?a ===== ?b)",      // Invalid operator
+            "FILTER(!)",                // NOT without expression
+        ];
+
+        for input in invalid_inputs {
+            let result = parse_filter_clause(input);
+            assert!(result.is_err(), "Should fail to parse: {input}");
+        }
+    }
+
+    #[test]
+    fn test_parse_filter_whitespace_handling() {
+        let input = "FILTER  (  ?risk   <   3   &&   CONTAINS  (  ?name  ,  \"acid\"  )  )";
+        let result = parse_filter_clause(input);
+        assert!(result.is_ok());
+
+        let (_, filter) = result.unwrap();
+        match filter.expression {
+            FilterExpression::Logical { operator, .. } => {
+                assert_eq!(operator, LogicalOperator::And);
+            }
+            _ => panic!("Expected logical expression"),
+        }
+    }
+
+    #[test]
     fn test_parse_filter_clause() {
         let input = r#"
             FIND(?drug_name)
@@ -612,9 +1075,24 @@ mod tests {
 
         let (_, query) = result.unwrap();
         match &query.where_clauses[2] {
-            WhereClause::Filter(filter) => {
-                assert_eq!(filter.expression, "?risk < 3");
-            }
+            WhereClause::Filter(filter) => match &filter.expression {
+                FilterExpression::Comparison {
+                    left,
+                    operator,
+                    right,
+                } => {
+                    match left {
+                        FilterOperand::Variable(var) => assert_eq!(var, "risk"),
+                        _ => panic!("Expected variable operand"),
+                    }
+                    assert_eq!(*operator, ComparisonOperator::LessThan);
+                    match right {
+                        FilterOperand::Literal(Value::Number(_)) => {}
+                        _ => panic!("Expected number literal"),
+                    }
+                }
+                _ => panic!("Expected comparison expression"),
+            },
             _ => panic!("Expected filter clause"),
         }
     }
@@ -622,13 +1100,13 @@ mod tests {
     #[test]
     fn test_parse_complex_filter() {
         let input = r#"
-            FIND(?drug_name)
-            WHERE {
-                ?drug(type: "Drug")
-                ATTR(?drug, "name", ?drug_name)
-                FILTER(CONTAINS(?drug_name, "acid") && ?risk < 3)
-            }
-        "#;
+        FIND(?drug_name)
+        WHERE {
+            ?drug(type: "Drug")
+            ATTR(?drug, "name", ?drug_name)
+            FILTER(CONTAINS(?drug_name, "acid") && ?risk < 3)
+        }
+    "#;
 
         let result = parse_kql_query(input);
         assert!(result.is_ok());
@@ -636,8 +1114,59 @@ mod tests {
         let (_, query) = result.unwrap();
         match &query.where_clauses[2] {
             WhereClause::Filter(filter) => {
-                assert!(filter.expression.contains("CONTAINS"));
-                assert!(filter.expression.contains("&&"));
+                // 检查这是一个逻辑 AND 表达式
+                match &filter.expression {
+                    FilterExpression::Logical {
+                        left,
+                        operator,
+                        right,
+                    } => {
+                        assert_eq!(*operator, LogicalOperator::And);
+
+                        // 左边应该是 CONTAINS 函数
+                        match left.as_ref() {
+                            FilterExpression::Function { func, args } => {
+                                assert_eq!(*func, FilterFunction::Contains);
+                                assert_eq!(args.len(), 2);
+                                match &args[0] {
+                                    FilterOperand::Variable(var) => assert_eq!(var, "drug_name"),
+                                    _ => panic!("Expected variable as first argument"),
+                                }
+                                match &args[1] {
+                                    FilterOperand::Literal(Value::String(s)) => {
+                                        assert_eq!(s, "acid")
+                                    }
+                                    _ => panic!("Expected string literal as second argument"),
+                                }
+                            }
+                            _ => panic!("Expected function expression on left side"),
+                        }
+
+                        // 右边应该是比较表达式
+                        match right.as_ref() {
+                            FilterExpression::Comparison {
+                                left,
+                                operator,
+                                right,
+                            } => {
+                                match left {
+                                    FilterOperand::Variable(var) => assert_eq!(var, "risk"),
+                                    _ => panic!("Expected variable operand"),
+                                }
+                                assert_eq!(*operator, ComparisonOperator::LessThan);
+                                match right {
+                                    FilterOperand::Literal(Value::Number(_)) => {}
+                                    _ => panic!("Expected number literal"),
+                                }
+                            }
+                            _ => panic!("Expected comparison expression on right side"),
+                        }
+                    }
+                    _ => panic!("Expected logical AND expression"),
+                }
+
+                // 确保没有子查询
+                assert!(filter.subquery.is_none());
             }
             _ => panic!("Expected filter clause"),
         }
@@ -666,7 +1195,10 @@ mod tests {
                 assert_eq!(clauses.len(), 2);
                 match &clauses[0] {
                     WhereClause::Proposition(prop) => {
-                        assert_eq!(prop.predicate, "has_side_effect");
+                        assert_eq!(
+                            prop.predicate,
+                            PredTerm::Literal("has_side_effect".to_string())
+                        );
                     }
                     _ => panic!("Expected proposition in optional"),
                 }
