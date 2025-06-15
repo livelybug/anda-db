@@ -94,7 +94,7 @@ pub enum WhereClause {
     Filter(FilterCondition),
     Not(Vec<WhereClause>),
     Optional(Vec<WhereClause>),
-    Union(Vec<Vec<WhereClause>>),
+    Union(Vec<WhereClause>),
 }
 
 #[derive(Debug, PartialEq, Clone)]

@@ -270,8 +270,12 @@ fn parse_not_clause(input: &str) -> IResult<&str, Vec<WhereClause>> {
     .parse(input)
 }
 
-fn parse_union_expression(input: &str) -> IResult<&str, Vec<Vec<WhereClause>>> {
-    separated_list1(ws(tag("UNION")), parse_where_group).parse(input)
+fn parse_union_expression(input: &str) -> IResult<&str, Vec<WhereClause>> {
+    preceded(
+        ws(tag("UNION")),
+        braced_block(many1(ws(parse_single_where_clause))),
+    )
+    .parse(input)
 }
 
 // --- Solution Modifiers ---
@@ -702,15 +706,14 @@ mod tests {
         let input = r#"
             FIND(?drug_name)
             WHERE {
-                {
-                    ?headache(name: "Headache")
-                    PROP(?drug, "treats", ?headache)
-                }
-                UNION
-                {
+                ?headache(name: "Headache")
+                PROP(?drug, "treats", ?headache)
+
+                UNION {
                     ?fever(name: "Fever")
                     PROP(?drug, "treats", ?fever)
                 }
+
                 ATTR(?drug, "name", ?drug_name)
             }
         "#;
@@ -719,10 +722,10 @@ mod tests {
         assert!(result.is_ok());
 
         let (_, query) = result.unwrap();
-        match &query.where_clauses[0] {
+        assert_eq!(query.where_clauses.len(), 4);
+        match &query.where_clauses[2] {
             WhereClause::Union(clauses) => {
-                assert_eq!(clauses[0].len(), 2);
-                assert_eq!(clauses[1].len(), 2);
+                assert_eq!(clauses.len(), 2);
             }
             _ => panic!("Expected UNION clause"),
         }
