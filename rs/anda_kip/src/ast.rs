@@ -13,15 +13,16 @@
 //! - **META**: For knowledge exploration and grounding
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
-pub use serde_json::Number;
+pub use serde_json::{Map, Number};
 
-/// Represents a value in the KIP system, supporting JSON-compatible types.
+/// Represents a primitive value in the KIP system.
 /// This is the fundamental data type used throughout KIP for attributes, metadata, and literals.
 #[derive(Debug, Clone, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum Value {
     /// Represents a null value
+    #[default]
     Null,
     /// Boolean value (true/false)
     Bool(bool),
@@ -31,6 +32,8 @@ pub enum Value {
     String(String),
 }
 
+pub type Json = serde_json::Value;
+
 impl std::fmt::Display for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -38,27 +41,22 @@ impl std::fmt::Display for Value {
             Value::Bool(b) => write!(f, "{b}"),
             Value::Number(n) => write!(f, "{n}"),
             // format as JSON string (format_escaped_str)
-            Value::String(s) => write!(f, "{}", serde_json::Value::String(s.clone())),
+            Value::String(s) => write!(f, "{}", Json::String(s.clone())),
         }
     }
 }
 
-impl From<Value> for serde_json::Value {
+impl From<Value> for Json {
     fn from(value: Value) -> Self {
         match value {
-            Value::Null => serde_json::Value::Null,
-            Value::Bool(b) => serde_json::Value::Bool(b),
-            Value::Number(n) => serde_json::Value::Number(n),
-            Value::String(s) => serde_json::Value::String(s),
+            Value::Null => Json::Null,
+            Value::Bool(b) => Json::Bool(b),
+            Value::Number(n) => Json::Number(n),
+            Value::String(s) => Json::String(s),
         }
     }
 }
 
-impl Default for Value {
-    fn default() -> Self {
-        Value::Null
-    }
-}
 
 /// Top-level command enum representing the three main KIP instruction sets.
 /// Each command type serves a specific purpose in the knowledge interaction workflow.
@@ -383,7 +381,7 @@ pub struct UpsertBlock {
     /// List of concepts and propositions to upsert
     pub items: Vec<UpsertItem>,
     /// Global metadata for the entire upsert operation
-    pub metadata: Option<HashMap<String, Value>>,
+    pub metadata: Option<Map<String, Json>>,
 }
 
 /// Represents an item within an UPSERT block.
@@ -406,11 +404,11 @@ pub struct ConceptBlock {
     /// ON clause for matching existing concepts or creating new ones
     pub on: OnClause,
     /// Optional attributes to set on the concept
-    pub set_attributes: Option<HashMap<String, Value>>,
+    pub set_attributes: Option<Map<String, Json>>,
     /// Optional propositions emanating from this concept
     pub set_propositions: Option<Vec<SetProposition>>,
     /// Optional metadata for this concept
-    pub metadata: Option<HashMap<String, Value>>,
+    pub metadata: Option<Map<String, Json>>,
 }
 
 /// Represents a proposition to be set from a concept.
@@ -422,7 +420,7 @@ pub struct SetProposition {
     /// The object of the proposition (node or local handle)
     pub object: PropObject,
     /// Optional metadata for this specific proposition
-    pub metadata: Option<HashMap<String, Value>>,
+    pub metadata: Option<Map<String, Json>>,
 }
 
 /// Represents a standalone proposition definition within an UPSERT block.
@@ -439,7 +437,7 @@ pub struct PropositionBlock {
     /// Object of the proposition (node or local handle)
     pub object: PropObject,
     /// Optional metadata for this proposition
-    pub metadata: Option<HashMap<String, Value>>,
+    pub metadata: Option<Map<String, Json>>,
 }
 
 /// Represents different types of DELETE statements in KML.

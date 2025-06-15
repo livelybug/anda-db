@@ -4,7 +4,6 @@ mod response;
 
 pub mod ast;
 pub mod error;
-pub mod nexus;
 
 pub use ast::*;
 pub use error::*;

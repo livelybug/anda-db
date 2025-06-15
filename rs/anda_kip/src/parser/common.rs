@@ -1,33 +1,18 @@
 use nom::{
-    IResult, Mode, Parser,
+    IResult, Parser,
     branch::alt,
-    bytes::{
-        complete::{tag, tag_no_case},
-        take,
-    },
-    character::{
-        anychar,
-        complete::{alpha1, alphanumeric1, char, multispace0},
-        none_of,
-    },
-    combinator::{map, map_opt, map_res, opt, recognize, value, verify},
-    error::{Error, ErrorKind, ParseError},
-    multi::{fold, many0, separated_list1},
-    number::complete::recognize_float,
+    bytes::complete::{tag, tag_no_case},
+    character::complete::{alpha1, alphanumeric1, char},
+    combinator::{map, opt, recognize, value},
+    error::ParseError,
+    multi::{many0, separated_list1},
     sequence::{delimited, pair, preceded, separated_pair, terminated},
 };
-use std::{collections::HashMap, str::FromStr};
 
-use crate::ast::{KeyValue, Number, Value};
+use super::json::{json_value, parse_number};
+use crate::ast::{Json, KeyValue, Map, Value};
 
-/// Consumes whitespace around a parser.
-pub fn ws<'a, O, E, F>(f: F) -> impl Parser<&'a str, Output = O, Error = E>
-where
-    E: ParseError<&'a str>,
-    F: Parser<&'a str, Output = O, Error = E>,
-{
-    delimited(multispace0, f, multispace0)
-}
+pub use super::json::{quoted_string, ws};
 
 /// Parses the contents of a block enclosed in curly braces.
 pub fn braced_block<'a, O, E, F>(f: F) -> impl Parser<&'a str, Output = O, Error = E>
@@ -66,20 +51,6 @@ pub fn local_handle(input: &str) -> IResult<&str, String> {
     map(preceded(char('@'), identifier), |s| s.to_string()).parse(input)
 }
 
-/// Parses a double-quoted string, handling escaped quotes.
-pub fn quoted_string(input: &str) -> IResult<&str, String> {
-    // https://github.com/rust-bakery/nom/blob/main/examples/json2.rs#L121
-    delimited(
-        char('"'),
-        fold(0.., character(), String::new, |mut string, c| {
-            string.push(c);
-            string
-        }),
-        char('"'),
-    )
-    .parse(input)
-}
-
 /// Parses any KIP value (string, number, boolean, null).
 pub fn kip_value(input: &str) -> IResult<&str, Value> {
     alt((
@@ -105,106 +76,33 @@ pub fn key_value_pair(input: &str) -> IResult<&str, KeyValue> {
 }
 
 /// Parses a list of key-value pairs inside braces, like `{ key1: val1, key2: val2 }`.
-pub fn key_value_map(input: &str) -> IResult<&str, HashMap<String, Value>> {
+pub fn json_value_map(input: &str) -> IResult<&str, Map<String, Json>> {
     map(
         delimited(
             ws(char('{')),
             opt(terminated(
-                separated_list1(ws(char(',')), key_value_pair),
+                separated_list1(ws(char(',')), key_json_pair),
                 opt(ws(char(','))), // Allow trailing comma
             )),
             ws(char('}')),
         ),
-        |opt_kvs| {
-            opt_kvs
-                .unwrap_or_default()
-                .into_iter()
-                .map(|kv| (kv.key, kv.value))
-                .collect()
-        },
+        |opt_kvs| opt_kvs.unwrap_or_default().into_iter().collect(),
     )
     .parse(input)
 }
 
-fn parse_number(input: &str) -> IResult<&str, Number> {
-    let (next_input, num_str) = recognize_float(input)?;
-    let num = Number::from_str(num_str)
-        .map_err(|_| nom::Err::Error(Error::new(num_str, ErrorKind::Digit)))?;
-    Ok((next_input, num))
-}
-
-fn u16_hex<'a>() -> impl Parser<&'a str, Output = u16, Error = Error<&'a str>> {
-    map_res(take(4usize), |s| u16::from_str_radix(s, 16))
-}
-
-fn unicode_escape<'a>() -> impl Parser<&'a str, Output = char, Error = Error<&'a str>> {
-    map_opt(
-        alt((
-            // Not a surrogate
-            map(
-                verify(u16_hex(), |cp| !(0xD800..0xE000).contains(cp)),
-                |cp| cp as u32,
-            ),
-            // See https://en.wikipedia.org/wiki/UTF-16#Code_points_from_U+010000_to_U+10FFFF for details
-            map(
-                verify(
-                    separated_pair(u16_hex(), tag("\\u"), u16_hex()),
-                    |(high, low)| (0xD800..0xDC00).contains(high) && (0xDC00..0xE000).contains(low),
-                ),
-                |(high, low)| {
-                    let high_ten = (high as u32) - 0xD800;
-                    let low_ten = (low as u32) - 0xDC00;
-                    (high_ten << 10) + low_ten + 0x10000
-                },
-            ),
-        )),
-        // Could probably be replaced with .unwrap() or _unchecked due to the verify checks
-        std::char::from_u32,
+fn key_json_pair(input: &str) -> IResult<&str, (String, Json)> {
+    map(
+        separated_pair(identifier, ws(char(':')), json_value()),
+        |(k, v)| (k.to_string(), v),
     )
-}
-
-fn character<'a>() -> impl Parser<&'a str, Output = char, Error = Error<&'a str>> {
-    Character
-}
-
-struct Character;
-
-impl<'a> Parser<&'a str> for Character {
-    type Output = char;
-
-    type Error = Error<&'a str>;
-
-    fn process<OM: nom::OutputMode>(
-        &mut self,
-        input: &'a str,
-    ) -> nom::PResult<OM, &'a str, Self::Output, Self::Error> {
-        let (input, c): (&str, char) =
-            none_of("\"").process::<nom::OutputM<nom::Emit, OM::Error, OM::Incomplete>>(input)?;
-        if c == '\\' {
-            alt((
-                map_res(anychar, |c| {
-                    Ok(match c {
-                        '"' | '\\' | '/' => c,
-                        'b' => '\x08',
-                        'f' => '\x0C',
-                        'n' => '\n',
-                        'r' => '\r',
-                        't' => '\t',
-                        _ => return Err(()),
-                    })
-                }),
-                preceded(char('u'), unicode_escape()),
-            ))
-            .process::<OM>(input)
-        } else {
-            Ok((input, OM::Output::bind(|| c)))
-        }
-    }
+    .parse(input)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::Number;
     use nom::error::Error;
 
     #[test]
@@ -328,27 +226,27 @@ mod tests {
 
     #[test]
     fn test_key_value_map() {
-        let result = key_value_map(r#"{ name: "John", age: 25 }"#);
+        let result = json_value_map(r#"{ name: "John", age: 25 }"#);
         assert!(result.is_ok());
         let (_, map) = result.unwrap();
         assert_eq!(map.len(), 2);
-        assert_eq!(map.get("name"), Some(&Value::String("John".to_string())));
-        assert_eq!(map.get("age"), Some(&Value::Number(Number::from(25))));
+        assert_eq!(map.get("name"), Some(&Json::String("John".to_string())));
+        assert_eq!(map.get("age"), Some(&Json::Number(Number::from(25))));
 
         // Test empty map
-        let result = key_value_map("{}");
+        let result = json_value_map("{}");
         assert!(result.is_ok());
         let (_, map) = result.unwrap();
         assert_eq!(map.len(), 0);
 
         // Test with trailing comma
-        let result = key_value_map(r#"{ name: "John", age: 25, }"#);
+        let result = json_value_map(r#"{ name: "John", age: 25, }"#);
         assert!(result.is_ok());
         let (_, map) = result.unwrap();
         assert_eq!(map.len(), 2);
 
         // Test with whitespace
-        let result = key_value_map(
+        let result = json_value_map(
             r#"{
             name: "John",
             age: 25,
@@ -358,10 +256,10 @@ mod tests {
         assert!(result.is_ok());
         let (_, map) = result.unwrap();
         assert_eq!(map.len(), 3);
-        assert_eq!(map.get("active"), Some(&Value::Bool(true)));
+        assert_eq!(map.get("active"), Some(&Json::Bool(true)));
 
         // Test single item
-        let result = key_value_map(r#"{ name: "John" }"#);
+        let result = json_value_map(r#"{ name: "John" }"#);
         assert!(result.is_ok());
         let (_, map) = result.unwrap();
         assert_eq!(map.len(), 1);
@@ -411,22 +309,19 @@ mod tests {
             negative: -42,
         }"#;
 
-        let result = key_value_map(input);
+        let result = json_value_map(input);
         assert!(result.is_ok());
         let (_, map) = result.unwrap();
         assert_eq!(map.len(), 6);
-        assert_eq!(
-            map.get("name"),
-            Some(&Value::String("John Doe".to_string()))
-        );
-        assert_eq!(map.get("age"), Some(&Value::Number(Number::from(30))));
+        assert_eq!(map.get("name"), Some(&Json::String("John Doe".to_string())));
+        assert_eq!(map.get("age"), Some(&Json::Number(Number::from(30))));
         assert_eq!(
             map.get("height"),
-            Some(&Value::Number(Number::from_f64(5.9).unwrap()))
+            Some(&Json::Number(Number::from_f64(5.9).unwrap()))
         );
-        assert_eq!(map.get("active"), Some(&Value::Bool(true)));
-        assert_eq!(map.get("score"), Some(&Value::Null));
-        assert_eq!(map.get("negative"), Some(&Value::Number(Number::from(-42))));
+        assert_eq!(map.get("active"), Some(&Json::Bool(true)));
+        assert_eq!(map.get("score"), Some(&Json::Null));
+        assert_eq!(map.get("negative"), Some(&Json::Number(Number::from(-42))));
     }
 
     #[test]
@@ -472,7 +367,7 @@ mod tests {
         assert!(quoted_string("'single quotes'").is_err());
         assert!(quoted_string("\"unclosed").is_err());
         assert!(key_value_pair("key: ").is_err());
-        assert!(key_value_map("{ key: }").is_err());
-        assert!(key_value_map("{ key value }").is_err());
+        assert!(json_value_map("{ key: }").is_err());
+        assert!(json_value_map("{ key value }").is_err());
     }
 }

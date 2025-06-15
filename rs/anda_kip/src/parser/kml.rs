@@ -7,7 +7,6 @@ use nom::{
     multi::{many1, separated_list1},
     sequence::{preceded, separated_pair, terminated},
 };
-use std::collections::HashMap;
 
 use super::common::*;
 use super::kql::parse_where_group;
@@ -25,8 +24,8 @@ pub fn parse_kml_statement(input: &str) -> IResult<&str, KmlStatement> {
 
 // --- UPSERT ---
 
-fn parse_with_metadata(input: &str) -> IResult<&str, HashMap<String, Value>> {
-    preceded(ws(tag("WITH METADATA")), key_value_map).parse(input)
+fn parse_with_metadata(input: &str) -> IResult<&str, Map<String, Json>> {
+    preceded(ws(tag("WITH METADATA")), json_value_map).parse(input)
 }
 
 fn parse_upsert_block(input: &str) -> IResult<&str, UpsertBlock> {
@@ -68,7 +67,7 @@ fn parse_concept_block(input: &str) -> IResult<&str, ConceptBlock> {
             preceded(ws(tag("CONCEPT")), ws(local_handle)),
             braced_block((
                 ws(on_clause),
-                opt(ws(preceded(tag("SET ATTRIBUTES"), key_value_map))),
+                opt(ws(preceded(tag("SET ATTRIBUTES"), json_value_map))),
                 opt(ws(preceded(
                     tag("SET PROPOSITIONS"),
                     braced_block(many1(ws(parse_set_proposition))),
@@ -257,9 +256,9 @@ mod tests {
                         assert_eq!(attrs.len(), 2);
                         assert_eq!(
                             attrs["molecular_formula"],
-                            Value::String("C9H8O4".to_string())
+                            Json::String("C9H8O4".to_string())
                         );
-                        assert_eq!(attrs["risk_level"], Value::Number(Number::from(2)));
+                        assert_eq!(attrs["risk_level"], Json::Number(Number::from(2)));
                     }
                     _ => panic!("Expected ConceptBlock"),
                 }
@@ -314,12 +313,12 @@ mod tests {
                 let metadata = upsert.metadata.as_ref().unwrap();
                 assert_eq!(
                     metadata["source"],
-                    Value::String("KnowledgeCapsule:Nootropics_v1.0".to_string())
+                    Json::String("KnowledgeCapsule:Nootropics_v1.0".to_string())
                 );
-                assert_eq!(metadata["author"], Value::String("LDC Labs".to_string()));
+                assert_eq!(metadata["author"], Json::String("LDC Labs".to_string()));
                 assert_eq!(
                     metadata["confidence"],
-                    Value::Number(Number::from_f64(0.95).unwrap())
+                    Json::Number(Number::from_f64(0.95).unwrap())
                 );
 
                 // Check first concept with propositions
@@ -354,7 +353,7 @@ mod tests {
                         let prop_metadata = props[2].metadata.as_ref().unwrap();
                         assert_eq!(
                             prop_metadata["confidence"],
-                            Value::Number(Number::from_f64(0.75).unwrap())
+                            Json::Number(Number::from_f64(0.75).unwrap())
                         );
                     }
                     _ => panic!("Expected ConceptBlock"),
@@ -420,7 +419,7 @@ mod tests {
                         let metadata = prop.metadata.as_ref().unwrap();
                         assert_eq!(
                             metadata["confidence"],
-                            Value::Number(Number::from_f64(0.9).unwrap())
+                            Json::Number(Number::from_f64(0.9).unwrap())
                         );
                     }
                     _ => panic!("Expected PropositionBlock"),
@@ -593,11 +592,11 @@ mod tests {
                 let global_metadata = upsert.metadata.as_ref().unwrap();
                 assert_eq!(
                     global_metadata["batch_id"],
-                    Value::String("batch_123".to_string())
+                    Json::String("batch_123".to_string())
                 );
                 assert_eq!(
                     global_metadata["timestamp"],
-                    Value::String("2024-01-01T00:00:00Z".to_string())
+                    Json::String("2024-01-01T00:00:00Z".to_string())
                 );
 
                 // Check first item (concept)
@@ -605,9 +604,9 @@ mod tests {
                     UpsertItem::Concept(concept) => {
                         assert_eq!(concept.handle, "drug");
                         let attrs = concept.set_attributes.as_ref().unwrap();
-                        assert_eq!(attrs["name"], Value::String("TestDrug".to_string()));
-                        assert_eq!(attrs["active"], Value::Bool(true));
-                        assert_eq!(attrs["dosage"], Value::Null);
+                        assert_eq!(attrs["name"], Json::String("TestDrug".to_string()));
+                        assert_eq!(attrs["active"], Json::Bool(true));
+                        assert_eq!(attrs["dosage"], Json::Null);
                     }
                     _ => panic!("Expected ConceptBlock"),
                 }
@@ -620,7 +619,7 @@ mod tests {
                         let metadata = prop.metadata.as_ref().unwrap();
                         assert_eq!(
                             metadata["interaction_type"],
-                            Value::String("synergistic".to_string())
+                            Json::String("synergistic".to_string())
                         );
                     }
                     _ => panic!("Expected PropositionBlock"),
@@ -734,10 +733,10 @@ mod tests {
                 match &upsert.items[0] {
                     UpsertItem::Concept(concept) => {
                         let metadata = concept.metadata.as_ref().unwrap();
-                        assert_eq!(metadata["source"], Value::String("test_source".to_string()));
+                        assert_eq!(metadata["source"], Json::String("test_source".to_string()));
                         assert_eq!(
                             metadata["confidence"],
-                            Value::Number(Number::from_f64(1.0).unwrap())
+                            Json::Number(Number::from_f64(1.0).unwrap())
                         );
                     }
                     _ => panic!("Expected ConceptBlock"),
