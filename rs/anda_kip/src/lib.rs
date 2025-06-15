@@ -1,9 +1,9 @@
-mod ast;
-mod error;
 mod executor;
 mod parser;
 mod response;
 
+pub mod ast;
+pub mod error;
 pub mod nexus;
 
 pub use ast::*;
