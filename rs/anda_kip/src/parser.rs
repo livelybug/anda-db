@@ -247,7 +247,133 @@ pub fn unquote_str(s: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use crate::ast;
+
     use super::*;
+
+    #[test]
+    fn test_parse_kml() {
+        let input = r#"
+// Knowledge Capsule: cognizin.v1.0
+// Description: Defines the novel nootropic drug "Cognizine" and its effects.
+
+UPSERT {
+  // Define the main drug concept: Cognizine
+  CONCEPT @cognizine {
+    ON { type: "Drug", name: "Cognizine" }
+    SET ATTRIBUTES {
+      molecular_formula: "C12H15N5O3",     // Molecular formula of Cognizine
+      risk_level: 2,
+      description: "A novel nootropic drug designed to enhance cognitive functions."
+    }
+    SET PROPOSITIONS {
+      // Link to an existing concept (Nootropic)
+      PROP("is_class_of", ON { type: "DrugClass", name: "Nootropic" })
+
+      // Link to an existing concept (Brain Fog)
+      PROP("treats", ON { type: "Symptom", name: "Brain Fog" })
+
+      // Link to another new concept defined within this capsule (@neural_bloom)
+      PROP("has_side_effect", @neural_bloom) WITH METADATA {
+        // This specific proposition has its own metadata
+        confidence: 0.75,
+        source: "Preliminary Clinical Trial NCT012345"
+      }
+    }
+  }
+
+  // Define the new side effect concept: Neural Bloom
+  CONCEPT @neural_bloom {
+    ON { type: "Symptom", name: "Neural Bloom" }
+    SET ATTRIBUTES {
+      description: "A rare side effect characterized by a temporary burst of creative thoughts."
+    }
+    // This concept has no outgoing propositions in this capsule
+  }
+}
+WITH METADATA {
+  // Global metadata for all facts in this capsule
+  source: "KnowledgeCapsule:Nootropics_v1.0",
+  author: "LDC Labs Research Team",
+  confidence: 0.95,
+  status: "reviewed"
+}
+        "#;
+        let result = parse_kml(input);
+        assert!(result.is_ok());
+
+        let kml_statement = result.unwrap();
+
+        // 验证这是一个 UPSERT 语句
+        match kml_statement {
+            KmlStatement::Upsert(ast::UpsertBlock { items, metadata }) => {
+                // 验证有两个概念操作
+                assert_eq!(items.len(), 2);
+
+                // 验证第一个概念 (@cognizine)
+                let cognizine_op = &items[0];
+                match cognizine_op {
+                    ast::UpsertItem::Concept(ast::ConceptBlock {
+                        handle,
+                        on,
+                        metadata,
+                        set_attributes,
+                        set_propositions,
+                    }) => {
+                        assert_eq!(handle, "cognizine");
+                        assert_eq!(on.keys.len(), 2);
+                        assert!(metadata.is_none());
+                        assert_eq!(set_attributes.as_ref().unwrap().len(), 3);
+                        assert_eq!(set_propositions.as_ref().unwrap().len(), 3);
+                    }
+                    _ => panic!("Expected Concept operation for first operation"),
+                }
+
+                // 验证第二个概念 (@neural_bloom)
+                let neural_bloom_op = &items[1];
+                match neural_bloom_op {
+                    ast::UpsertItem::Concept(ast::ConceptBlock {
+                        handle,
+                        on,
+                        metadata,
+                        set_attributes,
+                        set_propositions,
+                    }) => {
+                        assert_eq!(handle, "neural_bloom");
+                        assert_eq!(on.keys.len(), 2);
+                        assert!(metadata.is_none());
+                        assert_eq!(set_attributes.as_ref().unwrap().len(), 1);
+                        assert!(set_propositions.is_none());
+                    }
+                    _ => panic!("Expected Concept operation for second operation"),
+                }
+
+                // 验证全局元数据
+                assert!(metadata.is_some());
+                let global_metadata = metadata.as_ref().unwrap();
+                assert_eq!(global_metadata.len(), 4);
+                assert_eq!(
+                    global_metadata.get("source"),
+                    Some(&Json::String(
+                        "KnowledgeCapsule:Nootropics_v1.0".to_string()
+                    ))
+                );
+                assert_eq!(
+                    global_metadata.get("author"),
+                    Some(&Json::String("LDC Labs Research Team".to_string()))
+                );
+                assert_eq!(
+                    global_metadata.get("confidence"),
+                    Some(&Json::Number(crate::ast::Number::from_f64(0.95).unwrap()))
+                );
+                assert_eq!(
+                    global_metadata.get("status"),
+                    Some(&Json::String("reviewed".to_string()))
+                );
+            }
+            _ => panic!("Expected Upsert statement"),
+        }
+    }
 
     #[test]
     fn test_quote_str_basic() {

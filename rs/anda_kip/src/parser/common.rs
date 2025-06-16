@@ -2,7 +2,7 @@ use nom::{
     IResult, Parser,
     branch::alt,
     bytes::complete::{tag, tag_no_case},
-    character::complete::{alpha1, alphanumeric1, char},
+    character::complete::{alpha1, alphanumeric1, char, multispace0},
     combinator::{map, opt, recognize, value},
     error::ParseError,
     multi::{many0, separated_list1},
@@ -12,7 +12,50 @@ use nom::{
 use super::json::{json_value, parse_number};
 use crate::ast::{Json, KeyValue, Map, Value};
 
-pub use super::json::{quoted_string, ws};
+pub use super::json::quoted_string;
+
+/// Skips whitespace and line comments (starting with //).
+pub fn ws<'a, O, E, F>(f: F) -> impl Parser<&'a str, Output = O, Error = E>
+where
+    E: ParseError<&'a str>,
+    F: Parser<&'a str, Output = O, Error = E>,
+{
+    delimited(skip_ws_and_comments, f, skip_ws_and_comments)
+}
+
+/// Skips whitespace and line comments.
+fn skip_ws_and_comments<'a, E>(input: &'a str) -> IResult<&'a str, (), E>
+where
+    E: ParseError<&'a str>,
+{
+    let mut remaining = input;
+
+    loop {
+        let start_len = remaining.len();
+
+        // 跳过空白字符
+        if let Ok((rest, _)) = multispace0::<&str, E>(remaining) {
+            remaining = rest;
+        }
+
+        // 跳过行注释
+        if remaining.starts_with("//") {
+            if let Some(newline_pos) = remaining.find('\n') {
+                remaining = &remaining[newline_pos + 1..];
+            } else {
+                // 注释到文件末尾
+                remaining = "";
+            }
+        }
+
+        // 如果没有更多内容被跳过，退出循环
+        if remaining.len() == start_len {
+            break;
+        }
+    }
+
+    Ok((remaining, ()))
+}
 
 /// Parses the contents of a block enclosed in curly braces.
 pub fn braced_block<'a, O, E, F>(f: F) -> impl Parser<&'a str, Output = O, Error = E>
@@ -116,6 +159,24 @@ mod tests {
             ws(char::<&str, Error<_>>('a')).parse("\n\t a \r\n"),
             Ok(("", 'a'))
         );
+    }
+
+    #[test]
+    fn test_ws_with_comments() {
+        // 测试注释后跟换行符
+        let input = "// comment\nvalue";
+        let result = ws(tag::<&str, &str, Error<_>>("value")).parse(input);
+        assert!(result.is_ok());
+
+        // 测试多行注释和空白字符混合
+        let input = "  // comment1\n  // comment2\n  value";
+        let result = ws(tag::<&str, &str, Error<_>>("value")).parse(input);
+        assert!(result.is_ok());
+
+        // 测试注释在末尾
+        let input = "value  // comment";
+        let result = ws(tag::<&str, &str, Error<_>>("value")).parse(input);
+        assert!(result.is_ok());
     }
 
     #[test]
