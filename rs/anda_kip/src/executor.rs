@@ -7,11 +7,10 @@
 //! The executor is responsible for taking parsed KIP commands (KQL queries, KML statements,
 //! or META commands) and executing them against a knowledge graph or cognitive nexus,
 //! returning structured responses.
+use async_trait::async_trait;
+use std::sync::Arc;
 
-use crate::ast::Command;
-use crate::error::KipError;
-use crate::parser::parse_kip;
-use crate::response::Response;
+use crate::{Command, Json, KipError, Response, parse_kip};
 
 /// The core trait that defines how KIP commands are executed.
 ///
@@ -30,17 +29,16 @@ use crate::response::Response;
 /// # Implementation Examples
 ///
 /// ```rust,no_run
-/// use anda_kip::Executor;
-/// use anda_kip::Command;
-/// use anda_kip::KipError;
-/// use anda_kip::Response;
+/// use anda_kip::{Executor, Command, Json, KipError};
+/// use async_trait::async_trait;
 ///
 /// struct MyKnowledgeGraph {
 ///     // Your knowledge graph implementation
 /// }
 ///
+/// #[async_trait]
 /// impl Executor for MyKnowledgeGraph {
-///     async fn execute(&self, command: Command) -> Result<Response, KipError> {
+///     async fn execute(&self, command: Command, dry_run: bool) -> Result<Json, KipError> {
 ///         match command {
 ///             Command::Kql(query) => {
 ///                 // Execute KQL query against knowledge graph
@@ -58,7 +56,8 @@ use crate::response::Response;
 ///     }
 /// }
 /// ```
-pub trait Executor {
+#[async_trait]
+pub trait Executor: Send + Sync {
     /// Executes a parsed KIP command and returns the result.
     ///
     /// This method takes ownership of a `Command` (which can be a KQL query,
@@ -68,11 +67,12 @@ pub trait Executor {
     /// # Arguments
     ///
     /// * `command` - The parsed KIP command to execute
+    /// * `dry_run` - If true, the command is executed in dry-run mode (no state changes)
     ///
     /// # Returns
     ///
     /// A `Future` that resolves to:
-    /// - `Ok(Response)`: Successful execution with structured response data
+    /// - `Ok(Json)`: Successful execution with structured response data in JSON format
     /// - `Err(KipError)`: Execution error with detailed error information
     ///
     /// # Error Handling
@@ -89,7 +89,7 @@ pub trait Executor {
     /// - This method is async to support non-blocking I/O operations
     /// - The returned future is `Send` to enable multi-threaded execution
     /// - Implementations should consider query optimization and caching
-    fn execute(&self, command: Command) -> impl Future<Output = Result<Response, KipError>> + Send;
+    async fn execute(&self, command: Command, dry_run: bool) -> Result<Json, KipError>;
 }
 
 /// High-level convenience function for executing KIP commands from string input.
@@ -108,12 +108,13 @@ pub trait Executor {
 ///
 /// * `executor` - An implementation of the `Executor` trait that will process the command
 /// * `command` - The raw KIP command string to parse and execute
+/// * `dry_run` - If true, the command is executed in dry-run mode (no state changes)
 ///
 /// # Returns
 ///
-/// A `Result` containing:
-/// - `Ok(Response)`: Successful execution with structured response data
-/// - `Err(KipError)`: Either parsing or execution error with detailed information
+/// A [`Response`] containing:
+/// - `Result(Response)`: Successful execution with structured response data
+/// - `Error(KipError)`: Either parsing or execution error with detailed information
 ///
 /// # Error Types
 ///
@@ -124,30 +125,33 @@ pub trait Executor {
 /// # Examples
 ///
 /// ```rust,no_run
-/// use anda_kip::{execute_kip, Executor};
+/// use anda_kip::{execute_kip, Executor, Response};
 ///
 /// async fn example(my_executor: impl Executor) {
 ///     // Execute a KQL query
 ///     let kql_result = execute_kip(
 ///         &my_executor,
-///         "FIND(?drug) WHERE { ?drug(type: \"Drug\") }"
+///         "FIND(?drug) WHERE { ?drug(type: \"Drug\") }",
+///         true // dry_run
 ///     ).await;
 ///
 ///     // Execute a KML statement
 ///     let kml_result = execute_kip(
 ///         &my_executor,
-///         "UPSERT { CONCEPT @drug { ON { name: \"Aspirin\" } } }"
+///         "UPSERT { CONCEPT @drug { ON { name: \"Aspirin\" } } }",
+///         true // dry_run
 ///     ).await;
 ///
 ///     // Execute a META command
 ///     let meta_result = execute_kip(
 ///         &my_executor,
-///         "DESCRIBE PRIMER"
+///         "DESCRIBE PRIMER",
+///         false // dry_run
 ///     ).await;
 ///
 ///     match kql_result {
-///         Ok(response) => println!("Query successful: {:?}", response),
-///         Err(error) => eprintln!("Query failed: {:?}", error),
+///         Response::Result(res) => println!("Query successful: {:#}", res),
+///         Response::Error(err) => eprintln!("Query failed: {:?}", err),
 ///     }
 /// }
 /// ```
@@ -157,10 +161,66 @@ pub trait Executor {
 /// - Parsing is performed synchronously before execution
 /// - Consider caching parsed commands for repeated execution
 /// - The executor implementation determines overall performance characteristics
-pub async fn execute_kip(executor: &impl Executor, command: &str) -> Result<Response, KipError> {
+pub async fn execute_kip(executor: &impl Executor, command: &str, dry_run: bool) -> Response {
     // Parse the raw command string into a structured Command AST
-    let cmd = parse_kip(command)?;
+    match parse_kip(command) {
+        Ok(cmd) => {
+            // Delegate execution to the provided executor
+            match executor.execute(cmd, dry_run).await {
+                Ok(res) => Response::Result(res),
+                Err(err) => err.into(),
+            }
+        }
+        Err(err) => err.into(),
+    }
+}
 
-    // Delegate execution to the provided executor implementation
-    executor.execute(cmd).await
+#[async_trait]
+impl Executor for Box<dyn Executor> {
+    async fn execute(&self, command: Command, dry_run: bool) -> Result<Json, KipError> {
+        (**self).execute(command, dry_run).await
+    }
+}
+
+#[async_trait]
+impl Executor for Arc<dyn Executor> {
+    async fn execute(&self, command: Command, dry_run: bool) -> Result<Json, KipError> {
+        (**self).execute(command, dry_run).await
+    }
+}
+
+#[async_trait]
+impl Executor for &dyn Executor {
+    async fn execute(&self, command: Command, dry_run: bool) -> Result<Json, KipError> {
+        (**self).execute(command, dry_run).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Command;
+
+    struct MyKnowledgeGraph {}
+
+    #[async_trait]
+    impl Executor for MyKnowledgeGraph {
+        async fn execute(&self, command: Command, _dry_run: bool) -> Result<Json, KipError> {
+            match command {
+                Command::Kql(_) => Ok(Json::String("Mock KQL Response".to_string())),
+                Command::Kml(_) => Ok(Json::String("Mock KML Response".to_string())),
+                Command::Meta(_) => Ok(Json::String("Mock META Response".to_string())),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_execute_kip() {
+        let executor = MyKnowledgeGraph {};
+
+        // Test KQL command execution
+        let kql_command = "FIND(?drug) WHERE { ?drug(type: \"Drug\") }";
+        let response = execute_kip(&executor, kql_command, false).await;
+        assert!(matches!(response, Response::Result(_)));
+    }
 }

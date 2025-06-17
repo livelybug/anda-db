@@ -1,7 +1,7 @@
 [package]
 name = "anda_kip"
-version = "0.2.0"
-description = "A Rust implementation of KIP (Knowledge Interaction Protocol)."
+version = "0.3.0"
+description = "A Rust implementation of KIP (Knowledge Interaction Protocol) for building sustainable AI knowledge memory systems."
 keywords = ["KIP", "Knowledge", "Memory", "Anda", "Agent"]
 categories = ["database", "data-structures", "text-processing"]
 repository = "https://github.com/ldclabs/anda_db/tree/main/rs/anda_kip"
@@ -14,6 +14,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 nom = { workspace = true }
 thiserror = { workspace = true }
+async-trait = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
