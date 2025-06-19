@@ -1,4 +1,4 @@
-//! # KIP Parser Module
+//! # Nom-based parsers for KQL, KML, and META commands
 //!
 //! This module provides the main parsing functionality for the Knowledge Interaction Protocol (KIP).
 //! KIP supports three main command types:

@@ -220,6 +220,57 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_simple_upsert_concept_with_metadata() {
+        let input = r#"
+        UPSERT {
+            CONCEPT ?drug {
+                {type: "Drug", name: "TestDrug"}
+            }
+            WITH METADATA {
+                "confidence":0.95,
+                "source":"clinical_trial"
+            }
+        }
+        "#;
+
+        let result = parse_kml_statement(input);
+        assert!(result.is_ok());
+        let (_, statement) = result.unwrap();
+        match statement {
+            KmlStatement::Upsert(upsert) => {
+                assert_eq!(upsert.items.len(), 1);
+                assert!(upsert.metadata.is_none());
+
+                match &upsert.items[0] {
+                    UpsertItem::Concept(concept) => {
+                        assert_eq!(concept.handle, "drug");
+                        assert_eq!(
+                            concept.concept,
+                            ConceptMatcher {
+                                id: None,
+                                r#type: Some("Drug".to_string()),
+                                name: Some("TestDrug".to_string()),
+                            }
+                        );
+
+                        let metadata = concept.metadata.as_ref().unwrap();
+                        assert_eq!(
+                            metadata["confidence"],
+                            Json::Number(Number::from_f64(0.95).unwrap())
+                        );
+                        assert_eq!(
+                            metadata["source"],
+                            Json::String("clinical_trial".to_string())
+                        );
+                    }
+                    _ => panic!("Expected ConceptBlock"),
+                }
+            }
+            _ => panic!("Expected UpsertBlock"),
+        }
+    }
+
+    #[test]
     fn test_parse_upsert_with_propositions() {
         let input = r#"
         UPSERT {

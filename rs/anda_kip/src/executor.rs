@@ -1,4 +1,4 @@
-//! # KIP Command Executor Module
+//! # Execution framework and traits
 //!
 //! This module provides the execution framework for Knowledge Interaction Protocol (KIP) commands.
 //! It defines the core `Executor` trait that must be implemented by any KIP command processor,
@@ -131,14 +131,14 @@ pub trait Executor: Send + Sync {
 ///     // Execute a KQL query
 ///     let kql_result = execute_kip(
 ///         &my_executor,
-///         "FIND(?drug) WHERE { ?drug(type: \"Drug\") }",
+///         "FIND(?drug) WHERE { ?drug {type: \"Drug\"} }",
 ///         true // dry_run
 ///     ).await;
 ///
 ///     // Execute a KML statement
 ///     let kml_result = execute_kip(
 ///         &my_executor,
-///         "UPSERT { CONCEPT @drug { ON { name: \"Aspirin\" } } }",
+///         "UPSERT { CONCEPT @drug { {type: \"Drug\", name: \"Aspirin\" } } }",
 ///         true // dry_run
 ///     ).await;
 ///

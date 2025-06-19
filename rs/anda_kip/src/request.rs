@@ -1,10 +1,10 @@
-/// KIP (Knowledge Interaction Protocol) Request and Response structures
-///
-/// This module implements the standardized request-response model for all interactions
-/// with the Cognitive Nexus as defined in KIP specification section 6.
-///
-/// LLM Agents send structured requests (typically encapsulated in Function Calling)
-/// containing KIP commands to the Cognitive Nexus, which returns structured JSON responses.
+//! # Request/Response structures for JSON-based communication
+//!
+//! This module implements the standardized request-response model for all interactions
+//! with the Cognitive Nexus as defined in KIP specification section 6.
+//!
+//! LLM Agents send structured requests (typically encapsulated in Function Calling)
+//! containing KIP commands to the Cognitive Nexus, which returns structured JSON responses.
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 
@@ -22,7 +22,7 @@ use crate::{
 /// # Example
 /// ```json
 /// {
-///   "command": "FIND(?drug_name) WHERE { ?symptom(name: $symptom_name) PROP(?drug, \"treats\", ?symptom) ATTR(?drug, \"name\", ?drug_name) } LIMIT $limit",
+///   "command": "FIND(?drug_name) WHERE { ?symptom {name: $symptom_name} (?drug, \"treats\", ?symptom) ATTR(?drug, \"name\", ?drug_name) } LIMIT $limit",
 ///   "parameters": {
 ///     "symptom_name": "Headache",
 ///     "limit": 10
@@ -220,19 +220,21 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{parse_kml, parse_kql};
     use serde_json::json;
 
     #[test]
     fn test_to_command_empty_parameters() {
         let request = Request {
-            command: "FIND(?drug_name) WHERE { ?drug(type: \"Drug\") }".to_string(),
+            command: "FIND(?drug) WHERE { ?drug {type: \"Drug\"} }".to_string(),
             parameters: Map::new(),
             dry_run: false,
         };
 
         let result = request.to_command();
-        assert_eq!(result, "FIND(?drug_name) WHERE { ?drug(type: \"Drug\") }");
+        assert_eq!(result, "FIND(?drug) WHERE { ?drug {type: \"Drug\"} }");
         assert!(matches!(result, Cow::Borrowed(_)));
+        assert!(parse_kql(&result).is_ok());
     }
 
     #[test]
@@ -244,7 +246,7 @@ mod tests {
         );
 
         let request = Request {
-            command: "FIND(?drug_name) WHERE { ?symptom(name: $symptom_name) }".to_string(),
+            command: "FIND(?symptom) WHERE { ?symptom {name: $symptom_name} }".to_string(),
             parameters,
             dry_run: false,
         };
@@ -252,9 +254,10 @@ mod tests {
         let result = request.to_command();
         assert_eq!(
             result,
-            "FIND(?drug_name) WHERE { ?symptom(name: \"Headache\") }"
+            "FIND(?symptom) WHERE { ?symptom {name: \"Headache\"} }"
         );
         assert!(matches!(result, Cow::Owned(_)));
+        assert!(parse_kql(&result).is_ok());
     }
 
     #[test]
@@ -270,7 +273,7 @@ mod tests {
         );
 
         let request = Request {
-            command: "FIND(?drug) WHERE { ATTR(?drug, \"risk_level\", ?risk) FILTER(?risk < $risk_level) } LIMIT $limit".to_string(),
+            command: "FIND(?drug) WHERE { ?drug {type: \"Drug\"} ATTR(?drug, \"risk_level\", ?risk) FILTER(?risk < $risk_level) } LIMIT $limit".to_string(),
             parameters,
             dry_run: false,
         };
@@ -278,8 +281,9 @@ mod tests {
         let result = request.to_command();
         assert_eq!(
             result,
-            "FIND(?drug) WHERE { ATTR(?drug, \"risk_level\", ?risk) FILTER(?risk < 3.5) } LIMIT 10"
+            "FIND(?drug) WHERE { ?drug {type: \"Drug\"} ATTR(?drug, \"risk_level\", ?risk) FILTER(?risk < 3.5) } LIMIT 10"
         );
+        assert!(parse_kql(&result).is_ok());
     }
 
     #[test]
@@ -292,7 +296,7 @@ mod tests {
 
         let request = Request {
             command:
-                "UPSERT { CONCEPT @drug { ON { name: \"TestDrug\" } } } WITH METADATA $metadata"
+                "UPSERT { CONCEPT ?drug { {type: \"Drug\", name: \"TestDrug\"} } WITH METADATA $metadata }"
                     .to_string(),
             parameters,
             dry_run: false,
@@ -301,8 +305,10 @@ mod tests {
         let result = request.to_command();
         assert_eq!(
             result,
-            "UPSERT { CONCEPT @drug { ON { name: \"TestDrug\" } } } WITH METADATA {\"confidence\":0.95,\"source\":\"clinical_trial\"}"
+            "UPSERT { CONCEPT ?drug { {type: \"Drug\", name: \"TestDrug\"} } WITH METADATA {\"confidence\":0.95,\"source\":\"clinical_trial\"} }"
         );
+
+        assert!(parse_kml(&result).is_ok());
     }
 
     #[test]
@@ -322,10 +328,11 @@ mod tests {
             command: r#"
                 FIND(?drug_name)
                 WHERE {
-                    ?symptom(name: $symptom_name)
-                    PROP(?drug, "treats", ?symptom)
+                    ?symptom{name: $symptom_name}
+                    (?drug, "treats", ?symptom)
                     ATTR(?drug, "name", ?drug_name)
-                    ATTR(?drug, "experimental", $include_experimental)
+                    ATTR(?drug, "experimental", ?include_experimental)
+                    FILTER(?include_experimental == $include_experimental)
                 }
                 LIMIT $limit
             "#
@@ -338,14 +345,16 @@ mod tests {
         let expected = r#"
                 FIND(?drug_name)
                 WHERE {
-                    ?symptom(name: "Headache")
-                    PROP(?drug, "treats", ?symptom)
+                    ?symptom{name: "Headache"}
+                    (?drug, "treats", ?symptom)
                     ATTR(?drug, "name", ?drug_name)
-                    ATTR(?drug, "experimental", false)
+                    ATTR(?drug, "experimental", ?include_experimental)
+                    FILTER(?include_experimental == false)
                 }
                 LIMIT 5
             "#;
         assert_eq!(result, expected);
+        assert!(parse_kql(&result).is_ok());
     }
 
     #[test]
@@ -358,7 +367,7 @@ mod tests {
 
         let request = Request {
             command:
-                "FIND(?drug1, ?drug2) WHERE { ?drug1(type: $drug_type) ?drug2(type: $drug_type) }"
+                "FIND(?drug1, ?drug2) WHERE { ?drug1 {type: $drug_type} ?drug2 {type: $drug_type} }"
                     .to_string(),
             parameters,
             dry_run: false,
@@ -367,8 +376,9 @@ mod tests {
         let result = request.to_command();
         assert_eq!(
             result,
-            "FIND(?drug1, ?drug2) WHERE { ?drug1(type: \"Analgesic\") ?drug2(type: \"Analgesic\") }"
+            "FIND(?drug1, ?drug2) WHERE { ?drug1 {type: \"Analgesic\"} ?drug2 {type: \"Analgesic\"} }"
         );
+        assert!(parse_kql(&result).is_ok());
     }
 
     #[test]
@@ -380,14 +390,15 @@ mod tests {
         );
 
         let request = Request {
-            command: "FIND(?item) WHERE { ?item(name: $missing_param) }".to_string(),
+            command: "FIND(?item) WHERE { ?item{name: $missing_param} }".to_string(),
             parameters,
             dry_run: false,
         };
 
         let result = request.to_command();
         // 不存在的参数应该保持原样
-        assert_eq!(result, "FIND(?item) WHERE { ?item(name: $missing_param) }");
+        assert_eq!(result, "FIND(?item) WHERE { ?item{name: $missing_param} }");
+        assert!(parse_kql(&result).is_err());
     }
 
     #[test]
@@ -399,7 +410,7 @@ mod tests {
         );
 
         let request = Request {
-            command: "FIND(?drug) WHERE { ?drug(name: $special_name) }".to_string(),
+            command: "FIND(?drug) WHERE { ?drug{name: $special_name} }".to_string(),
             parameters,
             dry_run: false,
         };
@@ -407,8 +418,9 @@ mod tests {
         let result = request.to_command();
         assert_eq!(
             result,
-            "FIND(?drug) WHERE { ?drug(name: \"Drug with \\\"quotes\\\" and $symbols\") }"
+            "FIND(?drug) WHERE { ?drug{name: \"Drug with \\\"quotes\\\" and $symbols\"} }"
         );
+        assert!(parse_kql(&result).is_ok());
     }
 
     #[test]
@@ -432,9 +444,9 @@ mod tests {
             command: r#"
                 FIND(?drug_name, ?confidence)
                 WHERE {
-                    ?symptom(name: $symptom_name)
-                    PROP(?drug, "treats", ?symptom) { confidence: ?confidence }
+                    (?drug, "treats", {name: $symptom_name})
                     ATTR(?drug, "name", ?drug_name)
+                    META(?drug, "confidence", ?confidence)
                     FILTER(?confidence > $confidence_threshold)
                 }
                 ORDER BY ?confidence DESC
@@ -449,15 +461,16 @@ mod tests {
         let expected = r#"
                 FIND(?drug_name, ?confidence)
                 WHERE {
-                    ?symptom(name: "Brain Fog")
-                    PROP(?drug, "treats", ?symptom) { confidence: ?confidence }
+                    (?drug, "treats", {name: "Brain Fog"})
                     ATTR(?drug, "name", ?drug_name)
+                    META(?drug, "confidence", ?confidence)
                     FILTER(?confidence > 0.8)
                 }
                 ORDER BY ?confidence DESC
                 LIMIT 20
             "#;
         assert_eq!(result, expected);
+        assert!(parse_kql(expected).is_ok());
     }
 
     #[test]

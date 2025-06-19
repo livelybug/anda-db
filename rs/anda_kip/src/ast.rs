@@ -1,4 +1,4 @@
-//! # KIP (Knowledge Interaction Protocol) AST Definitions
+//! # Abstract Syntax Tree definitions for all KIP constructs
 //!
 //! This module defines the Abstract Syntax Tree (AST) structures for the Knowledge Interaction Protocol (KIP),
 //! a knowledge memory interaction protocol designed for Large Language Models (LLMs) to build sustainable

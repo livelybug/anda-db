@@ -24,37 +24,13 @@ This implementation follows the official KIP specification. For detailed informa
 
 **👉 [KIP Specification](https://github.com/ldclabs/KIP)**
 
-## Features
-
-### 🔍 **KQL (Knowledge Query Language)**
-Powerful graph-based query language for knowledge retrieval and reasoning:
-- Complex graph pattern matching with variables
-- Aggregation functions (COUNT, COLLECT, SUM, AVG, MIN, MAX)
-- Filtering, sorting, and pagination
-- Optional and union clauses for flexible querying
-- Subqueries and nested operations
-
-### 🔧 **KML (Knowledge Manipulation Language)**
-Declarative language for knowledge evolution and updates:
-- Atomic UPSERT operations for concepts and propositions
-- Knowledge Capsules for encapsulating related knowledge
-- Precise DELETE operations with safety mechanisms
-- Local handles for intra-transaction references
-- Rich metadata support
-
-### 📊 **META Commands**
-Introspection and schema exploration capabilities:
-- DESCRIBE commands for schema information
-- SEARCH functionality for concept discovery
-- Cognitive Primer generation for LLM guidance
-
 ## Quick Start
 
 Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-anda_kip = "0.3"
+anda_kip = "0.4"
 ```
 
 ### Basic Usage
@@ -66,9 +42,10 @@ use anda_kip::{parse_kip, Command, Executor, Response, KipError};
 let query = parse_kip(r#"
     FIND(?drug_name, ?risk_level)
     WHERE {
-        ?drug(type: "Drug")
-        ?headache(name: "Headache")
-        PROP(?drug, "treats", ?headache)
+        ?drug {type: "Drug"}
+        ?headache {name: "Headache"}
+        (?drug, "treats", ?headache)
+
         ATTR(?drug, "name", ?drug_name)
         ATTR(?drug, "risk_level", ?risk_level)
         FILTER(?risk_level < 3)
@@ -80,15 +57,15 @@ let query = parse_kip(r#"
 // Parse a KML statement
 let statement = parse_kip(r#"
     UPSERT {
-        CONCEPT @new_drug {
-            ON { type: "Drug", name: "Aspirin" }
+        CONCEPT ?new_drug {
+            { type: "Drug", name: "Aspirin" }
             SET ATTRIBUTES {
                 molecular_formula: "C9H8O4",
                 risk_level: 1
             }
             SET PROPOSITIONS {
-                PROP("treats", ON { type: "Symptom", name: "Headache" })
-                PROP("is_class_of", ON { type: "DrugClass", name: "NSAID" })
+                ("treats", { type: "Symptom", name: "Headache" })
+                ("is_class_of", { type: "DrugClass", name: "NSAID" })
             }
         }
     }
@@ -140,11 +117,11 @@ use anda_kip::{execute_kip, Request, Response};
 
 // Using the high-level execution function
 let executor = MyKnowledgeGraph::new();
-let response = execute_kip(&executor, "FIND(?x) WHERE { ?x(type: \"Drug\") }").await?;
+let response = execute_kip(&executor, "FIND(?x) WHERE { ?x {type: \"Drug\"} }").await?;
 
 // Using structured requests with parameters
 let request = Request {
-    command: "FIND(?drug) WHERE { ?drug(type: \"Drug\") ATTR(?drug, \"name\", $drug_name) }".to_string(),
+    command: "FIND(?drug) WHERE { ?drug {type: \"Drug\", name: $drug_name} }".to_string(),
     parameters: [("drug_name".to_string(), json!("Aspirin"))].into_iter().collect(),
     dry_run: false,
 };
