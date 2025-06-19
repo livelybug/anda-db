@@ -76,6 +76,7 @@ where
 }
 
 /// Parses a valid identifier (e.g., for variables, types, predicates).
+/// An identifier starts with a letter or underscore, followed by any combination of letters, digits, or underscores.
 pub fn identifier(input: &str) -> IResult<&str, &str> {
     recognize(pair(
         alt((alpha1, tag("_"))),
@@ -87,11 +88,6 @@ pub fn identifier(input: &str) -> IResult<&str, &str> {
 /// Parses a KIP variable, like `?my_var`.
 pub fn variable(input: &str) -> IResult<&str, String> {
     map(preceded(char('?'), identifier), |s| s.to_string()).parse(input)
-}
-
-/// Parses a local handle in KML, like `@my_handle`.
-pub fn local_handle(input: &str) -> IResult<&str, String> {
-    map(preceded(char('@'), identifier), |s| s.to_string()).parse(input)
 }
 
 /// Parses any KIP value (string, number, boolean, null).
@@ -135,9 +131,10 @@ pub fn json_value_map(input: &str) -> IResult<&str, Map<String, Json>> {
 }
 
 fn key_json_pair(input: &str) -> IResult<&str, (String, Json)> {
-    map(
-        separated_pair(identifier, ws(char(':')), json_value()),
-        |(k, v)| (k.to_string(), v),
+    separated_pair(
+        alt((quoted_string, map(identifier, |s| s.to_string()))),
+        ws(char(':')),
+        json_value(),
     )
     .parse(input)
 }
@@ -196,21 +193,6 @@ mod tests {
         assert_eq!(variable("?var123"), Ok(("", "var123".to_string())));
         assert!(variable("my_var").is_err());
         assert!(variable("?").is_err());
-    }
-
-    #[test]
-    fn test_local_handle() {
-        assert_eq!(
-            local_handle("@my_handle"),
-            Ok(("", "my_handle".to_string()))
-        );
-        assert_eq!(local_handle("@_private"), Ok(("", "_private".to_string())));
-        assert_eq!(
-            local_handle("@handle123"),
-            Ok(("", "handle123".to_string()))
-        );
-        assert!(local_handle("my_handle").is_err());
-        assert!(local_handle("@").is_err());
     }
 
     #[test]
@@ -288,6 +270,13 @@ mod tests {
     #[test]
     fn test_key_value_map() {
         let result = json_value_map(r#"{ name: "John", age: 25 }"#);
+        assert!(result.is_ok());
+        let (_, map) = result.unwrap();
+        assert_eq!(map.len(), 2);
+        assert_eq!(map.get("name"), Some(&Json::String("John".to_string())));
+        assert_eq!(map.get("age"), Some(&Json::Number(Number::from(25))));
+
+        let result = json_value_map(r#"{ "name" : "John", "age": 25 }"#);
         assert!(result.is_ok());
         let (_, map) = result.unwrap();
         assert_eq!(map.len(), 2);

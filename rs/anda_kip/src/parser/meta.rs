@@ -47,16 +47,18 @@ fn parse_search_command(input: &str) -> IResult<&str, SearchCommand> {
     map(
         preceded(
             ws(tag("SEARCH ")),
-            preceded(
-                ws(tag("CONCEPT ")),
-                (
-                    ws(quoted_string),
-                    opt(preceded(tag("WITH TYPE "), ws(quoted_string))),
-                    opt(preceded(tag("LIMIT "), ws(nom::character::complete::u64))),
-                ),
+            (
+                ws(alt((
+                    value(SearchTarget::Concept, tag("CONCEPT ")),
+                    value(SearchTarget::Proposition, tag("PROPOSITION ")),
+                ))),
+                ws(quoted_string),
+                opt(preceded(tag("WITH TYPE "), ws(quoted_string))),
+                opt(preceded(tag("LIMIT "), ws(nom::character::complete::u64))),
             ),
         ),
-        |(term, in_type, limit)| SearchCommand {
+        |(target, term, in_type, limit)| SearchCommand {
+            target,
             term,
             in_type,
             limit,
@@ -87,6 +89,7 @@ mod tests {
             Ok((
                 "",
                 MetaCommand::Search(SearchCommand {
+                    target: SearchTarget::Concept,
                     term: "aspirin".to_string(),
                     in_type: None,
                     limit: None,
@@ -150,6 +153,7 @@ mod tests {
             Ok((
                 "",
                 SearchCommand {
+                    target: SearchTarget::Concept,
                     term: "aspirin".to_string(),
                     in_type: None,
                     limit: None,
@@ -163,6 +167,7 @@ mod tests {
             Ok((
                 "",
                 SearchCommand {
+                    target: SearchTarget::Concept,
                     term: "aspirin".to_string(),
                     in_type: Some("Drug".to_string()),
                     limit: Some(5),
@@ -172,10 +177,11 @@ mod tests {
 
         // Search with limit
         assert_eq!(
-            parse_search_command("SEARCH CONCEPT \"aspirin\" LIMIT 5"),
+            parse_search_command("SEARCH PROPOSITION \"aspirin\" LIMIT 5"),
             Ok((
                 "",
                 SearchCommand {
+                    target: SearchTarget::Proposition,
                     term: "aspirin".to_string(),
                     in_type: None,
                     limit: Some(5),
@@ -189,6 +195,7 @@ mod tests {
             Ok((
                 "",
                 SearchCommand {
+                    target: SearchTarget::Concept,
                     term: "aspirin".to_string(),
                     in_type: Some("Drug".to_string()),
                     limit: Some(5),
@@ -202,6 +209,7 @@ mod tests {
             Ok((
                 "",
                 SearchCommand {
+                    target: SearchTarget::Concept,
                     term: "aspirin".to_string(),
                     in_type: None,
                     limit: None,
@@ -215,6 +223,7 @@ mod tests {
             Ok((
                 "",
                 SearchCommand {
+                    target: SearchTarget::Concept,
                     term: "阿司匹林".to_string(),
                     in_type: None,
                     limit: None,

@@ -219,7 +219,7 @@ mod tests {
         let executor = MyKnowledgeGraph {};
 
         // Test KQL command execution
-        let kql_command = "FIND(?drug) WHERE { ?drug(type: \"Drug\") }";
+        let kql_command = "FIND(?drug) WHERE { ?drug {type: \"Drug\"} }";
         let response = execute_kip(&executor, kql_command, false).await;
         assert!(matches!(response, Response::Result(_)));
     }

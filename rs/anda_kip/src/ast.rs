@@ -18,8 +18,7 @@ pub use serde_json::{Map, Number};
 
 /// Represents a primitive value in the KIP system.
 /// This is the fundamental data type used throughout KIP for attributes, metadata, and literals.
-#[derive(Debug, Clone, Eq, Hash, PartialEq, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Eq, Hash, PartialEq, Serialize, Deserialize, Default)]
 pub enum Value {
     /// Represents a null value
     #[default]
@@ -32,6 +31,8 @@ pub enum Value {
     String(String),
 }
 
+/// Alias for serde_json::Value. It is KIP's value type for JSON-like structures.
+/// Such as attributes, metadata.
 pub type Json = serde_json::Value;
 
 impl std::fmt::Display for Value {
@@ -57,6 +58,92 @@ impl From<Value> for Json {
     }
 }
 
+impl TryFrom<Json> for Value {
+    type Error = String;
+
+    fn try_from(value: Json) -> Result<Self, Self::Error> {
+        match value {
+            Json::Null => Ok(Value::Null),
+            Json::Bool(b) => Ok(Value::Bool(b)),
+            Json::Number(n) => Ok(Value::Number(n)),
+            Json::String(s) => Ok(Value::String(s)),
+            _ => Err(format!("Unsupported JSON type: {value:?}")),
+        }
+    }
+}
+
+impl Value {
+    /// Extracts a string from the Value, returning an error if the type is incorrect.
+    pub fn into_opt_string(self) -> Result<Option<String>, String> {
+        match self {
+            Value::String(s) => Ok(Some(s)),
+            Value::Null => Ok(None),
+            v => Err(format!("Expected a string or null, found: {v:?}")),
+        }
+    }
+
+    /// Extracts a number from the Value, returning an error if the type is incorrect.
+    pub fn into_opt_number(self) -> Result<Option<Number>, String> {
+        match self {
+            Value::Number(n) => Ok(Some(n)),
+            Value::Null => Ok(None),
+            v => Err(format!("Expected a number or null, found: {v:?}")),
+        }
+    }
+
+    /// Extracts a boolean from the Value, returning an error if the type is incorrect.
+    pub fn into_opt_bool(self) -> Result<Option<bool>, String> {
+        match self {
+            Value::Bool(b) => Ok(Some(b)),
+            Value::Null => Ok(None),
+            v => Err(format!("Expected a boolean or null, found: {v:?}")),
+        }
+    }
+
+    /// Extracts a string from the Value, returning None if the type is incorrect.
+    pub fn as_string(self) -> Option<String> {
+        match self {
+            Value::String(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// Extracts a number from the Value, returning None if the type is incorrect.
+    pub fn as_number(self) -> Option<Number> {
+        match self {
+            Value::Number(n) => Some(n),
+            _ => None,
+        }
+    }
+
+    /// Extracts a boolean from the Value, returning None if the type is incorrect.
+    pub fn as_bool(self) -> Option<bool> {
+        match self {
+            Value::Bool(b) => Some(b),
+            _ => None,
+        }
+    }
+
+    /// Checks if the Value is a string.
+    pub fn is_string(&self) -> bool {
+        matches!(self, Value::String(_))
+    }
+
+    /// Checks if the Value is a number.
+    pub fn is_number(&self) -> bool {
+        matches!(self, Value::Number(_))
+    }
+
+    /// Checks if the Value is a boolean.
+    pub fn is_bool(&self) -> bool {
+        matches!(self, Value::Bool(_))
+    }
+
+    /// Checks if the Value is null.
+    pub fn is_null(&self) -> bool {
+        matches!(self, Value::Null)
+    }
+}
 
 /// Top-level command enum representing the three main KIP instruction sets.
 /// Each command type serves a specific purpose in the knowledge interaction workflow.
@@ -82,24 +169,120 @@ pub struct KeyValue {
     pub value: Value,
 }
 
-/// Represents an "ON" clause used for concept identification and grounding.
-/// Contains unique key attributes that identify a specific concept node in the knowledge graph.
-/// Example: `ON { type: "Drug", name: "Aspirin" }`
+/// Represents a concept clause used for concept identification and grounding.
+/// Syntax: `?node_var {type: "<type>", name: "<name>", id: "<id>"}`
 #[derive(Debug, PartialEq, Clone)]
-pub struct OnClause {
-    /// List of key-value pairs that uniquely identify a concept
-    pub keys: Vec<KeyValue>,
+pub struct ConceptClause {
+    /// The matcher for concept, which can be a combination of `id`, `type`, and `name`
+    pub matcher: ConceptMatcher,
+    /// A variable (e.g., `?drug`)
+    pub variable: Option<String>,
 }
 
-/// Represents the object part of a proposition, which can be either:
-/// - A reference to an existing concept node (via OnClause)
-/// - A local handle to a concept defined within the same transaction
+/// Represents a identifier for a concept node.
+/// This identifier can be constructed from various attributes like `id`, `type`, and `name`.
+/// It is used to uniquely identify a concept within the knowledge graph, or to match concepts
+/// based on type or name.
+/// Syntax: `{type: "<type>", name: "<name>", id: "<id>"}`
 #[derive(Debug, PartialEq, Clone)]
-pub enum PropObject {
-    /// Reference to an existing concept node using unique keys
-    Node(OnClause),
-    /// Local handle (starting with @) referencing a concept within the same transaction
-    LocalHandle(String),
+pub struct ConceptMatcher {
+    pub id: Option<String>,     // Optional unique ID for the concept
+    pub r#type: Option<String>, // Optional type for the concept
+    pub name: Option<String>,   // Optional name for the concept
+}
+
+/// Implements conversion from a vector of KeyValue pairs to a ConceptMatcher.
+impl TryFrom<Vec<KeyValue>> for ConceptMatcher {
+    type Error = String;
+
+    fn try_from(values: Vec<KeyValue>) -> Result<Self, Self::Error> {
+        let mut cc = ConceptMatcher {
+            id: None,
+            r#type: None,
+            name: None,
+        };
+
+        for val in values {
+            match val.key.as_str() {
+                "id" => cc.id = val.value.into_opt_string()?,
+                "type" => cc.r#type = val.value.into_opt_string()?,
+                "name" => cc.name = val.value.into_opt_string()?,
+                key => {
+                    return Err(format!("Invalid key in Concept clause: {}", key));
+                }
+            }
+        }
+
+        if cc.id.is_none() && cc.r#type.is_none() && cc.name.is_none() {
+            return Err(
+                "ConceptMatcher must have at least one identifying attribute: id, type, or name"
+                    .to_string(),
+            );
+        }
+
+        Ok(cc)
+    }
+}
+
+impl ConceptMatcher {
+    /// Checks if the ConceptMatcher is unique based on its attributes.
+    /// A ConceptMatcher is considered unique if it has an ID, or both type and name are specified.
+    pub fn is_unique(&self) -> bool {
+        self.id.is_some() || (self.r#type.is_some() && self.name.is_some())
+    }
+}
+
+/// Represents a proposition clause used for proposition identification and grounding.
+/// Syntax: `?link_var (?subject, "<predicate>", ?object)`
+#[derive(Debug, PartialEq, Clone)]
+pub struct PropositionClause {
+    /// The matcher for proposition, which can be a combination of `subject`, `predicate`, and `object`
+    pub matcher: PropositionMatcher,
+    /// A variable (e.g., `?relationship`)
+    pub variable: Option<String>,
+}
+
+/// Represents a proposition matcher that identifies a specific relationship between concepts or propositions.
+/// It consists of a subject, predicate, and object, which can be variables, concept references or proposition references.
+/// Syntax: `(?subject, "<predicate>", ?object)`
+#[derive(Debug, PartialEq, Clone)]
+pub struct PropositionMatcher {
+    /// The subject of the proposition
+    pub subject: TargetTerm,
+    /// The predicate (relationship type)
+    pub predicate: PredTerm,
+    /// The object of the proposition
+    pub object: TargetTerm,
+}
+
+/// Represents a term that can be a variable, node reference, or nested proposition.
+/// Used for both subject and object positions in proposition patterns.
+#[derive(Debug, PartialEq, Clone)]
+pub enum TargetTerm {
+    /// A variable (e.g., `?drug`)
+    Variable(String),
+    /// A reference to an existing concept node (via ConceptClause)
+    Concept(ConceptMatcher),
+    /// A nested proposition clause
+    Proposition(Box<PropositionMatcher>),
+}
+
+/// Represents a predicate term in a proposition.
+/// Can be either a variable or a literal string.
+#[derive(Debug, PartialEq, Clone)]
+pub enum PredTerm {
+    /// A variable predicate (e.g., `?relationship`)
+    Variable(String),
+    /// A literal predicate string (e.g., `"treats"`)
+    Literal(String),
+    /// A list of literal predicates (e.g., `"treats | causes"`)
+    Literals(Vec<String>),
+    /// A path predicate with constraints (e.g., `"is_subclass_of{0,5}"`)
+    Path {
+        literal: String,
+        min: usize, // Default is 0
+        max: usize, // Max is 10
+    },
 }
 
 // --- KQL AST ---
@@ -124,6 +307,7 @@ pub struct KqlQuery {
 
 /// Represents the FIND clause of a KQL query.
 /// Declares the final output of the query, supporting both simple variables and aggregations.
+/// Syntax: `FIND(?var1, ?agg_func(?var2))`
 #[derive(Debug, PartialEq, Clone)]
 pub struct FindClause {
     /// List of expressions to be returned (variables or aggregations)
@@ -136,7 +320,7 @@ pub struct FindClause {
 pub enum FindExpression {
     /// A simple variable reference (e.g., `?drug_name`)
     Variable(String),
-    /// An aggregation function with alias (e.g., `COUNT(?drug) AS ?drug_count`)
+    /// An aggregation function (e.g., `COUNT(?drug)`)
     Aggregation {
         /// The aggregation function to apply
         func: AggregationFunction,
@@ -144,8 +328,6 @@ pub enum FindExpression {
         var: String,
         /// Whether to use DISTINCT
         distinct: bool,
-        /// The alias for the result
-        alias: String,
     },
 }
 
@@ -155,8 +337,6 @@ pub enum FindExpression {
 pub enum AggregationFunction {
     /// COUNT(?var) - counts the number of bindings
     Count,
-    /// COLLECT(?var) - collects all values into a list
-    Collect,
     /// SUM(?var) - sums numeric values
     Sum,
     /// AVG(?var) - calculates average of numeric values
@@ -169,16 +349,19 @@ pub enum AggregationFunction {
 
 /// Represents different types of clauses in the WHERE section of a KQL query.
 /// All clauses are combined with logical AND by default.
+/// Syntax: `WHERE { ... }`
 #[derive(Debug, PartialEq, Clone)]
 pub enum WhereClause {
-    /// Type assertion/entity grounding: `?variable(type: "...", name: "...", id: "...")`
-    Grounding(Grounding),
-    /// Proposition pattern: `PROP(Subject, Predicate, Object) { metadata_filter }`
-    Proposition(PropositionPattern),
+    /// Concept clause: `?node_var {type: "<type>", name: "<name>", id: "<id>"}`
+    Concept(ConceptClause),
+    /// Proposition clause: `?link_var (?subject, "<predicate>", ?object)`
+    Proposition(PropositionClause),
     /// Attribute access: `ATTR(?node, "attribute_name", ?value_variable)`
-    Attribute(AttributePattern),
+    Attribute(AttributeClause),
+    /// Metadata access: `META(?target_variable, "<metadata_key>", ?value_variable)`
+    Metadata(MetadataClause),
     /// Filter condition: `FILTER(boolean_expression)`
-    Filter(FilterCondition),
+    Filter(FilterClause),
     /// Negation: `NOT { ... }`
     Not(Vec<WhereClause>),
     /// Optional matching: `OPTIONAL { ... }`
@@ -187,76 +370,40 @@ pub enum WhereClause {
     Union(Vec<WhereClause>),
 }
 
-/// Represents type assertion/entity grounding clause.
-/// Constrains a variable to a specific type or grounds it to a specific node in the graph.
-/// Example: `?drug(type: "Drug")` or `?aspirin(name: "Aspirin")`
-#[derive(Debug, PartialEq, Clone)]
-pub struct Grounding {
-    /// The variable to be constrained
-    pub variable: String,
-    /// Constraints (type, name, id, etc.)
-    pub constraints: Vec<KeyValue>,
-}
-
-/// Represents a term in a proposition that can be a variable, node reference, or nested proposition.
-/// Used for both subject and object positions in proposition patterns.
-#[derive(Debug, PartialEq, Clone)]
-pub enum PropTerm {
-    /// A variable (e.g., `?drug`)
-    Variable(String),
-    /// A specific node reference using unique keys
-    Node(OnClause),
-    /// A nested proposition pattern (for complex relationships)
-    NestedProp(Box<PropositionPattern>),
-}
-
-/// Represents a predicate term in a proposition.
-/// Can be either a variable or a literal string.
-#[derive(Debug, PartialEq, Clone)]
-pub enum PredTerm {
-    /// A variable predicate (e.g., `?relationship`)
-    Variable(String),
-    /// A literal predicate string (e.g., `"treats"`)
-    Literal(String),
-}
-
-/// Represents a proposition pattern for graph traversal.
-/// Follows the (Subject, Predicate, Object) triple pattern with optional metadata constraints.
-/// Example: `PROP(?drug, "treats", ?symptom) { confidence: ?conf }`
-#[derive(Debug, PartialEq, Clone)]
-pub struct PropositionPattern {
-    /// The subject of the proposition
-    pub subject: PropTerm,
-    /// The predicate (relationship type)
-    pub predicate: PredTerm,
-    /// The object of the proposition
-    pub object: PropTerm,
-    /// Optional metadata constraints for filtering
-    pub metadata_constraints: Option<Vec<KeyValue>>,
-}
-
 /// Represents an attribute access pattern.
-/// Retrieves an attribute value from a concept node and binds it to a variable.
-/// Example: `ATTR(?drug, "name", ?drug_name)`
+/// Retrieves an attribute value from a concept or proposition and binds it to a variable.
+/// Syntax: `ATTR(?node_variable, "<attribute_name>", ?value_variable)`
 #[derive(Debug, PartialEq, Clone)]
-pub struct AttributePattern {
-    /// The node variable to get the attribute from
-    pub node_variable: String,
+pub struct AttributeClause {
+    /// The concept or proposition variable to get the attribute from
+    pub target: TargetTerm,
     /// The name of the attribute to retrieve
-    pub attribute_name: String,
+    pub key: String,
     /// The variable to bind the attribute value to
-    pub value_variable: String,
+    pub variable: String,
+}
+
+/// Represents a metadata access pattern.
+/// Retrieves metadata from a concept or proposition and binds it to a variable.
+/// Syntax: `META(?subject_variable, "<metadata_key>", ?value_variable)`
+#[derive(Debug, PartialEq, Clone)]
+pub struct MetadataClause {
+    /// The concept or proposition variable to get the metadata from
+    pub target: TargetTerm,
+    /// The key of the metadata to retrieve
+    pub key: String,
+    /// The variable to bind the metadata value to
+    pub variable: String,
 }
 
 /// Represents a filter condition with optional subquery.
 /// Applies complex filtering logic to bound variables.
-/// Example: `FILTER(?risk < 3)` or `FILTER(?count > 5) { SELECT(COUNT(?item) AS ?count) WHERE { ... } }`
+/// Syntax: `FILTER(boolean_expression)`
+/// Example: `FILTER(?risk < 3)` or `FILTER(?count > 5)`
 #[derive(Debug, PartialEq, Clone)]
-pub struct FilterCondition {
+pub struct FilterClause {
     /// The main filter expression
     pub expression: FilterExpression,
-    /// Optional subquery for complex filtering
-    pub subquery: Option<SubqueryExpression>,
 }
 
 /// Represents different types of filter expressions.
@@ -333,16 +480,6 @@ pub enum FilterFunction {
     Regex,
 }
 
-/// Represents a subquery expression used within filter conditions.
-/// Allows nested queries for complex filtering logic.
-#[derive(Debug, PartialEq, Clone)]
-pub struct SubqueryExpression {
-    /// The SELECT clause of the subquery (similar to FIND)
-    pub select_clause: FindClause,
-    /// WHERE clauses of the subquery
-    pub where_clauses: Vec<WhereClause>,
-}
-
 /// Represents an ORDER BY condition for result sorting.
 #[derive(Debug, PartialEq, Clone)]
 pub struct OrderByCondition {
@@ -375,7 +512,7 @@ pub enum KmlStatement {
 
 /// Represents an UPSERT block - the primary vehicle for "Knowledge Capsules".
 /// Provides atomic creation or update of knowledge, ensuring idempotent operations.
-/// Example: `UPSERT { CONCEPT @handle { ... } } WITH METADATA { ... }`
+/// Structure: `UPSERT { CONCEPT @handle { ... } } WITH METADATA { ... }`
 #[derive(Debug, PartialEq, Clone)]
 pub struct UpsertBlock {
     /// List of concepts and propositions to upsert
@@ -396,13 +533,13 @@ pub enum UpsertItem {
 
 /// Represents a concept definition within an UPSERT block.
 /// Defines a concept node with its attributes and outgoing propositions.
-/// Example: `CONCEPT @handle { ON { ... } SET ATTRIBUTES { ... } SET PROPOSITIONS { ... } }`
+/// Structure: `CONCEPT @handle { { ... } SET ATTRIBUTES { ... } SET PROPOSITIONS { ... } } WITH METADATA { ... }`
 #[derive(Debug, PartialEq, Clone)]
 pub struct ConceptBlock {
     /// Local handle for referencing within the transaction (starts with @)
     pub handle: String,
-    /// ON clause for matching existing concepts or creating new ones
-    pub on: OnClause,
+    /// Concept clause for matching the existing concept or creating new one
+    pub concept: ConceptMatcher,
     /// Optional attributes to set on the concept
     pub set_attributes: Option<Map<String, Json>>,
     /// Optional propositions emanating from this concept
@@ -418,24 +555,22 @@ pub struct SetProposition {
     /// The predicate (relationship type)
     pub predicate: String,
     /// The object of the proposition (node or local handle)
-    pub object: PropObject,
+    pub object: TargetTerm,
     /// Optional metadata for this specific proposition
     pub metadata: Option<Map<String, Json>>,
 }
 
 /// Represents a standalone proposition definition within an UPSERT block.
 /// Used for creating complex relationships that don't naturally belong to a single concept.
-/// Example: `PROPOSITION @handle { (ON { ... }, "predicate", ON { ... }) }`
+/// Structure: `PROPOSITION @handle { ({ ... }, "predicate", { ... }) SET ATTRIBUTES { ... } } WITH METADATA { ... }`
 #[derive(Debug, PartialEq, Clone)]
 pub struct PropositionBlock {
     /// Local handle for referencing within the transaction (starts with @)
     pub handle: String,
-    /// Subject of the proposition (existing concept)
-    pub subject: OnClause,
-    /// Predicate (relationship type)
-    pub predicate: String,
-    /// Object of the proposition (node or local handle)
-    pub object: PropObject,
+    /// Proposition clause for matching the existing proposition or creating new one
+    pub proposition: PropositionMatcher,
+    /// Optional attributes to set on the concept
+    pub set_attributes: Option<Map<String, Json>>,
     /// Optional metadata for this proposition
     pub metadata: Option<Map<String, Json>>,
 }
@@ -444,33 +579,20 @@ pub struct PropositionBlock {
 /// Provides targeted removal of knowledge components from the Cognitive Nexus.
 #[derive(Debug, PartialEq, Clone)]
 pub enum DeleteStatement {
-    /// Delete specific attributes from a concept
-    /// Example: `DELETE ATTRIBUTES { "risk_category" } FROM ON { type: "Drug", name: "Aspirin" }`
+    /// Delete specific attributes from concepts or proposition where conditions match
+    /// Syntax: `DELETE ATTRIBUTES WHERE { ... }`
     DeleteAttributes {
         /// List of attribute names to delete
         attributes: Vec<String>,
-        /// The concept to delete attributes from
-        from: OnClause,
+        /// WHERE clauses containing graph patterns and filters (all ANDed together)
+        where_clauses: Vec<WhereClause>,
     },
+    /// Delete propositions where conditions match
+    /// Syntax: `DELETE PROPOSITIONS WHERE { ... }`
+    DeletePropositions(Vec<WhereClause>),
     /// Delete an entire concept and all its relationships
-    /// Example: `DELETE CONCEPT ON { type: "Drug", name: "OutdatedDrug" } DETACH`
-    DeleteConcept {
-        /// The concept to delete
-        on: OnClause,
-    },
-    /// Delete a specific proposition
-    /// Example: `DELETE PROPOSITION (ON { ... }, "treats", ON { ... })`
-    DeleteProposition {
-        /// Subject of the proposition to delete
-        subject: OnClause,
-        /// Predicate of the proposition to delete
-        predicate: String,
-        /// Object of the proposition to delete
-        object: OnClause,
-    },
-    /// Delete propositions matching a pattern
-    /// Example: `DELETE PROPOSITIONS WHERE { PROP(?s, ?p, ?o) { source: "untrusted" } }`
-    DeletePropositionsWhere(Vec<WhereClause>),
+    /// Syntax: `DELETE CONCEPT {type: "<type>", name: "<name>", id: "<id>"} DETACH`
+    DeleteConcept(ConceptMatcher),
 }
 
 // --- META AST ---
@@ -505,14 +627,25 @@ pub enum DescribeTarget {
 }
 
 /// Represents a SEARCH command for concept disambiguation.
-/// Helps LLMs find and identify concepts when exact matches are unclear.
-/// Example: `SEARCH "aspirin" IN_TYPE "Drug" LIMIT 10`
+/// Helps LLMs find and identify concepts or propositions when exact matches are unclear.
+/// Syntax: `SEARCH [CONCEPT|PROPOSITION] "<search_term>" WITH TYPE "<type_name>" LIMIT N`
 #[derive(Debug, PartialEq, Clone)]
 pub struct SearchCommand {
+    pub target: SearchTarget,
     /// The search term
     pub term: String,
     /// Optional type constraint for the search
     pub in_type: Option<String>,
     /// Optional limit on the number of results
     pub limit: Option<u64>,
+}
+
+/// Represents the target of a search command.
+/// Indicates whether the search is for concepts or propositions.
+#[derive(Debug, PartialEq, Clone)]
+pub enum SearchTarget {
+    /// Searching for concepts
+    Concept,
+    /// Searching for propositions
+    Proposition,
 }

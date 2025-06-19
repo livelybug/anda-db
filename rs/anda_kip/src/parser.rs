@@ -54,10 +54,10 @@ use crate::error::KipError;
 /// use anda_kip::parse_kip;
 ///
 /// // Parse a KQL query
-/// let kql_result = parse_kip("FIND(?drug) WHERE { ?drug(type: \"Drug\") }");
+/// let kql_result = parse_kip("FIND(?drug) WHERE { ?drug {type: \"Drug\"} }");
 ///
 /// // Parse a KML statement
-/// let kml_result = parse_kip("UPSERT { CONCEPT @drug { ON { name: \"Aspirin\" } } }");
+/// let kml_result = parse_kip("UPSERT { CONCEPT ?drug { { name: \"Aspirin\" } } }");
 ///
 /// // Parse a META command
 /// let meta_result = parse_kip("DESCRIBE PRIMER");
@@ -92,7 +92,7 @@ pub fn parse_kip(input: &str) -> Result<Command, KipError> {
 /// ```rust,no_run
 /// use anda_kip::parse_kql;
 ///
-/// let query = parse_kql("FIND(?drug_name) WHERE { ?drug(type: \"Drug\") ATTR(?drug, \"name\", ?drug_name) }");
+/// let query = parse_kql("FIND(?drug_name) WHERE { ?drug {type: \"Drug\"} ATTR(?drug, \"name\", ?drug_name) }");
 /// ```
 pub fn parse_kql(input: &str) -> Result<KqlQuery, KipError> {
     let rt = all_consuming(json::ws(kql::parse_kql_query))
@@ -120,7 +120,7 @@ pub fn parse_kql(input: &str) -> Result<KqlQuery, KipError> {
 /// ```rust,no_run
 /// use anda_kip::parse_kml;
 ///
-/// let statement = parse_kml("UPSERT { CONCEPT @drug { ON { name: \"Aspirin\" } SET ATTRIBUTES { type: \"NSAID\" } } }");
+/// let statement = parse_kml("UPSERT { CONCEPT ?drug { { name: \"Aspirin\" } SET ATTRIBUTES { type: \"NSAID\" } } }");
 /// ```
 pub fn parse_kml(input: &str) -> Result<KmlStatement, KipError> {
     let rt = all_consuming(json::ws(kml::parse_kml_statement))
@@ -259,8 +259,8 @@ mod tests {
 
 UPSERT {
   // Define the main drug concept: Cognizine
-  CONCEPT @cognizine {
-    ON { type: "Drug", name: "Cognizine" }
+  CONCEPT ?cognizine {
+    { type: "Drug", name: "Cognizine" }
     SET ATTRIBUTES {
       molecular_formula: "C12H15N5O3",     // Molecular formula of Cognizine
       risk_level: 2,
@@ -268,13 +268,13 @@ UPSERT {
     }
     SET PROPOSITIONS {
       // Link to an existing concept (Nootropic)
-      PROP("is_class_of", ON { type: "DrugClass", name: "Nootropic" })
+      ("is_class_of", { type: "DrugClass", name: "Nootropic" })
 
       // Link to an existing concept (Brain Fog)
-      PROP("treats", ON { type: "Symptom", name: "Brain Fog" })
+      ("treats", { type: "Symptom", name: "Brain Fog" })
 
-      // Link to another new concept defined within this capsule (@neural_bloom)
-      PROP("has_side_effect", @neural_bloom) WITH METADATA {
+      // Link to another new concept defined within this capsule (?neural_bloom)
+      ("has_side_effect", ?neural_bloom) WITH METADATA {
         // This specific proposition has its own metadata
         confidence: 0.75,
         source: "Preliminary Clinical Trial NCT012345"
@@ -283,8 +283,8 @@ UPSERT {
   }
 
   // Define the new side effect concept: Neural Bloom
-  CONCEPT @neural_bloom {
-    ON { type: "Symptom", name: "Neural Bloom" }
+  CONCEPT ?neural_bloom {
+    { type: "Symptom", name: "Neural Bloom" }
     SET ATTRIBUTES {
       description: "A rare side effect characterized by a temporary burst of creative thoughts."
     }
@@ -310,18 +310,25 @@ WITH METADATA {
                 // 验证有两个概念操作
                 assert_eq!(items.len(), 2);
 
-                // 验证第一个概念 (@cognizine)
+                // 验证第一个概念 (?cognizine)
                 let cognizine_op = &items[0];
                 match cognizine_op {
                     ast::UpsertItem::Concept(ast::ConceptBlock {
                         handle,
-                        on,
-                        metadata,
+                        concept,
                         set_attributes,
                         set_propositions,
+                        metadata,
                     }) => {
                         assert_eq!(handle, "cognizine");
-                        assert_eq!(on.keys.len(), 2);
+                        assert_eq!(
+                            concept,
+                            &ast::ConceptMatcher {
+                                id: None,
+                                r#type: Some("Drug".to_string()),
+                                name: Some("Cognizine".to_string()),
+                            }
+                        );
                         assert!(metadata.is_none());
                         assert_eq!(set_attributes.as_ref().unwrap().len(), 3);
                         assert_eq!(set_propositions.as_ref().unwrap().len(), 3);
@@ -329,18 +336,25 @@ WITH METADATA {
                     _ => panic!("Expected Concept operation for first operation"),
                 }
 
-                // 验证第二个概念 (@neural_bloom)
+                // 验证第二个概念 (?neural_bloom)
                 let neural_bloom_op = &items[1];
                 match neural_bloom_op {
                     ast::UpsertItem::Concept(ast::ConceptBlock {
                         handle,
-                        on,
-                        metadata,
+                        concept,
                         set_attributes,
                         set_propositions,
+                        metadata,
                     }) => {
                         assert_eq!(handle, "neural_bloom");
-                        assert_eq!(on.keys.len(), 2);
+                        assert_eq!(
+                            concept,
+                            &ast::ConceptMatcher {
+                                id: None,
+                                r#type: Some("Symptom".to_string()),
+                                name: Some("Neural Bloom".to_string()),
+                            }
+                        );
                         assert!(metadata.is_none());
                         assert_eq!(set_attributes.as_ref().unwrap().len(), 1);
                         assert!(set_propositions.is_none());

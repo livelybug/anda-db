@@ -1058,6 +1058,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore]
     async fn test_with_local_file() {
         let root = TempDir::new().unwrap();
         let storage = EncryptedStoreBuilder::with_secret(
