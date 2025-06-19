@@ -14,6 +14,13 @@
 //! offering robust parsing, execution, and communication capabilities for knowledge graph
 //! operations.
 //!
+//! ## Standards Compliance
+//!
+//! This implementation follows the official KIP specification. For detailed information
+//! about the protocol, syntax, and semantics, please refer to:
+//!
+//! **👉 [KIP Specification](https://github.com/ldclabs/KIP)**
+//!
 //! ## Architecture
 //!
 //! The crate is organized into several key modules:
@@ -43,7 +50,7 @@
 //!     }
 //!     ORDER BY ?risk_level ASC
 //!     LIMIT 10
-//! "#)?;
+//! "#).unwrap();
 //!
 //! // Parse a KML statement
 //! let statement = parse_kip(r#"
@@ -56,15 +63,8 @@
 //!             }
 //!         }
 //!     }
-//! "#)?;
+//! "#).unwrap();
 //! ```
-//!
-//! ## Standards Compliance
-//!
-//! This implementation follows the official KIP specification. For detailed information
-//! about the protocol, syntax, and semantics, please refer to:
-//!
-//! **👉 [KIP Specification](https://github.com/ldclabs/KIP)**
 //!
 //! ## Examples
 //!
