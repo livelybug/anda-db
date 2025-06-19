@@ -131,12 +131,75 @@ pub fn parse_target_term(input: &str) -> IResult<&str, TargetTerm> {
     .parse(input)
 }
 
-fn parse_pred_term(input: &str) -> IResult<&str, PredTerm> {
+fn parse_predicate_path(input: &str) -> IResult<&str, PredTerm> {
+    let (input, first) = parse_quantified_predicate(input)?;
+
+    match first {
+        PredTerm::Literal(predicate) if input.contains('|') => map(
+            fold(
+                0..,
+                preceded(ws(char('|')), quoted_string),
+                move || vec![predicate.clone()],
+                |mut acc, next| {
+                    acc.push(next);
+                    acc
+                },
+            ),
+            PredTerm::Alternative,
+        )
+        .parse(input),
+        _ => Ok((input, first)),
+    }
+}
+
+fn parse_quantified_predicate(input: &str) -> IResult<&str, PredTerm> {
     alt((
-        map(variable, PredTerm::Variable),
-        map(quoted_string, PredTerm::Literal), // TODO: Handle more complex predicates
+        map(
+            (quoted_string, parse_predicate_quantifier),
+            |(predicate, (min, max))| PredTerm::Quantified {
+                predicate,
+                min,
+                max,
+            },
+        ),
+        map(quoted_string, PredTerm::Literal),
     ))
     .parse(input)
+}
+
+// parse: {m,n} | {m,} | {m}
+fn parse_predicate_quantifier(input: &str) -> IResult<&str, (u16, Option<u16>)> {
+    braced_block(ws(alt((
+        // {m,n} 格式
+        map_res(
+            (
+                nom::character::complete::u16,
+                ws(char(',')),
+                nom::character::complete::u16,
+            ),
+            |(min, _, max)| {
+                if max >= min {
+                    Ok((min, Some(max)))
+                } else {
+                    Err(format!(
+                        "invalid quantifier: min {min} cannot be greater than max {max}"
+                    ))
+                }
+            },
+        ),
+        // {m,} 格式（无上限）
+        map(
+            (nom::character::complete::u16, ws(char(','))),
+            |(min, _)| (min, None),
+        ),
+        // {m} 格式（精确匹配）
+        map(nom::character::complete::u16, |min| (min, Some(min))),
+    ))))
+    .parse(input)
+}
+
+fn parse_pred_term(input: &str) -> IResult<&str, PredTerm> {
+    alt((map(variable, PredTerm::Variable), parse_predicate_path)).parse(input)
 }
 
 pub fn parse_prop_mather(input: &str) -> IResult<&str, PropositionMatcher> {
@@ -715,6 +778,72 @@ mod tests {
                 );
             }
             _ => panic!("Expected proposition clause"),
+        }
+    }
+
+    #[test]
+    fn test_parse_quantified_predicate_path() {
+        let test_cases = vec![
+            // {2,5} - 2到5跳
+            (r#"(?a, "follows"{2,5}, ?b)"#, 2, Some(5)),
+            // {3,} - 至少3跳
+            (r#"(?a, "follows"{3,}, ?b)"#, 3, None),
+            // {4} - 精确4跳
+            (r#"(?a, "follows"{4}, ?b)"#, 4, Some(4)),
+        ];
+
+        for (input, expected_min, expected_max) in test_cases {
+            let result = parse_prop_mather(input);
+            assert!(result.is_ok(), "Failed to parse: {}", input);
+
+            let (_, matcher) = result.unwrap();
+            match &matcher.predicate {
+                PredTerm::Quantified {
+                    predicate,
+                    min,
+                    max,
+                } => {
+                    assert_eq!(predicate, "follows");
+                    assert_eq!(*min, expected_min);
+                    assert_eq!(*max, expected_max);
+                }
+                _ => panic!("Expected quantified predicate path for: {}", input),
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_alternative_predicate_path() {
+        let input = r#"(?a, "follows" | "connected_to"| "mark", ?b)"#;
+        let result = parse_prop_mather(input);
+        assert!(result.is_ok());
+
+        let (_, matcher) = result.unwrap();
+        match &matcher.predicate {
+            PredTerm::Alternative(paths) => {
+                assert_eq!(paths.len(), 3);
+                assert_eq!(paths[0], "follows");
+                assert_eq!(paths[1], "connected_to");
+                assert_eq!(paths[2], "mark");
+            }
+            _ => panic!("Expected alternative predicate path"),
+        }
+    }
+
+    #[test]
+    fn test_parse_predicate_path_error_cases() {
+        let invalid_inputs = vec![
+            r#"(?a, "follows"{}, ?b)"#,    // 空量词
+            r#"(?a, "follows"{a,b}, ?b)"#, // 非数字量词
+            r#"(?a, "follows"{5,2}, ?b)"#, // min > max
+            r#"(?a, "follows"{ , }, ?b)"#, // 缺少数字
+            r#"(?a, | "follows", ?b)"#,    // 以 | 开始
+            r#"(?a, "follows" |, ?b)"#,    // 以 | 结束
+        ];
+
+        for input in invalid_inputs {
+            let result = parse_prop_mather(input);
+            assert!(result.is_err(), "Should fail to parse: {}", input);
         }
     }
 

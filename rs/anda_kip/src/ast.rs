@@ -275,13 +275,13 @@ pub enum PredTerm {
     Variable(String),
     /// A literal predicate string (e.g., `"treats"`)
     Literal(String),
-    /// A list of literal predicates (e.g., `"treats | causes"`)
-    Literals(Vec<String>),
-    /// A path predicate with constraints (e.g., `"is_subclass_of{0,5}"`)
-    Path {
-        literal: String,
-        min: usize, // Default is 0
-        max: usize, // Max is 10
+    /// A list of literal predicates (e.g., `"treats" | "causes"`)
+    Alternative(Vec<String>),
+    /// A quantified predicate (e.g., `"is_subclass_of"{0,5}`)
+    Quantified {
+        predicate: String,
+        min: u16,
+        max: Option<u16>,
     },
 }
 
