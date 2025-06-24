@@ -1,0 +1,28 @@
+[package]
+name = "anda_cognitive_nexus"
+version = "0.1.0"
+description = "A Rust implementation of KIP (Knowledge Interaction Protocol) base on Anda DB."
+keywords = ["KIP", "Knowledge", "Memory", "Anda", "Agent"]
+categories = ["database", "data-structures", "text-processing"]
+repository = "https://github.com/ldclabs/anda_db/tree/main/rs/anda_cognitive_nexus"
+publish = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anda_kip = { version = "0.4", path = "../anda_kip" }
+anda_db = { version = "0.3", path = "../anda_db" }
+anda_db_schema = { version = "0.2", path = "../anda_db_schema" }
+async-trait = { workspace = true }
+base64 = { workspace = true }
+bytes = { workspace = true }
+ciborium = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_bytes = { workspace = true }
+serde_json = { workspace = true }
+regex = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }

@@ -22,7 +22,7 @@ async-trait = "0.1"
 async-stream = "0.3"
 bytes = "1"
 base64 = "0.22"
-const-hex = "1.14"
+hex = "0.4"
 croaring = "2.3"
 futures = { version = "0.3" }
 tokio = { version = "1" }
@@ -37,6 +37,7 @@ half = { version = "2.6", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_bytes = "0.11"
 serde_json = "1"
+schemars = "0.9"
 sha3 = "0.10"
 thiserror = "2"
 parking_lot = "0.12"
@@ -54,7 +55,6 @@ zstd-safe = "7"
 async-compression = { version = "0.4", features = ["tokio", "zstd"] }
 nom = "8"
 regex = "1.11"
-itertools = "0.14"
 
 [workspace.metadata.cargo-shear]
 ignored = ["blas-src"]

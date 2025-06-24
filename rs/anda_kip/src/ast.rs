@@ -16,6 +16,10 @@ use serde::{Deserialize, Serialize};
 
 pub use serde_json::{Map, Number};
 
+/// Alias for serde_json::Value. It is KIP's value type for JSON-like structures.
+/// Such as attributes, metadata.
+pub type Json = serde_json::Value;
+
 /// Represents a primitive value in the KIP system.
 /// This is the fundamental data type used throughout KIP for attributes, metadata, and literals.
 #[derive(Debug, Clone, Eq, Hash, PartialEq, Serialize, Deserialize, Default)]
@@ -30,10 +34,6 @@ pub enum Value {
     /// String value
     String(String),
 }
-
-/// Alias for serde_json::Value. It is KIP's value type for JSON-like structures.
-/// Such as attributes, metadata.
-pub type Json = serde_json::Value;
 
 impl std::fmt::Display for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

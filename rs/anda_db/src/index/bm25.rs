@@ -16,7 +16,6 @@ use crate::{
 
 pub struct BM25 {
     name: String,
-    field: Fe,
     index: BM25Index<TokenizerChain>,
     storage: Storage, // 与 Collection 共享同一个 Storage 实例
     metadata_version: RwLock<ObjectVersion>,
@@ -55,12 +54,12 @@ impl BM25 {
     }
 
     pub async fn new(
-        name: String,
-        field: Fe,
+        field: &Fe,
         tokenizer: TokenizerChain,
         storage: Storage,
         now_ms: u64,
     ) -> Result<Self, DBError> {
+        let name = field.name().to_string();
         let config = BM25Config {
             bucket_overload_size: storage.object_chunk_size() as u32 * 2,
             ..Default::default()
@@ -80,7 +79,6 @@ impl BM25 {
             .await?;
         Ok(Self {
             name,
-            field,
             index,
             storage,
             metadata_version: RwLock::new(ver),
@@ -89,7 +87,6 @@ impl BM25 {
 
     pub async fn bootstrap(
         name: String,
-        field: Fe,
         tokenizer: TokenizerChain,
         storage: Storage,
     ) -> Result<Self, DBError> {
@@ -118,7 +115,6 @@ impl BM25 {
 
         Ok(Self {
             name,
-            field,
             index,
             storage,
             metadata_version: RwLock::new(ver),
@@ -170,7 +166,7 @@ impl BM25 {
     }
 
     pub fn field_name(&self) -> &str {
-        self.field.name()
+        &self.name
     }
 
     pub fn stats(&self) -> BM25Stats {

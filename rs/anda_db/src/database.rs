@@ -7,7 +7,10 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
-use std::time::{Duration, Instant};
+use std::{
+    fmt::Debug,
+    time::{Duration, Instant},
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -74,6 +77,12 @@ pub struct DBMetadata {
 
     /// Set of collection names in this database
     pub collections: BTreeSet<String>,
+}
+
+impl Debug for AndaDB {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "AndaDB({})", self.name)
+    }
 }
 
 impl AndaDB {

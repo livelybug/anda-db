@@ -8,12 +8,15 @@ use object_store::path::Path;
 use parking_lot::RwLock;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
-use std::time::Instant;
+use std::{borrow::Cow, time::Instant};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    fmt::Debug,
+};
 
 use crate::{
     database::AndaDB,
@@ -162,6 +165,12 @@ pub struct CollectionStats {
 
     /// Whether the collection is in read-only mode
     pub read_only: bool,
+}
+
+impl Debug for Collection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Collection({})", self.name)
+    }
 }
 
 impl Collection {
@@ -376,7 +385,8 @@ impl Collection {
                 let mut btree_indexes = Vec::new();
                 for (name, field) in meta.btree_indexes.iter() {
                     let index =
-                        BTree::bootstrap(name.clone(), field.clone(), self.storage.clone()).await?;
+                        BTree::bootstrap(name.clone(), field.r#type(), self.storage.clone())
+                            .await?;
                     if field.unique() {
                         btree_indexes.insert(0, index);
                     } else {
@@ -387,14 +397,10 @@ impl Collection {
             },
             async {
                 let mut bm25_indexes = Vec::new();
-                for (name, field) in meta.bm25_hnsw_indexes.iter() {
-                    let index = BM25::bootstrap(
-                        name.clone(),
-                        field.clone(),
-                        self.tokenizer.clone(),
-                        self.storage.clone(),
-                    )
-                    .await?;
+                for (name, _) in meta.bm25_hnsw_indexes.iter() {
+                    let index =
+                        BM25::bootstrap(name.clone(), self.tokenizer.clone(), self.storage.clone())
+                            .await?;
 
                     bm25_indexes.push(index);
                 }
@@ -402,9 +408,8 @@ impl Collection {
             },
             async {
                 let mut hnsw_indexes = Vec::new();
-                for (name, field) in meta.bm25_hnsw_indexes.iter() {
-                    let index =
-                        Hnsw::bootstrap(name.clone(), field.clone(), self.storage.clone()).await?;
+                for (name, _) in meta.bm25_hnsw_indexes.iter() {
+                    let index = Hnsw::bootstrap(name.clone(), self.storage.clone()).await?;
 
                     hnsw_indexes.push(index);
                 }
@@ -445,11 +450,11 @@ impl Collection {
                     let mut segment_ids = BTreeSet::new();
                     // try to repair indexes
                     for index in &self.btree_indexes {
-                        if let Some(fv) = doc.get_field(index.field_name()) {
-                            if fv == &FieldValue::Null {
+                        if let Some(fv) = doc.get_virtual_field(index.virtual_field()) {
+                            if fv.as_ref() == &FieldValue::Null {
                                 continue;
                             }
-                            let _ = index.insert(id, fv, now_ms); // ignore errors
+                            let _ = index.insert(id, fv.into_owned(), now_ms); // ignore errors
                         }
                     }
 
@@ -776,18 +781,23 @@ impl Collection {
     /// Creates a BTree index on the specified field.
     ///
     /// # Arguments
-    /// * `name` - Name of the index
-    /// * `field` - Name of the field to index
+    /// * `fields` - Fields to index
     ///
     /// # Returns
     /// Ok(()) if successful, or an error if creation fails
-    pub async fn create_btree_index(&mut self, name: &str, field: &str) -> Result<(), DBError> {
-        validate_field_name(name)?;
+    pub async fn create_btree_index(&mut self, fields: &[&str]) -> Result<(), DBError> {
+        if fields.is_empty() {
+            return Err(DBError::Schema {
+                name: self.name.clone(),
+                source: "BTree index requires at least one field".into(),
+            });
+        }
 
         let now_ms = unix_ms();
+        let name = fields.join("-");
 
         {
-            if self.metadata.read().btree_indexes.contains_key(name) {
+            if self.metadata.read().btree_indexes.contains_key(&name) {
                 return Err(DBError::AlreadyExists {
                     name: name.to_string(),
                     path: self.name.clone(),
@@ -796,45 +806,48 @@ impl Collection {
             }
         }
 
-        let field = self
-            .schema
-            .get_field(field)
-            .ok_or_else(|| DBError::NotFound {
-                name: field.to_string(),
-                path: self.name.clone(),
-                source: "field not found".into(),
-            })?;
-
-        let index = BTree::new(
-            name.to_string(),
-            field.clone(),
-            self.storage.clone(),
-            now_ms,
-        )
-        .await?;
-
         let mut meta = self.metadata.write();
-        meta.stats.version += 1;
-        meta.btree_indexes.insert(name.to_string(), field.clone());
-        if field.unique() {
-            self.btree_indexes.insert(0, index);
+        if fields.len() == 1 {
+            let field = self.schema.get_field_or_err(fields[0])?;
+
+            let index = BTree::new(field.clone(), self.storage.clone(), now_ms).await?;
+            if field.unique() {
+                self.btree_indexes.insert(0, index);
+            } else {
+                self.btree_indexes.push(index);
+            }
+            meta.btree_indexes.insert(name.to_string(), field.clone());
         } else {
-            self.btree_indexes.push(index);
+            for field in fields {
+                self.schema.get_field_or_err(field)?;
+            }
+            let index = BTree::with_virtual_field(
+                fields.iter().map(|s| s.to_string()).collect(),
+                self.storage.clone(),
+                now_ms,
+            )
+            .await?;
+
+            let field = FieldEntry::new("_virtual_field_".to_string(), FieldType::Bytes)?
+                .with_unique()
+                .with_description(name.clone());
+            self.btree_indexes.insert(0, index);
+            meta.btree_indexes.insert(name, field);
         }
 
+        meta.stats.version += 1;
         Ok(())
     }
 
     /// Creates a BTree index if it doesn't already exist.
     ///
     /// # Arguments
-    /// * `name` - Name of the index
-    /// * `field` - Name of the field to index
+    /// * `fields` - Fields to index
     ///
     /// # Returns
     /// Ok(()) if successful, or an error if creation fails
-    pub async fn create_btree_index_nx(&mut self, name: &str, field: &str) -> Result<(), DBError> {
-        match self.create_btree_index(name, field).await {
+    pub async fn create_btree_index_nx(&mut self, fields: &[&str]) -> Result<(), DBError> {
+        match self.create_btree_index(fields).await {
             Ok(_) => Ok(()),
             Err(DBError::AlreadyExists { .. }) => {
                 // Ignore the error if the index already exists
@@ -847,7 +860,6 @@ impl Collection {
     /// Creates a combined BM25 (text) and HNSW (vector) search index.
     ///
     /// # Arguments
-    /// * `name` - Name of the index
     /// * `field` - Name of the field to index
     /// * `config` - HNSW index configuration
     ///
@@ -855,18 +867,18 @@ impl Collection {
     /// Ok(()) if successful, or an error if creation fails
     pub async fn create_search_index(
         &mut self,
-        name: &str,
         field: &str,
         config: HnswConfig,
     ) -> Result<(), DBError> {
-        validate_field_name(name)?;
+        validate_field_name(field)?;
 
+        let name = field.to_string();
         let now_ms = unix_ms();
 
         {
-            if self.metadata.read().bm25_hnsw_indexes.contains_key(name) {
+            if self.metadata.read().bm25_hnsw_indexes.contains_key(&name) {
                 return Err(DBError::AlreadyExists {
-                    name: name.to_string(),
+                    name: name.clone(),
                     path: self.name.clone(),
                     source: "Search (BM25 & HNSW) index already exists".into(),
                 });
@@ -889,27 +901,14 @@ impl Collection {
         }
 
         let (bm25, hnsw) = try_join_await!(
-            BM25::new(
-                name.to_string(),
-                field.clone(),
-                self.tokenizer.clone(),
-                self.storage.clone(),
-                now_ms,
-            ),
-            Hnsw::new(
-                name.to_string(),
-                field.clone(),
-                config,
-                self.storage.clone(),
-                now_ms,
-            )
+            BM25::new(field, self.tokenizer.clone(), self.storage.clone(), now_ms,),
+            Hnsw::new(field, config, self.storage.clone(), now_ms,)
         )?;
 
         {
             let mut meta = self.metadata.write();
             meta.stats.version += 1;
-            meta.bm25_hnsw_indexes
-                .insert(name.to_string(), field.clone());
+            meta.bm25_hnsw_indexes.insert(name, field.clone());
         }
 
         self.bm25_hnsw_indexes.push((bm25, hnsw));
@@ -919,7 +918,6 @@ impl Collection {
     /// Creates a search index if it doesn't already exist.
     ///
     /// # Arguments
-    /// * `name` - Name of the index
     /// * `field` - Name of the field to index
     /// * `config` - HNSW index configuration
     ///
@@ -927,11 +925,10 @@ impl Collection {
     /// Ok(()) if successful, or an error if creation fails
     pub async fn create_search_index_nx(
         &mut self,
-        name: &str,
         field: &str,
         config: HnswConfig,
     ) -> Result<(), DBError> {
-        match self.create_search_index(name, field, config).await {
+        match self.create_search_index(field, config).await {
             Ok(_) => Ok(()),
             Err(DBError::AlreadyExists { .. }) => {
                 // Ignore the error if the index already exists
@@ -977,7 +974,7 @@ impl Collection {
         let mut segment_ids = BTreeSet::new();
 
         #[allow(clippy::mutable_key_type)]
-        let mut btree_inserted: HashMap<&BTree, &FieldValue> = HashMap::new();
+        let mut btree_inserted: HashMap<&BTree, Cow<FieldValue>> = HashMap::new();
         #[allow(clippy::mutable_key_type)]
         let mut bm25_inserted: HashMap<&BM25, (&u64, &str)> = HashMap::new();
         #[allow(clippy::mutable_key_type)]
@@ -985,13 +982,13 @@ impl Collection {
 
         let rt: Result<(), DBError> = (|| {
             for index in &self.btree_indexes {
-                if let Some(fv) = doc.get_field(index.field_name()) {
-                    if fv == &FieldValue::Null {
+                if let Some(fv) = doc.get_virtual_field(index.virtual_field()) {
+                    if fv.as_ref() == &FieldValue::Null {
                         continue;
                     }
 
-                    btree_inserted.insert(index, fv);
-                    index.insert(id, fv, now_ms)?;
+                    btree_inserted.insert(index, fv.clone());
+                    index.insert(id, fv.into_owned(), now_ms)?;
                 }
             }
 
@@ -1018,7 +1015,7 @@ impl Collection {
 
         let rollback_indexes = || {
             for (k, v) in btree_inserted {
-                k.remove(id, v, now_ms);
+                k.remove(id, &v, now_ms);
             }
             for (k, v) in bm25_inserted {
                 k.remove(*v.0, v.1, now_ms);
@@ -1120,14 +1117,7 @@ impl Collection {
             .get::<DocumentOwned>(&Self::doc_path(id))
             .await?;
         let mut doc = Document::try_from_doc(self.schema(), doc)?;
-
-        // keep the old value for rollback
-        let mut old_values = BTreeMap::new();
-        for field_name in fields.keys() {
-            if let Some(old_value) = doc.remove_field(field_name) {
-                old_values.insert(field_name.clone(), old_value);
-            }
-        }
+        let old_doc = doc.clone();
 
         // apply the new values
         let mut fields_keys = HashSet::new();
@@ -1145,13 +1135,13 @@ impl Collection {
 
         // record the updated and removed indexes for rollback
         #[allow(clippy::mutable_key_type)]
-        let mut btree_inserted: HashMap<&BTree, &FieldValue> = HashMap::new();
+        let mut btree_inserted: HashMap<&BTree, Cow<FieldValue>> = HashMap::new();
         #[allow(clippy::mutable_key_type)]
         let mut bm25_inserted: HashMap<&BM25, (&u64, &str)> = HashMap::new();
         #[allow(clippy::mutable_key_type)]
         let mut hnsw_inserted: HashMap<&Hnsw, &u64> = HashMap::new();
         #[allow(clippy::mutable_key_type)]
-        let mut btree_removed: HashMap<&BTree, &FieldValue> = HashMap::new();
+        let mut btree_removed: HashMap<&BTree, Cow<FieldValue>> = HashMap::new();
         #[allow(clippy::mutable_key_type)]
         let mut bm25_removed: HashMap<&BM25, (&u64, &str)> = HashMap::new();
         #[allow(clippy::mutable_key_type)]
@@ -1160,19 +1150,20 @@ impl Collection {
         // update the indexes
         let rt: Result<(), DBError> = (|| {
             for index in &self.btree_indexes {
-                let field_name = index.field_name();
-                if fields_keys.contains(field_name) {
-                    if let Some(old_value) = old_values.get(field_name) {
-                        if old_value != &FieldValue::Null {
-                            index.remove(id, old_value, now_ms);
-                            btree_removed.insert(index, old_value);
+                let fields = index.virtual_field();
+                if !index.allow_duplicates() {}
+                if fields_keys.iter().any(|v| fields.contains(v)) {
+                    if let Some(fv) = old_doc.get_virtual_field(index.virtual_field()) {
+                        if fv.as_ref() != &FieldValue::Null {
+                            index.remove(id, &fv, now_ms);
+                            btree_removed.insert(index, fv);
                         }
                     }
 
-                    if let Some(new_value) = doc.get_field(field_name) {
-                        if new_value != &FieldValue::Null {
-                            index.insert(id, new_value, now_ms)?;
-                            btree_inserted.insert(index, new_value);
+                    if let Some(fv) = doc.get_virtual_field(index.virtual_field()) {
+                        if fv.as_ref() != &FieldValue::Null {
+                            index.insert(id, fv.clone().into_owned(), now_ms)?;
+                            btree_inserted.insert(index, fv);
                         }
                     }
                 }
@@ -1182,7 +1173,7 @@ impl Collection {
                 let field_name = bm25.field_name();
 
                 if fields_keys.contains(field_name) {
-                    if let Some(Fv::Array(old_segments)) = old_values.get(field_name) {
+                    if let Some(Fv::Array(old_segments)) = old_doc.get_field(field_name) {
                         for seg in old_segments {
                             if let Some(sid) = Segment::id_from(seg) {
                                 removed_segment_ids.insert(*sid);
@@ -1224,7 +1215,7 @@ impl Collection {
 
         let rollback_indexes = || {
             for (k, v) in btree_inserted {
-                k.remove(id, v, now_ms);
+                k.remove(id, &v, now_ms);
             }
             for (k, v) in bm25_inserted {
                 k.remove(*v.0, v.1, now_ms);
@@ -1233,7 +1224,7 @@ impl Collection {
                 k.remove(*v, now_ms);
             }
             for (k, v) in btree_removed {
-                let _ = k.insert(id, v, now_ms);
+                let _ = k.insert(id, v.into_owned(), now_ms);
             }
             for (k, v) in bm25_removed {
                 let _ = k.insert(*v.0, v.1, now_ms);
@@ -1353,8 +1344,8 @@ impl Collection {
         if let Ok((doc, _)) = self.storage.get::<DocumentOwned>(&Self::doc_path(id)).await {
             let doc = Document::try_from_doc(self.schema(), doc)?;
             for index in &self.btree_indexes {
-                if let Some(fv) = doc.get_field(index.field_name()) {
-                    index.remove(id, fv, now_ms);
+                if let Some(fv) = doc.get_virtual_field(index.virtual_field()) {
+                    index.remove(id, &fv, now_ms);
                 }
             }
 
@@ -1547,8 +1538,8 @@ impl Collection {
     ) -> Result<Vec<DocumentId>, DBError> {
         let mut result = Vec::new();
         match filter {
-            Filter::Field((field, filter)) => {
-                if field == Schema::ID_KEY {
+            Filter::Field((index_name, filter)) => {
+                if index_name == Schema::ID_KEY {
                     let filter: RangeQuery<u64> =
                         RangeQuery::try_convert_from(filter).map_err(|err| DBError::Generic {
                             name: self.name.clone(),
@@ -1564,7 +1555,7 @@ impl Collection {
                         }
                     }
                 } else if let Some(index) =
-                    self.btree_indexes.iter().find(|i| i.field_name() == field)
+                    self.btree_indexes.iter().find(|i| i.name() == index_name)
                 {
                     let _: Vec<()> = index.search_range_with(filter, |_, ids| {
                         for id in ids {
@@ -1580,7 +1571,7 @@ impl Collection {
                 } else {
                     return Err(DBError::Index {
                         name: self.name.clone(),
-                        source: format!("BTree index not found for field {field:?}").into(),
+                        source: format!("BTree index {index_name:?} not found").into(),
                     });
                 }
             }
@@ -2015,18 +2006,13 @@ mod tests {
         let db = setup_test_db().await?;
         let collection = create_test_collection(&db, async |collection| {
             // 创建索引
-            collection
-                .create_btree_index_nx("btree_name", "name")
-                .await?;
-            collection.create_btree_index_nx("btree_age", "age").await?;
-            collection
-                .create_btree_index_nx("btree_tags", "tags")
-                .await?;
+            collection.create_btree_index_nx(&["name"]).await?;
+            collection.create_btree_index_nx(&["age"]).await?;
+            collection.create_btree_index_nx(&["tags"]).await?;
 
             // 创建搜索索引
             collection
                 .create_search_index_nx(
-                    "search_segments",
                     "segments",
                     HnswConfig {
                         dimension: 10,
@@ -2159,18 +2145,13 @@ mod tests {
         {
             let collection = create_test_collection(&db, async |collection| {
                 // 创建索引
-                collection
-                    .create_btree_index_nx("btree_name", "name")
-                    .await?;
-                collection.create_btree_index_nx("btree_age", "age").await?;
-                collection
-                    .create_btree_index_nx("btree_tags", "tags")
-                    .await?;
+                collection.create_btree_index_nx(&["name"]).await?;
+                collection.create_btree_index_nx(&["age"]).await?;
+                collection.create_btree_index_nx(&["tags"]).await?;
 
                 // 创建搜索索引
                 collection
                     .create_search_index_nx(
-                        "search_segments",
                         "segments",
                         HnswConfig {
                             dimension: 10,
@@ -2280,10 +2261,8 @@ mod tests {
         let db = setup_test_db().await?;
         let collection = create_test_collection(&db, async |collection| {
             // 测试创建已存在的索引
-            collection
-                .create_btree_index_nx("btree_name", "name")
-                .await?;
-            let result = collection.create_btree_index("btree_name", "name").await;
+            collection.create_btree_index_nx(&["name"]).await?;
+            let result = collection.create_btree_index(&["name"]).await;
             assert!(result.is_err());
             Ok(())
         })
@@ -2319,9 +2298,7 @@ mod tests {
         let db = setup_test_db().await?;
         let collection = create_test_collection(&db, async |collection| {
             // 创建索引
-            collection
-                .create_btree_index_nx("btree_name", "name")
-                .await?;
+            collection.create_btree_index_nx(&["name"]).await?;
             Ok(())
         })
         .await?;
@@ -2410,13 +2387,9 @@ mod tests {
         let db = setup_test_db().await?;
         let collection = create_test_collection(&db, async |collection| {
             // 创建索引以测试更新对索引的影响
-            collection
-                .create_btree_index_nx("btree_name", "name")
-                .await?;
-            collection.create_btree_index_nx("btree_age", "age").await?;
-            collection
-                .create_btree_index_nx("btree_tags", "tags")
-                .await?;
+            collection.create_btree_index_nx(&["name"]).await?;
+            collection.create_btree_index_nx(&["age"]).await?;
+            collection.create_btree_index_nx(&["tags"]).await?;
             Ok(())
         })
         .await?;

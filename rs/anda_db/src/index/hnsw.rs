@@ -13,7 +13,6 @@ use crate::{
 
 pub struct Hnsw {
     name: String,
-    field: Fe,
     index: HnswIndex,
     storage: Storage, // 与 Collection 共享同一个 Storage 实例
     metadata_version: RwLock<ObjectVersion>,
@@ -53,12 +52,12 @@ impl Hnsw {
     }
 
     pub async fn new(
-        name: String,
-        field: Fe,
+        field: &Fe,
         config: HnswConfig,
         storage: Storage,
         now_ms: u64,
     ) -> Result<Self, DBError> {
+        let name = field.name().to_string();
         let index = HnswIndex::new(name.clone(), Some(config));
         let mut metadata = Vec::new();
         let mut ids = Vec::new();
@@ -77,7 +76,6 @@ impl Hnsw {
             .await?;
         Ok(Self {
             name,
-            field,
             index,
             storage,
             metadata_version: RwLock::new(metadata_version),
@@ -85,7 +83,7 @@ impl Hnsw {
         })
     }
 
-    pub async fn bootstrap(name: String, field: Fe, storage: Storage) -> Result<Self, DBError> {
+    pub async fn bootstrap(name: String, storage: Storage) -> Result<Self, DBError> {
         let (metadata, metadata_version) = storage.fetch_bytes(&Hnsw::metadata_path(&name)).await?;
         let (ids, ids_version) = storage.fetch_bytes(&Hnsw::ids_path(&name)).await?;
         let index = HnswIndex::load_all(&metadata[..], &ids[..], async |id: u64| {
@@ -100,7 +98,6 @@ impl Hnsw {
 
         Ok(Self {
             name,
-            field,
             index,
             storage,
             metadata_version: RwLock::new(metadata_version),
@@ -163,7 +160,7 @@ impl Hnsw {
     }
 
     pub fn field_name(&self) -> &str {
-        self.field.name()
+        &self.name
     }
 
     pub fn stats(&self) -> HnswStats {

@@ -267,7 +267,7 @@ fn determine_field_type(ty: &Type) -> Result<proc_macro2::TokenStream, String> {
                 "Bytes" | "ByteArray" | "ByteBuf" | "BytesB64" | "ByteArrayB64" | "ByteBufB64" => {
                     Ok(quote! { FieldType::Bytes })
                 }
-                "HashMap" | "BTreeMap" => {
+                "HashMap" | "BTreeMap" | "Map" => {
                     // 处理 HashMap 和 BTreeMap 类型
                     if let PathArguments::AngleBracketed(args) = &segment.arguments {
                         if args.args.len() >= 2 {

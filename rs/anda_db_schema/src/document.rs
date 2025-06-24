@@ -1,6 +1,7 @@
 use ciborium::Value;
+use ic_auth_types::canonical_cbor_into_vec;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use std::sync::Arc;
+use std::{borrow::Cow, sync::Arc};
 
 use super::{Cbor, Fv, IndexedFieldValues, Schema, SchemaError};
 
@@ -182,6 +183,33 @@ impl Document {
             self.fields.get(&field.idx())
         } else {
             None
+        }
+    }
+
+    /// Gets a virtual field value by a list of field names.
+    ///
+    /// This combines the values of the specified fields into a single serialized value in FieldValue::Bytes.
+    /// # Arguments
+    /// * `fields` - A slice of field names to combine
+    /// # Returns
+    /// * `Option<Fv>` - The combined field value or None if any field is not found
+    pub fn get_virtual_field(&self, fields: &[String]) -> Option<Cow<Fv>> {
+        match fields {
+            [] => None,
+            [name] => self.get_field(name).map(Cow::Borrowed),
+            _ => {
+                let mut vals: Vec<Option<&Fv>> = Vec::with_capacity(fields.len());
+                for name in fields {
+                    if let Some(field) = self.schema.get_field(name) {
+                        vals.push(self.fields.get(&field.idx()));
+                    } else {
+                        return None; // If the field doesn't exist in the schema, return None
+                    }
+                }
+
+                let data = canonical_cbor_into_vec(&vals).ok()?;
+                Some(Cow::Owned(Fv::Bytes(data)))
+            }
         }
     }
 

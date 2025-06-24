@@ -890,13 +890,11 @@ impl FieldValue {
 
                 let mut vals: BTreeMap<String, FieldValue> = BTreeMap::new();
                 for (k, v) in values {
-                    let k = k.into_text().map_err(|v| {
-                        SchemaError::FieldValue(format!("invalid map key: {v:?}"))
-                    })?;
+                    let k = k
+                        .into_text()
+                        .map_err(|v| SchemaError::FieldValue(format!("invalid map key: {v:?}")))?;
                     if vals.contains_key(&k) {
-                        return Err(SchemaError::FieldValue(format!(
-                            "duplicate map key {k:?}"
-                        )));
+                        return Err(SchemaError::FieldValue(format!("duplicate map key {k:?}")));
                     }
 
                     match wildcard_map {
@@ -1621,7 +1619,7 @@ mod tests {
         assert_eq!(field_type, deserialized);
         let mut serialized = Vec::new();
         into_writer(&field_type, &mut serialized).unwrap();
-        println!("Serialized FieldType: {:?}", const_hex::encode(&serialized));
+        println!("Serialized FieldType: {:?}", hex::encode(&serialized));
         let deserialized: Ft = from_reader(&serialized[..]).unwrap();
         assert_eq!(field_type, deserialized);
 
@@ -1629,19 +1627,16 @@ mod tests {
         let field_value = Fv::Array(vec![Fv::U64(1), Fv::Text("hello".to_string())]);
         let mut serialized = Vec::new();
         into_writer(&field_value, &mut serialized).unwrap();
-        println!(
-            "Serialized FieldValue: {:?}",
-            const_hex::encode(&serialized)
-        );
-        assert_eq!(const_hex::encode(&serialized), "82016568656c6c6f");
+        println!("Serialized FieldValue: {:?}", hex::encode(&serialized));
+        assert_eq!(hex::encode(&serialized), "82016568656c6c6f");
         let deserialized: Fv = from_reader(&serialized[..]).unwrap();
         assert_eq!(field_value, deserialized);
 
         let field_value = Fv::Bytes(vec![1, 2, 3, 4]);
         let mut serialized = Vec::new();
         into_writer(&field_value, &mut serialized).unwrap();
-        println!("Serialized bytes: {:?}", const_hex::encode(&serialized));
-        assert_eq!(const_hex::encode(&serialized), "4401020304");
+        println!("Serialized bytes: {:?}", hex::encode(&serialized));
+        assert_eq!(hex::encode(&serialized), "4401020304");
         let deserialized: Fv = from_reader(&serialized[..]).unwrap();
         assert_eq!(field_value, deserialized);
 
@@ -1658,8 +1653,8 @@ mod tests {
         let xid = Xid([1u8; 12]);
         let mut data = Vec::new();
         into_writer(&xid, &mut data).unwrap();
-        println!("Serialized Xid: {:?}", const_hex::encode(&data));
-        assert_eq!(const_hex::encode(&data), "4c010101010101010101010101");
+        println!("Serialized Xid: {:?}", hex::encode(&data));
+        assert_eq!(hex::encode(&data), "4c010101010101010101010101");
         let cb: Cbor = from_reader(&data[..]).unwrap();
         let fv: FieldValue = FieldValue::try_from(cb).unwrap();
         let deserialized_xid: Xid = fv.deserialized().unwrap();

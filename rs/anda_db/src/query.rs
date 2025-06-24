@@ -74,7 +74,7 @@ pub enum Filter {
     /// A single field filter condition.
     ///
     /// Filters based on a range query against a specific field.
-    /// Format: (field_name, range_query)
+    /// Format: (btree_index_name, range_query)
     Field((String, RangeQuery<Fv>)),
 
     /// A logical OR filter.

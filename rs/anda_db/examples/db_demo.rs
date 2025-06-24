@@ -111,23 +111,14 @@ async fn main() -> Result<(), DBError> {
             collection.set_tokenizer(jieba_tokenizer());
 
             // create BTree indexes if not exists
-            collection
-                .create_btree_index_nx("btree_thread", "thread")
-                .await?;
-            collection
-                .create_btree_index_nx("btree_created_at", "created_at")
-                .await?;
-            collection
-                .create_btree_index_nx("btree_authors", "authors")
-                .await?;
-            collection
-                .create_btree_index_nx("btree_score", "score")
-                .await?;
+            collection.create_btree_index_nx(&["thread"]).await?;
+            collection.create_btree_index_nx(&["created_at"]).await?;
+            collection.create_btree_index_nx(&["authors"]).await?;
+            collection.create_btree_index_nx(&["score"]).await?;
 
             // create BM25 & HNSW indexes if not exists
             collection
                 .create_search_index_nx(
-                    "search_segments",
                     "segments",
                     HnswConfig {
                         dimension: 10,

@@ -13,6 +13,7 @@ license.workspace = true
 anda_db_derive = { path = "../anda_db_derive", version = "0.2" }
 base64 = { workspace = true }
 ciborium = { workspace = true }
+ic_auth_types = { workspace = true }
 half = { workspace = true }
 serde = { workspace = true }
 serde_bytes = { workspace = true }
@@ -20,7 +21,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
-const-hex = { workspace = true }
+hex = { workspace = true }
 ic_auth_types = { workspace = true }
 
 [package.metadata.cargo-shear]

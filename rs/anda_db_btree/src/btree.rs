@@ -409,6 +409,11 @@ where
         &self.name
     }
 
+    /// Returns the index whether it allows duplicate keys
+    pub fn allow_duplicates(&self) -> bool {
+        self.config.allow_duplicates
+    }
+
     /// Returns the index metadata
     /// This includes up-to-date statistics about the index
     pub fn metadata(&self) -> BTreeMetadata {
@@ -1886,7 +1891,7 @@ mod tests {
         let result = index.store_metadata(&mut buf, now_ms());
         assert!(result.is_ok());
 
-        println!("Serialized metadata: {:?}", const_hex::encode(&buf));
+        println!("Serialized metadata: {:?}", hex::encode(&buf));
 
         // 反序列化元数据
         let result = BTreeIndex::<u64, String>::load_metadata(&buf[..]);
@@ -2256,10 +2261,7 @@ mod tests {
 
                 for j in 0..5 {
                     let doc_id = (base + j) as u64;
-                    assert!(
-                        ids.contains(&doc_id),
-                        "id {doc_id} not found for key {key}"
-                    );
+                    assert!(ids.contains(&doc_id), "id {doc_id} not found for key {key}");
                 }
             }
         }
