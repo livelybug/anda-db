@@ -1,19 +1,26 @@
 use anda_db_derive::FieldTyped;
-use anda_db_schema::FieldType;
+use anda_db_schema::{FieldType, Json};
 use half::bf16;
 use ic_auth_types::Xid;
 use serde::{Deserialize, Serialize};
 use serde_bytes::{ByteArray, ByteBuf};
+use serde_json::{Map, Value};
 use std::collections::{BTreeMap, HashMap};
 
 #[derive(Debug, Serialize, Deserialize, FieldTyped)]
 struct User {
     name: String,
     age: u32,
-    tags: HashMap<String, String>,               // 会被正确映射为 Map
-    properties: BTreeMap<String, Vec<u8>>,       // 会被正确映射为 Map 包含 Bytes
+    tags: HashMap<String, String>,         // 会被正确映射为 Map
+    properties: BTreeMap<String, Vec<u8>>, // 会被正确映射为 Map 包含 Bytes
+
+    attributes: Map<String, serde_json::Value>, // 会被正确映射为 Map 包含 Json
+
+    #[field_type = "Map<String, Json>"]
+    attributes2: Map<String, Value>, // 会被正确映射为 Map 包含 Json
+    metadata: Map<String, Json>, // 会被正确映射为 Map 包含 Json
     optional_data: Option<HashMap<String, f64>>, // 会被正确映射为 Option<Map>
-    vector1: Vec<bf16>,                          // 会被正确映射为 Vector
+    vector1: Vec<bf16>,          // 会被正确映射为 Vector
 
     #[serde(rename = "b1")]
     blob1: ByteArray<64>, // 会被正确映射为 Bytes
@@ -52,6 +59,27 @@ fn field_typed_derive_works() {
                     FieldType::Map(std::collections::BTreeMap::from([(
                         "*".to_string(),
                         FieldType::Bytes
+                    )]))
+                ),
+                (
+                    "attributes".to_string(),
+                    FieldType::Map(std::collections::BTreeMap::from([(
+                        "*".to_string(),
+                        FieldType::Json
+                    )]))
+                ),
+                (
+                    "attributes2".to_string(),
+                    FieldType::Map(std::collections::BTreeMap::from([(
+                        "*".to_string(),
+                        FieldType::Json
+                    )]))
+                ),
+                (
+                    "metadata".to_string(),
+                    FieldType::Map(std::collections::BTreeMap::from([(
+                        "*".to_string(),
+                        FieldType::Json
                     )]))
                 ),
                 (

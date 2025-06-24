@@ -10,7 +10,7 @@ pub struct CognitiveNexus {
 
 #[async_trait]
 impl Executor for CognitiveNexus {
-    async fn execute(&self, command: Command, dry_run: bool) -> Result<Json, KipError> {
+    async fn execute(&self, _command: Command, _dry_run: bool) -> Result<Json, KipError> {
         unimplemented!("CognitiveNexus does not implement execute yet");
     }
 }

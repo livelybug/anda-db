@@ -1,5 +1,6 @@
 use proc_macro::TokenStream;
 
+mod common;
 mod field_typed;
 mod schema;
 

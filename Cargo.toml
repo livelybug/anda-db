@@ -1,6 +1,16 @@
 [workspace]
 resolver = "2"
-members = ["rs/*"]
+members = [
+  "rs/anda_cognitive_nexus",
+  "rs/anda_db",
+  "rs/anda_db_btree",
+  "rs/anda_db_derive",
+  "rs/anda_db_hnsw",
+  "rs/anda_db_schema",
+  "rs/anda_db_tfs",
+  "rs/anda_kip",
+  "rs/anda_object_store",
+]
 
 [workspace.package]
 description = "Anda DB is a Rust library designed as a specialized database for AI Agents, focusing on knowledge memory."

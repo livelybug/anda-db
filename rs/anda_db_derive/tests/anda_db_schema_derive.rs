@@ -1,6 +1,7 @@
 use anda_db_derive::AndaDBSchema;
-use anda_db_schema::{FieldEntry, FieldType, Schema, SchemaError};
+use anda_db_schema::{FieldEntry, FieldType, Json, Schema, SchemaError};
 use serde::{Deserialize, Serialize};
+use serde_json::Map;
 use std::collections::BTreeMap;
 
 #[derive(Debug, Serialize, Deserialize, AndaDBSchema)]
@@ -72,6 +73,8 @@ struct TestAllTypes {
     // Map 类型
     string_map: BTreeMap<String, String>,
     number_map: BTreeMap<String, i64>,
+    json_map: Map<String, Json>,
+    json_map2: Map<String, serde_json::Value>,
 }
 
 // 测试自定义字段类型属性
@@ -267,6 +270,27 @@ mod tests {
             assert_eq!(map_types.get("*"), Some(&FieldType::Text));
         } else {
             panic!("Expected Map<String, String>");
+        }
+
+        let number_map_field = schema.get_field("number_map").unwrap();
+        if let FieldType::Map(map_types) = number_map_field.r#type() {
+            assert_eq!(map_types.get("*"), Some(&FieldType::I64));
+        } else {
+            panic!("Expected Map<String, I64>");
+        }
+
+        let json_map_field = schema.get_field("json_map").unwrap();
+        if let FieldType::Map(map_types) = json_map_field.r#type() {
+            assert_eq!(map_types.get("*"), Some(&FieldType::Json));
+        } else {
+            panic!("Expected Map<String, Json>");
+        }
+
+        let json_map2_field = schema.get_field("json_map2").unwrap();
+        if let FieldType::Map(map_types) = json_map2_field.r#type() {
+            assert_eq!(map_types.get("*"), Some(&FieldType::Json));
+        } else {
+            panic!("Expected Map<String, serde_json::Value>");
         }
     }
 

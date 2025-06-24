@@ -806,7 +806,6 @@ impl Collection {
             }
         }
 
-        let mut meta = self.metadata.write();
         if fields.len() == 1 {
             let field = self.schema.get_field_or_err(fields[0])?;
 
@@ -816,7 +815,9 @@ impl Collection {
             } else {
                 self.btree_indexes.push(index);
             }
+            let mut meta = self.metadata.write();
             meta.btree_indexes.insert(name.to_string(), field.clone());
+            meta.stats.version += 1;
         } else {
             for field in fields {
                 self.schema.get_field_or_err(field)?;
@@ -832,10 +833,11 @@ impl Collection {
                 .with_unique()
                 .with_description(name.clone());
             self.btree_indexes.insert(0, index);
+            let mut meta = self.metadata.write();
             meta.btree_indexes.insert(name, field);
+            meta.stats.version += 1;
         }
 
-        meta.stats.version += 1;
         Ok(())
     }
 
@@ -1151,7 +1153,6 @@ impl Collection {
         let rt: Result<(), DBError> = (|| {
             for index in &self.btree_indexes {
                 let fields = index.virtual_field();
-                if !index.allow_duplicates() {}
                 if fields_keys.iter().any(|v| fields.contains(v)) {
                     if let Some(fv) = old_doc.get_virtual_field(index.virtual_field()) {
                         if fv.as_ref() != &FieldValue::Null {
