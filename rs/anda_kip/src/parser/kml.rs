@@ -134,11 +134,13 @@ fn parse_delete_attributes(input: &str) -> IResult<&str, DeleteStatement> {
             ws(tag("ATTRIBUTES")),
             (
                 braced_block(separated_list1(ws(char(',')), quoted_string)),
+                preceded(ws(tag("FROM")), variable),
                 parse_where_block,
             ),
         ),
-        |(attributes, where_clauses)| DeleteStatement::DeleteAttributes {
+        |(attributes, target, where_clauses)| DeleteStatement::DeleteAttributes {
             attributes,
+            target,
             where_clauses,
         },
     )
@@ -147,8 +149,11 @@ fn parse_delete_attributes(input: &str) -> IResult<&str, DeleteStatement> {
 
 fn parse_delete_propositions(input: &str) -> IResult<&str, DeleteStatement> {
     map(
-        preceded(ws(tag("PROPOSITIONS")), parse_where_block),
-        DeleteStatement::DeletePropositions,
+        preceded(ws(tag("PROPOSITIONS")), (ws(variable), parse_where_block)),
+        |(target, where_clauses)| DeleteStatement::DeletePropositions {
+            target,
+            where_clauses,
+        },
     )
     .parse(input)
 }
@@ -157,9 +162,12 @@ fn parse_delete_concept(input: &str) -> IResult<&str, DeleteStatement> {
     map(
         preceded(
             ws(tag("CONCEPT")),
-            terminated(parse_concept_matcher, ws(tag("DETACH"))),
+            (terminated(variable, ws(tag("DETACH"))), parse_where_block),
         ),
-        DeleteStatement::DeleteConcept,
+        |(target, where_clauses)| DeleteStatement::DeleteConcept {
+            target,
+            where_clauses,
+        },
     )
     .parse(input)
 }
@@ -197,10 +205,9 @@ mod tests {
                         assert_eq!(concept.handle, "drug");
                         assert_eq!(
                             concept.concept,
-                            ConceptMatcher {
-                                id: None,
-                                r#type: Some("Drug".to_string()),
-                                name: Some("Aspirin".to_string()),
+                            ConceptMatcher::Object {
+                                r#type: "Drug".to_string(),
+                                name: "Aspirin".to_string(),
                             }
                         );
 
@@ -246,10 +253,9 @@ mod tests {
                         assert_eq!(concept.handle, "drug");
                         assert_eq!(
                             concept.concept,
-                            ConceptMatcher {
-                                id: None,
-                                r#type: Some("Drug".to_string()),
-                                name: Some("TestDrug".to_string()),
+                            ConceptMatcher::Object {
+                                r#type: "Drug".to_string(),
+                                name: "TestDrug".to_string(),
                             }
                         );
 
@@ -330,10 +336,9 @@ mod tests {
                         assert_eq!(concept.handle, "cognizine");
                         assert_eq!(
                             concept.concept,
-                            ConceptMatcher {
-                                id: None,
-                                r#type: Some("Drug".to_string()),
-                                name: Some("Cognizine".to_string()),
+                            ConceptMatcher::Object {
+                                r#type: "Drug".to_string(),
+                                name: "Cognizine".to_string(),
                             }
                         );
                         let props = concept.set_propositions.as_ref().unwrap();
@@ -342,20 +347,18 @@ mod tests {
                         assert_eq!(props[0].predicate, "is_class_of");
                         assert_eq!(
                             props[0].object,
-                            TargetTerm::Concept(ConceptMatcher {
-                                id: None,
-                                r#type: Some("DrugClass".to_string()),
-                                name: Some("Nootropic".to_string()),
+                            TargetTerm::Concept(ConceptMatcher::Object {
+                                r#type: "DrugClass".to_string(),
+                                name: "Nootropic".to_string(),
                             })
                         );
 
                         assert_eq!(props[1].predicate, "treats");
                         assert_eq!(
                             props[1].object,
-                            TargetTerm::Concept(ConceptMatcher {
-                                id: None,
-                                r#type: Some("Symptom".to_string()),
-                                name: Some("Brain Fog".to_string()),
+                            TargetTerm::Concept(ConceptMatcher::Object {
+                                r#type: "Symptom".to_string(),
+                                name: "Brain Fog".to_string(),
                             })
                         );
 
@@ -408,17 +411,14 @@ mod tests {
                         assert_eq!(prop.handle, "stmt");
                         assert_eq!(
                             prop.proposition,
-                            PropositionMatcher {
-                                subject: TargetTerm::Concept(ConceptMatcher {
-                                    id: None,
-                                    r#type: None,
-                                    name: Some("Zhang San".to_string()),
-                                }),
+                            PropositionMatcher::Object {
+                                subject: TargetTerm::Concept(ConceptMatcher::Name(
+                                    "Zhang San".to_string()
+                                )),
                                 predicate: PredTerm::Literal("stated".to_string()),
-                                object: TargetTerm::Concept(ConceptMatcher {
-                                    id: None,
-                                    r#type: Some("Paper".to_string()),
-                                    name: Some("paper_doi".to_string()),
+                                object: TargetTerm::Concept(ConceptMatcher::Object {
+                                    r#type: "Paper".to_string(),
+                                    name: "paper_doi".to_string(),
                                 }),
                             }
                         );
@@ -446,8 +446,8 @@ mod tests {
     #[test]
     fn test_parse_delete_attributes() {
         let input = r#"
-        DELETE ATTRIBUTES { "risk_category", "old_name" }
-        WHERE {{ type: "Drug", name: "Aspirin" }}
+        DELETE ATTRIBUTES { "risk_category", "old_name" } FROM ?drug
+        WHERE {?drug{ type: "Drug", name: "Aspirin" }}
         "#;
 
         let result = parse_kml_statement(input);
@@ -457,22 +457,23 @@ mod tests {
         match statement {
             KmlStatement::Delete(DeleteStatement::DeleteAttributes {
                 attributes,
+                target,
                 where_clauses,
             }) => {
                 assert_eq!(attributes.len(), 2);
                 assert_eq!(attributes[0], "risk_category");
                 assert_eq!(attributes[1], "old_name");
+                assert_eq!(target, "drug");
 
                 assert_eq!(where_clauses.len(), 1);
                 assert_eq!(
                     where_clauses[0],
                     WhereClause::Concept(ConceptClause {
-                        matcher: ConceptMatcher {
-                            id: None,
-                            r#type: Some("Drug".to_string()),
-                            name: Some("Aspirin".to_string()),
+                        matcher: ConceptMatcher::Object {
+                            r#type: "Drug".to_string(),
+                            name: "Aspirin".to_string(),
                         },
-                        variable: None,
+                        variable: Some("drug".to_string()),
                     })
                 );
             }
@@ -483,10 +484,10 @@ mod tests {
     #[test]
     fn test_parse_delete_propositions_where() {
         let input = r#"
-        DELETE PROPOSITIONS
+        DELETE PROPOSITIONS ?link
         WHERE {
-            META((?s, ?p, ?o), "source", ?source)
-            FILTER(?source == "untrusted_source")
+            ?link (?s, ?p, ?o)
+            FILTER(?link.metadata.source == "untrusted_source")
         }
         "#;
 
@@ -495,18 +496,34 @@ mod tests {
 
         let (_, statement) = result.unwrap();
         match statement {
-            KmlStatement::Delete(DeleteStatement::DeletePropositions(where_clauses)) => {
+            KmlStatement::Delete(DeleteStatement::DeletePropositions {
+                target,
+                where_clauses,
+            }) => {
+                assert_eq!(target, "link");
                 assert_eq!(where_clauses.len(), 2);
                 assert_eq!(
                     where_clauses[0],
-                    WhereClause::Metadata(MetadataClause {
-                        target: TargetTerm::Proposition(Box::new(PropositionMatcher {
+                    WhereClause::Proposition(PropositionClause {
+                        matcher: PropositionMatcher::Object {
                             subject: TargetTerm::Variable("s".to_string()),
                             predicate: PredTerm::Variable("p".to_string()),
                             object: TargetTerm::Variable("o".to_string()),
-                        })),
-                        key: "source".to_string(),
-                        variable: "source".to_string(),
+                        },
+                        variable: Some("link".to_string()),
+                    })
+                );
+                assert_eq!(
+                    where_clauses[1],
+                    WhereClause::Filter(FilterClause {
+                        expression: FilterExpression::Comparison {
+                            left: FilterOperand::Variable(DotPathVar {
+                                var: "link".to_string(),
+                                path: vec!["metadata".to_string(), "source".to_string()],
+                            }),
+                            operator: ComparisonOperator::Equal,
+                            right: FilterOperand::Literal("untrusted_source".into()),
+                        },
                     })
                 );
             }
@@ -517,9 +534,10 @@ mod tests {
     #[test]
     fn test_parse_delete_concept() {
         let input = r#"
-        DELETE CONCEPT
-        { type: "Drug", name: "OutdatedDrug" }
-        DETACH
+        DELETE CONCEPT ?drug DETACH
+        WHERE {
+            ?drug { type: "Drug", name: "OutdatedDrug" }
+        }
         "#;
 
         let result = parse_kml_statement(input);
@@ -527,14 +545,21 @@ mod tests {
 
         let (_, statement) = result.unwrap();
         match statement {
-            KmlStatement::Delete(DeleteStatement::DeleteConcept(concept)) => {
+            KmlStatement::Delete(DeleteStatement::DeleteConcept {
+                target,
+                where_clauses,
+            }) => {
+                assert_eq!(target, "drug");
+                assert_eq!(where_clauses.len(), 1);
                 assert_eq!(
-                    concept,
-                    ConceptMatcher {
-                        id: None,
-                        r#type: Some("Drug".to_string()),
-                        name: Some("OutdatedDrug".to_string()),
-                    }
+                    where_clauses[0],
+                    WhereClause::Concept(ConceptClause {
+                        matcher: ConceptMatcher::Object {
+                            r#type: "Drug".to_string(),
+                            name: "OutdatedDrug".to_string(),
+                        },
+                        variable: Some("drug".to_string()),
+                    })
                 );
             }
             _ => panic!("Expected DeleteConcept"),
@@ -598,14 +623,7 @@ mod tests {
                 match &upsert.items[0] {
                     UpsertItem::Concept(concept) => {
                         assert_eq!(concept.handle, "drug");
-                        assert_eq!(
-                            concept.concept,
-                            ConceptMatcher {
-                                id: Some("drug_001".to_string()),
-                                r#type: None,
-                                name: None,
-                            }
-                        );
+                        assert_eq!(concept.concept, ConceptMatcher::ID("drug_001".to_string()));
                         let attrs = concept.set_attributes.as_ref().unwrap();
                         assert_eq!(attrs["name"], Json::String("TestDrug".to_string()));
                         assert_eq!(attrs["active"], Json::Bool(true));
@@ -620,18 +638,14 @@ mod tests {
                         assert_eq!(prop.handle, "relation");
                         assert_eq!(
                             prop.proposition,
-                            PropositionMatcher {
-                                subject: TargetTerm::Concept(ConceptMatcher {
-                                    id: Some("drug_001".to_string()),
-                                    r#type: None,
-                                    name: None,
-                                }),
+                            PropositionMatcher::Object {
+                                subject: TargetTerm::Concept(ConceptMatcher::ID(
+                                    "drug_001".to_string()
+                                )),
                                 predicate: PredTerm::Literal("interacts_with".to_string()),
-                                object: TargetTerm::Concept(ConceptMatcher {
-                                    id: Some("drug_002".to_string()),
-                                    r#type: None,
-                                    name: None,
-                                }),
+                                object: TargetTerm::Concept(ConceptMatcher::ID(
+                                    "drug_002".to_string()
+                                )),
                             }
                         );
                         let metadata = prop.metadata.as_ref().unwrap();
@@ -647,14 +661,7 @@ mod tests {
                 match &upsert.items[2] {
                     UpsertItem::Concept(concept) => {
                         assert_eq!(concept.handle, "target");
-                        assert_eq!(
-                            concept.concept,
-                            ConceptMatcher {
-                                id: Some("drug_002".to_string()),
-                                r#type: None,
-                                name: None,
-                            }
-                        );
+                        assert_eq!(concept.concept, ConceptMatcher::ID("drug_002".to_string()));
                         let props = concept.set_propositions.as_ref().unwrap();
                         assert_eq!(props.len(), 1);
                         assert_eq!(
@@ -693,14 +700,7 @@ mod tests {
                 match &upsert.items[0] {
                     UpsertItem::Concept(concept) => {
                         assert_eq!(concept.handle, "minimal");
-                        assert_eq!(
-                            concept.concept,
-                            ConceptMatcher {
-                                id: Some("test_001".to_string()),
-                                r#type: None,
-                                name: None,
-                            }
-                        );
+                        assert_eq!(concept.concept, ConceptMatcher::ID("test_001".to_string()));
                         assert!(concept.set_attributes.is_none());
                         assert!(concept.set_propositions.is_none());
                         assert!(concept.metadata.is_none());

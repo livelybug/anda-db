@@ -58,6 +58,30 @@ impl From<Value> for Json {
     }
 }
 
+impl From<&str> for Value {
+    fn from(s: &str) -> Self {
+        Value::String(s.to_string())
+    }
+}
+
+impl From<String> for Value {
+    fn from(s: String) -> Self {
+        Value::String(s)
+    }
+}
+
+impl From<bool> for Value {
+    fn from(b: bool) -> Self {
+        Value::Bool(b)
+    }
+}
+
+impl From<Number> for Value {
+    fn from(value: Number) -> Self {
+        Value::Number(value)
+    }
+}
+
 impl TryFrom<Json> for Value {
     type Error = String;
 
@@ -170,7 +194,7 @@ pub struct KeyValue {
 }
 
 /// Represents a concept clause used for concept identification and grounding.
-/// Syntax: `?node_var {type: "<type>", name: "<name>", id: "<id>"}`
+/// Syntax: `?node_var {id: "<id>"}`, `?node_var {type: "<type>", name: "<name>"}`, `?node_var {type: "<type>"}`，`?node_var {name: "<name>"}`
 #[derive(Debug, PartialEq, Clone)]
 pub struct ConceptClause {
     /// The matcher for concept, which can be a combination of `id`, `type`, and `name`
@@ -183,12 +207,16 @@ pub struct ConceptClause {
 /// This identifier can be constructed from various attributes like `id`, `type`, and `name`.
 /// It is used to uniquely identify a concept within the knowledge graph, or to match concepts
 /// based on type or name.
-/// Syntax: `{type: "<type>", name: "<name>", id: "<id>"}`
 #[derive(Debug, PartialEq, Clone)]
-pub struct ConceptMatcher {
-    pub id: Option<String>,     // Optional unique ID for the concept
-    pub r#type: Option<String>, // Optional type for the concept
-    pub name: Option<String>,   // Optional name for the concept
+pub enum ConceptMatcher {
+    /// Syntax: `{id: "<id>"}`
+    ID(String),
+    /// Syntax: `{type: "<type>"}`
+    Type(String),
+    /// Syntax: `{name: "<name>"}`
+    Name(String),
+    /// Syntax: `{type: "<type>", name: "<name>"}`
+    Object { r#type: String, name: String },
 }
 
 /// Implements conversion from a vector of KeyValue pairs to a ConceptMatcher.
@@ -196,31 +224,37 @@ impl TryFrom<Vec<KeyValue>> for ConceptMatcher {
     type Error = String;
 
     fn try_from(values: Vec<KeyValue>) -> Result<Self, Self::Error> {
-        let mut cc = ConceptMatcher {
-            id: None,
-            r#type: None,
-            name: None,
-        };
+        let mut id: Option<String> = None;
+        let mut r#type: Option<String> = None;
+        let mut name: Option<String> = None;
 
         for val in values {
             match val.key.as_str() {
-                "id" => cc.id = val.value.into_opt_string()?,
-                "type" => cc.r#type = val.value.into_opt_string()?,
-                "name" => cc.name = val.value.into_opt_string()?,
+                "id" => id = val.value.into_opt_string()?,
+                "type" => r#type = val.value.into_opt_string()?,
+                "name" => name = val.value.into_opt_string()?,
                 key => {
                     return Err(format!("Invalid key in Concept clause: {}", key));
                 }
             }
         }
 
-        if cc.id.is_none() && cc.r#type.is_none() && cc.name.is_none() {
-            return Err(
+        match (id, r#type, name) {
+            (Some(id_val), None, None) => Ok(ConceptMatcher::ID(id_val)),
+            (None, Some(type_val), None) => Ok(ConceptMatcher::Type(type_val)),
+            (None, None, Some(name_val)) => Ok(ConceptMatcher::Name(name_val)),
+            (None, Some(type_val), Some(name_val)) => Ok(ConceptMatcher::Object {
+                r#type: type_val,
+                name: name_val,
+            }),
+            (Some(_), Some(_), _) | (Some(_), _, Some(_)) => {
+                Err("ConceptMatcher cannot have both id and other attributes".to_string())
+            }
+            (None, None, None) => Err(
                 "ConceptMatcher must have at least one identifying attribute: id, type, or name"
                     .to_string(),
-            );
+            ),
         }
-
-        Ok(cc)
     }
 }
 
@@ -228,12 +262,12 @@ impl ConceptMatcher {
     /// Checks if the ConceptMatcher is unique based on its attributes.
     /// A ConceptMatcher is considered unique if it has an ID, or both type and name are specified.
     pub fn is_unique(&self) -> bool {
-        self.id.is_some() || (self.r#type.is_some() && self.name.is_some())
+        matches!(self, ConceptMatcher::ID(_) | ConceptMatcher::Object { .. })
     }
 }
 
 /// Represents a proposition clause used for proposition identification and grounding.
-/// Syntax: `?link_var (?subject, "<predicate>", ?object)`
+/// Syntax: `?link_var (id: "<link_id>")`, `?link_var (?subject, "<predicate>", ?object)`
 #[derive(Debug, PartialEq, Clone)]
 pub struct PropositionClause {
     /// The matcher for proposition, which can be a combination of `subject`, `predicate`, and `object`
@@ -244,15 +278,16 @@ pub struct PropositionClause {
 
 /// Represents a proposition matcher that identifies a specific relationship between concepts or propositions.
 /// It consists of a subject, predicate, and object, which can be variables, concept references or proposition references.
-/// Syntax: `(?subject, "<predicate>", ?object)`
 #[derive(Debug, PartialEq, Clone)]
-pub struct PropositionMatcher {
-    /// The subject of the proposition
-    pub subject: TargetTerm,
-    /// The predicate (relationship type)
-    pub predicate: PredTerm,
-    /// The object of the proposition
-    pub object: TargetTerm,
+pub enum PropositionMatcher {
+    /// Syntax: `(id: "<link_id>")`
+    ID(String),
+    /// `(?subject, "<predicate>", ?object)`
+    Object {
+        subject: TargetTerm,
+        predicate: PredTerm,
+        object: TargetTerm,
+    },
 }
 
 /// Represents a term that can be a variable, node reference, or nested proposition.
@@ -318,17 +353,27 @@ pub struct FindClause {
 /// Can be either a simple variable or an aggregation function with alias.
 #[derive(Debug, PartialEq, Clone)]
 pub enum FindExpression {
-    /// A simple variable reference (e.g., `?drug_name`)
-    Variable(String),
+    /// A dot notation path (e.g., `?drug.name`, `?drug.attributes.risk_level`)
+    Variable(DotPathVar),
     /// An aggregation function (e.g., `COUNT(?drug)`)
     Aggregation {
         /// The aggregation function to apply
         func: AggregationFunction,
         /// The variable to aggregate
-        var: String,
+        var: DotPathVar,
         /// Whether to use DISTINCT
         distinct: bool,
     },
+}
+
+/// Represents a dot notation path for accessing nested data.
+/// Syntax: `?var.field` or `?var.attributes.key` or `?var.metadata.key`
+#[derive(Debug, PartialEq, Clone)]
+pub struct DotPathVar {
+    /// The base variable (e.g., `?drug`)
+    pub var: String,
+    /// The path components (e.g., ["attributes", "risk_level"])
+    pub path: Vec<String>,
 }
 
 /// Supported aggregation functions in KQL.
@@ -356,10 +401,6 @@ pub enum WhereClause {
     Concept(ConceptClause),
     /// Proposition clause: `?link_var (?subject, "<predicate>", ?object)`
     Proposition(PropositionClause),
-    /// Attribute access: `ATTR(?node, "attribute_name", ?value_variable)`
-    Attribute(AttributeClause),
-    /// Metadata access: `META(?target_variable, "<metadata_key>", ?value_variable)`
-    Metadata(MetadataClause),
     /// Filter condition: `FILTER(boolean_expression)`
     Filter(FilterClause),
     /// Negation: `NOT { ... }`
@@ -368,32 +409,6 @@ pub enum WhereClause {
     Optional(Vec<WhereClause>),
     /// Union (logical OR): `UNION { ... }`
     Union(Vec<WhereClause>),
-}
-
-/// Represents an attribute access pattern.
-/// Retrieves an attribute value from a concept or proposition and binds it to a variable.
-/// Syntax: `ATTR(?node_variable, "<attribute_name>", ?value_variable)`
-#[derive(Debug, PartialEq, Clone)]
-pub struct AttributeClause {
-    /// The concept or proposition variable to get the attribute from
-    pub target: TargetTerm,
-    /// The name of the attribute to retrieve
-    pub key: String,
-    /// The variable to bind the attribute value to
-    pub variable: String,
-}
-
-/// Represents a metadata access pattern.
-/// Retrieves metadata from a concept or proposition and binds it to a variable.
-/// Syntax: `META(?subject_variable, "<metadata_key>", ?value_variable)`
-#[derive(Debug, PartialEq, Clone)]
-pub struct MetadataClause {
-    /// The concept or proposition variable to get the metadata from
-    pub target: TargetTerm,
-    /// The key of the metadata to retrieve
-    pub key: String,
-    /// The variable to bind the metadata value to
-    pub variable: String,
 }
 
 /// Represents a filter condition with optional subquery.
@@ -432,11 +447,11 @@ pub enum FilterExpression {
 }
 
 /// Represents an operand in a filter expression.
-/// Can be either a variable reference or a literal value.
+/// Can be either a variable reference, dot notation path, or a literal value.
 #[derive(Debug, PartialEq, Clone)]
 pub enum FilterOperand {
-    /// A variable reference (e.g., `?risk`)
-    Variable(String),
+    /// A dot notation path (e.g., `?risk`, `?drug.attributes.risk_level`)
+    Variable(DotPathVar),
     /// A literal value
     Literal(Value),
 }
@@ -484,7 +499,7 @@ pub enum FilterFunction {
 #[derive(Debug, PartialEq, Clone)]
 pub struct OrderByCondition {
     /// The variable to sort by
-    pub variable: String,
+    pub variable: DotPathVar,
     /// Sort direction (ascending or descending)
     pub direction: OrderDirection,
 }
@@ -580,19 +595,31 @@ pub struct PropositionBlock {
 #[derive(Debug, PartialEq, Clone)]
 pub enum DeleteStatement {
     /// Delete specific attributes from concepts or proposition where conditions match
-    /// Syntax: `DELETE ATTRIBUTES WHERE { ... }`
+    /// Syntax: `DELETE ATTRIBUTES { "attribute_name", ... } FROM ?target WHERE { ... }`
     DeleteAttributes {
         /// List of attribute names to delete
         attributes: Vec<String>,
-        /// WHERE clauses containing graph patterns and filters (all ANDed together)
+        /// The target node or link to delete attributes from
+        target: String,
+        /// WHERE clauses containing graph patterns and filters
         where_clauses: Vec<WhereClause>,
     },
     /// Delete propositions where conditions match
-    /// Syntax: `DELETE PROPOSITIONS WHERE { ... }`
-    DeletePropositions(Vec<WhereClause>),
+    /// Syntax: `DELETE PROPOSITIONS ?target_link WHERE { ... }`
+    DeletePropositions {
+        /// The target links
+        target: String,
+        /// WHERE clauses containing graph patterns and filters
+        where_clauses: Vec<WhereClause>,
+    },
     /// Delete an entire concept and all its relationships
-    /// Syntax: `DELETE CONCEPT {type: "<type>", name: "<name>", id: "<id>"} DETACH`
-    DeleteConcept(ConceptMatcher),
+    /// Syntax: `DELETE CONCEPT ?target_node DETACH WHERE { ... }`
+    DeleteConcept {
+        /// The target concept node
+        target: String,
+        /// WHERE clauses containing graph patterns and filters
+        where_clauses: Vec<WhereClause>,
+    },
 }
 
 // --- META AST ---

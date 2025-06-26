@@ -1,6 +1,6 @@
 # Anda KIP
 
-> A Rust implementation of KIP (Knowledge Interaction Protocol) for building sustainable AI knowledge memory systems.
+> A Rust SDK of KIP (Knowledge Interaction Protocol) for building sustainable AI knowledge memory systems.
 
 [![Crates.io](https://img.shields.io/crates/v/anda_kip.svg)](https://crates.io/crates/anda_kip)
 [![Documentation](https://docs.rs/anda_kip/badge.svg)](https://docs.rs/anda_kip)
@@ -10,7 +10,7 @@
 
 **🧬 KIP (Knowledge Interaction Protocol)** is a knowledge memory interaction protocol designed for Large Language Models (LLMs), aimed at building sustainable learning and self-evolving knowledge memory systems for AI Agents.
 
-This crate provides a complete Rust implementation of the KIP specification, offering:
+This crate provides a complete Rust SDK of the KIP specification, offering:
 
 - **Parser**: Full KIP command parsing with comprehensive error handling
 - **AST**: Rich Abstract Syntax Tree structures for all KIP command types
@@ -40,17 +40,15 @@ use anda_kip::{parse_kip, Command, Executor, Response, KipError};
 
 // Parse a KQL query
 let query = parse_kip(r#"
-    FIND(?drug_name, ?risk_level)
+    FIND(?drug.name, ?drug.attributes.risk_level)
     WHERE {
         ?drug {type: "Drug"}
         ?headache {name: "Headache"}
         (?drug, "treats", ?headache)
 
-        ATTR(?drug, "name", ?drug_name)
-        ATTR(?drug, "risk_level", ?risk_level)
-        FILTER(?risk_level < 3)
+        FILTER(?drug.attributes.risk_level < 3)
     }
-    ORDER BY ?risk_level ASC
+    ORDER BY ?drug.attributes.risk_level ASC
     LIMIT 10
 "#)?;
 

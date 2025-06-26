@@ -5,7 +5,7 @@ use nom::{
     character::complete::{char, multispace1},
     combinator::{map, map_res, opt},
     multi::{fold, many1, separated_list1},
-    sequence::{pair, preceded, terminated},
+    sequence::{pair, preceded, separated_pair, terminated},
 };
 
 use super::common::*;
@@ -51,14 +51,14 @@ fn parse_find_expression(input: &str) -> IResult<&str, FindExpression> {
 }
 
 fn parse_find_variable(input: &str) -> IResult<&str, FindExpression> {
-    map(variable, FindExpression::Variable).parse(input)
+    map(dot_path_var, FindExpression::Variable).parse(input)
 }
 
 fn parse_aggregation_expression(input: &str) -> IResult<&str, FindExpression> {
     map(
         (
             parse_aggregation_function,
-            parenthesized_block((opt(terminated(tag("DISTINCT"), multispace1)), variable)),
+            parenthesized_block((opt(terminated(tag("DISTINCT"), multispace1)), dot_path_var)),
         ),
         |(func, (distinct, var))| FindExpression::Aggregation {
             func,
@@ -95,8 +95,6 @@ fn parse_single_where_clause(input: &str) -> IResult<&str, WhereClause> {
         map(parse_optional_clause, WhereClause::Optional),
         map(parse_not_clause, WhereClause::Not),
         map(parse_union_expression, WhereClause::Union),
-        map(parse_attr_clause, WhereClause::Attribute),
-        map(parse_meta_clause, WhereClause::Metadata),
         map(parse_filter_clause, WhereClause::Filter),
         map(parse_concept_clause, WhereClause::Concept),
         map(parse_prop_clause, WhereClause::Proposition),
@@ -203,20 +201,26 @@ fn parse_pred_term(input: &str) -> IResult<&str, PredTerm> {
 }
 
 pub fn parse_prop_mather(input: &str) -> IResult<&str, PropositionMatcher> {
-    map(
-        parenthesized_block((
-            ws(parse_target_term),
-            ws(char(',')),
-            ws(parse_pred_term),
-            ws(char(',')),
-            ws(parse_target_term),
-        )),
-        |(subject, _, predicate, _, object)| PropositionMatcher {
-            subject,
-            predicate,
-            object,
-        },
-    )
+    parenthesized_block(alt((
+        map(
+            separated_pair(ws(tag("id")), ws(char(':')), ws(quoted_string)),
+            |(_, id)| PropositionMatcher::ID(id),
+        ),
+        map(
+            (
+                ws(parse_target_term),
+                ws(char(',')),
+                ws(parse_pred_term),
+                ws(char(',')),
+                ws(parse_target_term),
+            ),
+            |(subject, _, predicate, _, object)| PropositionMatcher::Object {
+                subject,
+                predicate,
+                object,
+            },
+        ),
+    )))
     .parse(input)
 }
 
@@ -224,48 +228,6 @@ fn parse_prop_clause(input: &str) -> IResult<&str, PropositionClause> {
     map((opt(variable), parse_prop_mather), |(variable, matcher)| {
         PropositionClause { matcher, variable }
     })
-    .parse(input)
-}
-
-fn parse_attr_clause(input: &str) -> IResult<&str, AttributeClause> {
-    map(
-        preceded(
-            ws(tag("ATTR")),
-            parenthesized_block((
-                ws(parse_target_term),
-                ws(char(',')),
-                ws(quoted_string),
-                ws(char(',')),
-                ws(variable),
-            )),
-        ),
-        |(target, _, key, _, variable)| AttributeClause {
-            target,
-            key,
-            variable,
-        },
-    )
-    .parse(input)
-}
-
-fn parse_meta_clause(input: &str) -> IResult<&str, MetadataClause> {
-    map(
-        preceded(
-            ws(tag("META")),
-            parenthesized_block((
-                ws(parse_target_term),
-                ws(char(',')),
-                ws(quoted_string),
-                ws(char(',')),
-                ws(variable),
-            )),
-        ),
-        |(target, _, key, _, variable)| MetadataClause {
-            target,
-            key,
-            variable,
-        },
-    )
     .parse(input)
 }
 
@@ -374,7 +336,7 @@ fn parse_function_expression(input: &str) -> IResult<&str, FilterExpression> {
 // 解析过滤器操作数
 fn parse_filter_operand(input: &str) -> IResult<&str, FilterOperand> {
     alt((
-        map(variable, FilterOperand::Variable),
+        map(dot_path_var, FilterOperand::Variable),
         map(kip_value, FilterOperand::Literal),
     ))
     .parse(input)
@@ -444,7 +406,7 @@ fn parse_order_by_clause(input: &str) -> IResult<&str, Vec<OrderByCondition>> {
 fn parse_order_by_condition(input: &str) -> IResult<&str, OrderByCondition> {
     map(
         pair(
-            variable,
+            dot_path_var,
             opt(alt((
                 map(ws(tag("ASC")), |_| OrderDirection::Asc),
                 map(ws(tag("DESC")), |_| OrderDirection::Desc),
@@ -477,10 +439,9 @@ mod tests {
     #[test]
     fn test_parse_simple_find_query() {
         let input = r#"
-            FIND(?drug_name)
+            FIND(?drug.name)
             WHERE {
                 ?drug {type: "Drug"}
-                ATTR(?drug, "name", ?drug_name)
             }
         "#;
 
@@ -490,10 +451,13 @@ mod tests {
         let (_, query) = result.unwrap();
         assert_eq!(query.find_clause.expressions.len(), 1);
         match &query.find_clause.expressions[0] {
-            FindExpression::Variable(var) => assert_eq!(var, "drug_name"),
+            FindExpression::Variable(var) => {
+                assert_eq!(var.var, "drug");
+                assert_eq!(var.path, vec!["name".to_string()]);
+            }
             _ => panic!("Expected variable expression"),
         }
-        assert_eq!(query.where_clauses.len(), 2);
+        assert_eq!(query.where_clauses.len(), 1);
     }
 
     #[test]
@@ -513,7 +477,10 @@ mod tests {
         assert_eq!(query.find_clause.expressions.len(), 2);
 
         match &query.find_clause.expressions[0] {
-            FindExpression::Variable(var) => assert_eq!(var, "drug_class"),
+            FindExpression::Variable(var) => {
+                assert_eq!(var.var, "drug_class");
+                assert!(var.path.is_empty());
+            }
             _ => panic!("Expected variable expression"),
         }
 
@@ -524,7 +491,8 @@ mod tests {
                 distinct,
             } => {
                 assert_eq!(*func, AggregationFunction::Count);
-                assert_eq!(var, "drug");
+                assert_eq!(var.var, "drug");
+                assert!(var.path.is_empty());
                 assert!(!distinct);
             }
             _ => panic!("Expected aggregation expression"),
@@ -551,7 +519,8 @@ mod tests {
                 distinct,
             } => {
                 assert_eq!(*func, AggregationFunction::Count);
-                assert_eq!(var, "symptom");
+                assert_eq!(var.var, "symptom");
+                assert!(var.path.is_empty());
                 assert!(*distinct);
             }
             _ => panic!("Expected aggregation expression"),
@@ -586,10 +555,9 @@ mod tests {
     #[test]
     fn test_parse_concept_clause() {
         let input = r#"
-            FIND(?drug_name)
+            FIND(?drug.name)
             WHERE {
                 ?drug {type: "Drug", name: "Aspirin"}
-                ATTR(?drug, "name", ?drug_name)
             }
         "#;
 
@@ -602,10 +570,9 @@ mod tests {
                 assert_eq!(clause.variable, Some("drug".to_string()));
                 assert_eq!(
                     clause.matcher,
-                    ConceptMatcher {
-                        id: None,
-                        r#type: Some("Drug".to_string()),
-                        name: Some("Aspirin".to_string()),
+                    ConceptMatcher::Object {
+                        r#type: "Drug".to_string(),
+                        name: "Aspirin".to_string(),
                     }
                 );
             }
@@ -614,43 +581,11 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_concept_clause_in_attr() {
-        let input = r#"
-            FIND(?drug_name)
-            WHERE {
-                ATTR({type: "Drug", name: "Aspirin"}, "name", ?drug_name)
-            }
-        "#;
-
-        let result = parse_kql_query(input);
-        assert!(result.is_ok());
-
-        let (_, query) = result.unwrap();
-        match &query.where_clauses[0] {
-            WhereClause::Attribute(clause) => {
-                assert_eq!(
-                    clause.target,
-                    TargetTerm::Concept(ConceptMatcher {
-                        id: None,
-                        r#type: Some("Drug".to_string()),
-                        name: Some("Aspirin".to_string()),
-                    })
-                );
-                assert_eq!(clause.key, "name");
-                assert_eq!(clause.variable, "drug_name");
-            }
-            _ => panic!("Expected attribute clause"),
-        }
-    }
-
-    #[test]
     fn test_parse_proposition_clause() {
         let input = r#"
-            FIND(?drug_name, ?symptom_name)
+            FIND(?drug.name, ?symptom.name)
             WHERE {
                 (?drug, "treats", ?symptom)
-                ATTR(?drug, "name", ?drug_name)
-                ATTR(?symptom, "name", ?symptom_name)
             }
         "#;
 
@@ -663,7 +598,7 @@ mod tests {
                 assert_eq!(clause.variable, None);
                 assert_eq!(
                     clause.matcher,
-                    PropositionMatcher {
+                    PropositionMatcher::Object {
                         subject: TargetTerm::Variable("drug".to_string()),
                         predicate: PredTerm::Literal("treats".to_string()),
                         object: TargetTerm::Variable("symptom".to_string()),
@@ -677,79 +612,9 @@ mod tests {
     #[test]
     fn test_parse_proposition_with_concept_clause() {
         let input = r#"
-            FIND(?drug_name)
+            FIND(?drug.name)
             WHERE {
-                ?link (?drug, "treats", { type: "Symptom", name: "Headache" })
-                ATTR(?drug, "name", ?drug_name)
-            }
-        "#;
-
-        let result = parse_kql_query(input);
-        assert!(result.is_ok());
-
-        let (_, query) = result.unwrap();
-        match &query.where_clauses[0] {
-            WhereClause::Proposition(clause) => {
-                assert_eq!(clause.variable, Some("link".to_string()));
-                assert_eq!(
-                    clause.matcher,
-                    PropositionMatcher {
-                        subject: TargetTerm::Variable("drug".to_string()),
-                        predicate: PredTerm::Literal("treats".to_string()),
-                        object: TargetTerm::Concept(ConceptMatcher {
-                            id: None,
-                            r#type: Some("Symptom".to_string()),
-                            name: Some("Headache".to_string()),
-                        }),
-                    }
-                );
-            }
-            _ => panic!("Expected proposition clause"),
-        }
-    }
-
-    #[test]
-    fn test_parse_proposition_in_meta() {
-        let input = r#"
-            FIND(?drug_name, ?symptom_name)
-            WHERE {
-                META(({type: "Drug", name: "Aspirin"}, "treats", ?symptom), "source", ?source_val)
-            }
-        "#;
-
-        let result = parse_kql_query(input);
-        assert!(result.is_ok());
-
-        let (_, query) = result.unwrap();
-        match &query.where_clauses[0] {
-            WhereClause::Metadata(clause) => {
-                assert_eq!(
-                    clause.target,
-                    TargetTerm::Proposition(Box::new(PropositionMatcher {
-                        subject: TargetTerm::Concept(ConceptMatcher {
-                            id: None,
-                            r#type: Some("Drug".to_string()),
-                            name: Some("Aspirin".to_string()),
-                        }),
-                        predicate: PredTerm::Literal("treats".to_string()),
-                        object: TargetTerm::Variable("symptom".to_string()),
-                    }))
-                );
-                assert_eq!(clause.key, "source");
-                assert_eq!(clause.variable, "source_val");
-            }
-            _ => panic!("Expected proposition clause"),
-        }
-    }
-
-    #[test]
-    fn test_parse_nested_proposition() {
-        let input = r#"
-            FIND(?paper_doi, ?drug_name)
-            WHERE {
-                (?zhangsan, "stated", (?paper, "cites_as_evidence", (?drug, "treats", ?symptom)))
-                ATTR(?paper, "doi", ?paper_doi)
-                ATTR(?drug, "name", ?drug_name)
+                (?drug, "treats", { type: "Symptom", name: "Headache" })
             }
         "#;
 
@@ -762,13 +627,76 @@ mod tests {
                 assert_eq!(clause.variable, None);
                 assert_eq!(
                     clause.matcher,
-                    PropositionMatcher {
-                        subject: TargetTerm::Variable("zhangsan".to_string()),
+                    PropositionMatcher::Object {
+                        subject: TargetTerm::Variable("drug".to_string()),
+                        predicate: PredTerm::Literal("treats".to_string()),
+                        object: TargetTerm::Concept(ConceptMatcher::Object {
+                            r#type: "Symptom".to_string(),
+                            name: "Headache".to_string(),
+                        }),
+                    }
+                );
+            }
+            _ => panic!("Expected proposition clause"),
+        }
+    }
+
+    #[test]
+    fn test_parse_proposition_with_id_matcher() {
+        let input = r#"
+            FIND(?link)
+            WHERE {
+                ?link (id: "P:12345:connect")
+            }
+        "#;
+
+        let result = parse_kql_query(input);
+        assert!(result.is_ok());
+
+        let (_, query) = result.unwrap();
+        assert_eq!(query.find_clause.expressions.len(), 1);
+        assert_eq!(query.where_clauses.len(), 1);
+
+        match &query.where_clauses[0] {
+            WhereClause::Proposition(clause) => {
+                assert_eq!(clause.variable, Some("link".to_string()));
+                assert_eq!(
+                    clause.matcher,
+                    PropositionMatcher::ID("P:12345:connect".to_string())
+                );
+            }
+            _ => panic!("Expected proposition clause"),
+        }
+    }
+
+    #[test]
+    fn test_parse_nested_proposition() {
+        let input = r#"
+            FIND(?paper.doi, ?drug.name)
+            WHERE {
+                ({type: "Person", name: "张三"}, "stated", (?paper, "cites_as_evidence", (?drug, "treats", ?symptom)))
+            }
+        "#;
+
+        let result = parse_kql_query(input);
+        assert!(result.is_ok());
+
+        let (_, query) = result.unwrap();
+        match &query.where_clauses[0] {
+            WhereClause::Proposition(clause) => {
+                assert_eq!(clause.variable, None);
+                assert_eq!(
+                    clause.matcher,
+                    PropositionMatcher::Object {
+                        subject: TargetTerm::Concept(ConceptMatcher::Object {
+                            r#type: "Person".to_string(),
+                            name: "张三".to_string(),
+                        }),
                         predicate: PredTerm::Literal("stated".to_string()),
-                        object: TargetTerm::Proposition(Box::new(PropositionMatcher {
+                        object: TargetTerm::Proposition(Box::new(PropositionMatcher::Object {
                             subject: TargetTerm::Variable("paper".to_string()),
                             predicate: PredTerm::Literal("cites_as_evidence".to_string()),
-                            object: TargetTerm::Proposition(Box::new(PropositionMatcher {
+                            object: TargetTerm::Proposition(Box::new(PropositionMatcher::Object {
                                 subject: TargetTerm::Variable("drug".to_string()),
                                 predicate: PredTerm::Literal("treats".to_string()),
                                 object: TargetTerm::Variable("symptom".to_string()),
@@ -797,15 +725,26 @@ mod tests {
             assert!(result.is_ok(), "Failed to parse: {}", input);
 
             let (_, matcher) = result.unwrap();
-            match &matcher.predicate {
-                PredTerm::Quantified {
+            match &matcher {
+                PropositionMatcher::Object {
+                    subject,
                     predicate,
-                    min,
-                    max,
+                    object,
                 } => {
-                    assert_eq!(predicate, "follows");
-                    assert_eq!(*min, expected_min);
-                    assert_eq!(*max, expected_max);
+                    assert_eq!(subject, &TargetTerm::Variable("a".to_string()));
+                    assert_eq!(object, &TargetTerm::Variable("b".to_string()));
+                    match &predicate {
+                        PredTerm::Quantified {
+                            predicate,
+                            min,
+                            max,
+                        } => {
+                            assert_eq!(predicate, "follows");
+                            assert_eq!(*min, expected_min);
+                            assert_eq!(*max, expected_max);
+                        }
+                        _ => panic!("Expected proposition for object"),
+                    }
                 }
                 _ => panic!("Expected quantified predicate path for: {}", input),
             }
@@ -819,8 +758,11 @@ mod tests {
         assert!(result.is_ok());
 
         let (_, matcher) = result.unwrap();
-        match &matcher.predicate {
-            PredTerm::Alternative(paths) => {
+        match matcher {
+            PropositionMatcher::Object {
+                predicate: PredTerm::Alternative(paths),
+                ..
+            } => {
                 assert_eq!(paths.len(), 3);
                 assert_eq!(paths[0], "follows");
                 assert_eq!(paths[1], "connected_to");
@@ -848,30 +790,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_attribute_pattern() {
-        let input = r#"
-            FIND(?drug_name)
-            WHERE {
-                ?drug{type: "Drug"}
-                ATTR(?drug, "name", ?drug_name)
-            }
-        "#;
-
-        let result = parse_kql_query(input);
-        assert!(result.is_ok());
-
-        let (_, query) = result.unwrap();
-        match &query.where_clauses[1] {
-            WhereClause::Attribute(clause) => {
-                assert_eq!(clause.target, TargetTerm::Variable("drug".to_string()));
-                assert_eq!(clause.key, "name");
-                assert_eq!(clause.variable, "drug_name");
-            }
-            _ => panic!("Expected attribute clause"),
-        }
-    }
-
-    #[test]
     fn test_parse_simple_comparison_filter() {
         let input = "FILTER(?risk < 3)";
         let result = parse_filter_clause(input);
@@ -885,7 +803,7 @@ mod tests {
                 right,
             } => {
                 match left {
-                    FilterOperand::Variable(var) => assert_eq!(var, "risk"),
+                    FilterOperand::Variable(var) => assert_eq!(var.var, "risk"),
                     _ => panic!("Expected variable operand"),
                 }
                 assert_eq!(operator, ComparisonOperator::LessThan);
@@ -1170,11 +1088,10 @@ mod tests {
     #[test]
     fn test_parse_filter_clause() {
         let input = r#"
-            FIND(?drug_name)
+            FIND(?drug.name)
             WHERE {
                 ?drug {type: "Drug"}
-                ATTR(?drug, "risk_level", ?risk)
-                FILTER(?risk < 3)
+                FILTER(?drug.attributes.risk_level < 3)
             }
         "#;
 
@@ -1182,7 +1099,7 @@ mod tests {
         assert!(result.is_ok());
 
         let (_, query) = result.unwrap();
-        match &query.where_clauses[2] {
+        match &query.where_clauses[1] {
             WhereClause::Filter(filter) => match &filter.expression {
                 FilterExpression::Comparison {
                     left,
@@ -1190,7 +1107,13 @@ mod tests {
                     right,
                 } => {
                     match left {
-                        FilterOperand::Variable(var) => assert_eq!(var, "risk"),
+                        FilterOperand::Variable(var) => {
+                            assert_eq!(var.var, "drug");
+                            assert_eq!(
+                                var.path,
+                                vec!["attributes".to_string(), "risk_level".to_string()]
+                            );
+                        }
                         _ => panic!("Expected variable operand"),
                     }
                     assert_eq!(*operator, ComparisonOperator::LessThan);
@@ -1208,11 +1131,10 @@ mod tests {
     #[test]
     fn test_parse_complex_filter() {
         let input = r#"
-        FIND(?drug_name)
+        FIND(?drug.name)
         WHERE {
             ?drug {type: "Drug"}
-            ATTR(?drug, "name", ?drug_name)
-            FILTER(CONTAINS(?drug_name, "acid") && ?risk < 3)
+            FILTER(CONTAINS(?drug.name, "acid") && ?drug.attributes.risk_level < 3)
         }
     "#;
 
@@ -1220,7 +1142,7 @@ mod tests {
         assert!(result.is_ok());
 
         let (_, query) = result.unwrap();
-        match &query.where_clauses[2] {
+        match &query.where_clauses[1] {
             WhereClause::Filter(filter) => {
                 // 检查这是一个逻辑 AND 表达式
                 match &filter.expression {
@@ -1237,7 +1159,10 @@ mod tests {
                                 assert_eq!(*func, FilterFunction::Contains);
                                 assert_eq!(args.len(), 2);
                                 match &args[0] {
-                                    FilterOperand::Variable(var) => assert_eq!(var, "drug_name"),
+                                    FilterOperand::Variable(var) => {
+                                        assert_eq!(var.var, "drug");
+                                        assert_eq!(var.path, vec!["name".to_string()]);
+                                    }
                                     _ => panic!("Expected variable as first argument"),
                                 }
                                 match &args[1] {
@@ -1258,7 +1183,16 @@ mod tests {
                                 right,
                             } => {
                                 match left {
-                                    FilterOperand::Variable(var) => assert_eq!(var, "risk"),
+                                    FilterOperand::Variable(var) => {
+                                        assert_eq!(var.var, "drug");
+                                        assert_eq!(
+                                            var.path,
+                                            vec![
+                                                "attributes".to_string(),
+                                                "risk_level".to_string()
+                                            ]
+                                        );
+                                    }
                                     _ => panic!("Expected variable operand"),
                                 }
                                 assert_eq!(*operator, ComparisonOperator::LessThan);
@@ -1280,13 +1214,11 @@ mod tests {
     #[test]
     fn test_parse_optional_clause() {
         let input = r#"
-            FIND(?drug_name, ?side_effect_name)
+            FIND(?drug.name, ?side_effect.name)
             WHERE {
                 ?drug {type: "Drug" }
-                ATTR(?drug, "name", ?drug_name)
                 OPTIONAL {
                     (?drug, "has_side_effect", ?side_effect)
-                    ATTR(?side_effect, "name", ?side_effect_name)
                 }
             }
         "#;
@@ -1295,16 +1227,25 @@ mod tests {
         assert!(result.is_ok());
 
         let (_, query) = result.unwrap();
-        match &query.where_clauses[2] {
+        match &query.where_clauses[1] {
             WhereClause::Optional(clauses) => {
-                assert_eq!(clauses.len(), 2);
+                assert_eq!(clauses.len(), 1);
                 match &clauses[0] {
-                    WhereClause::Proposition(clause) => {
-                        assert_eq!(
-                            clause.matcher.predicate,
-                            PredTerm::Literal("has_side_effect".to_string())
-                        );
-                    }
+                    WhereClause::Proposition(clause) => match &clause.matcher {
+                        PropositionMatcher::Object {
+                            subject,
+                            predicate,
+                            object,
+                        } => {
+                            assert_eq!(subject, &TargetTerm::Variable("drug".to_string()));
+                            assert_eq!(
+                                predicate,
+                                &PredTerm::Literal("has_side_effect".to_string())
+                            );
+                            assert_eq!(object, &TargetTerm::Variable("side_effect".to_string()));
+                        }
+                        _ => panic!("Expected object matcher"),
+                    },
                     _ => panic!("Expected proposition in optional"),
                 }
             }
@@ -1315,13 +1256,12 @@ mod tests {
     #[test]
     fn test_parse_not_clause() {
         let input = r#"
-            FIND(?drug_name)
+            FIND(?drug.name)
             WHERE {
                 ?drug {type: "Drug"}
                 NOT {
                     (?drug, "is_class_of", {name: "NSAID"})
                 }
-                ATTR(?drug, "name", ?drug_name)
             }
         "#;
 
@@ -1336,14 +1276,12 @@ mod tests {
                     WhereClause::Proposition(clause) => {
                         assert_eq!(
                             clause.matcher,
-                            PropositionMatcher {
+                            PropositionMatcher::Object {
                                 subject: TargetTerm::Variable("drug".to_string()),
                                 predicate: PredTerm::Literal("is_class_of".to_string()),
-                                object: TargetTerm::Concept(ConceptMatcher {
-                                    id: None,
-                                    r#type: None,
-                                    name: Some("NSAID".to_string()),
-                                }),
+                                object: TargetTerm::Concept(ConceptMatcher::Name(
+                                    "NSAID".to_string()
+                                )),
                             }
                         );
                     }
@@ -1357,7 +1295,7 @@ mod tests {
     #[test]
     fn test_parse_union_clause() {
         let input = r#"
-            FIND(?drug_name)
+            FIND(?drug.name)
             WHERE {
                 ?headache {name: "Headache"}
                 (?drug, "treats", ?headache)
@@ -1365,8 +1303,6 @@ mod tests {
                 UNION {
                     (?drug, "treats", {name: "Fever"})
                 }
-
-                ATTR(?drug, "name", ?drug_name)
             }
         "#;
 
@@ -1374,7 +1310,7 @@ mod tests {
         assert!(result.is_ok());
 
         let (_, query) = result.unwrap();
-        assert_eq!(query.where_clauses.len(), 4);
+        assert_eq!(query.where_clauses.len(), 3);
         match &query.where_clauses[2] {
             WhereClause::Union(clauses) => {
                 assert_eq!(clauses.len(), 1);
@@ -1382,14 +1318,12 @@ mod tests {
                     WhereClause::Proposition(clause) => {
                         assert_eq!(
                             clause.matcher,
-                            PropositionMatcher {
+                            PropositionMatcher::Object {
                                 subject: TargetTerm::Variable("drug".to_string()),
                                 predicate: PredTerm::Literal("treats".to_string()),
-                                object: TargetTerm::Concept(ConceptMatcher {
-                                    id: None,
-                                    r#type: None,
-                                    name: Some("Fever".to_string()),
-                                }),
+                                object: TargetTerm::Concept(ConceptMatcher::Name(
+                                    "Fever".to_string()
+                                ))
                             }
                         );
                     }
@@ -1403,13 +1337,11 @@ mod tests {
     #[test]
     fn test_parse_order_by_clause() {
         let input = r#"
-            FIND(?drug_name, ?risk)
+            FIND(?drug.name, ?drug.attributes.risk_level)
             WHERE {
                 ?drug {type: "Drug"}
-                ATTR(?drug, "name", ?drug_name)
-                ATTR(?drug, "risk_level", ?risk)
             }
-            ORDER BY ?risk ASC, ?drug_name DESC
+            ORDER BY ?drug.attributes.risk_level ASC, ?drug.name DESC
         "#;
 
         let result = parse_kql_query(input);
@@ -1419,21 +1351,25 @@ mod tests {
         assert!(query.order_by.is_some());
         let order_by = query.order_by.unwrap();
         assert_eq!(order_by.len(), 2);
-        assert_eq!(order_by[0].variable, "risk");
+        assert_eq!(order_by[0].variable.var, "drug");
+        assert_eq!(
+            order_by[0].variable.path,
+            vec!["attributes".to_string(), "risk_level".to_string()]
+        );
         assert_eq!(order_by[0].direction, OrderDirection::Asc);
-        assert_eq!(order_by[1].variable, "drug_name");
+        assert_eq!(order_by[1].variable.var, "drug");
+        assert_eq!(order_by[1].variable.path, vec!["name".to_string()]);
         assert_eq!(order_by[1].direction, OrderDirection::Desc);
     }
 
     #[test]
     fn test_parse_order_by_default_asc() {
         let input = r#"
-            FIND(?drug_name)
+            FIND(?drug.name)
             WHERE {
                 ?drug {type: "Drug"}
-                ATTR(?drug, "name", ?drug_name)
             }
-            ORDER BY ?drug_name
+            ORDER BY ?drug.name
         "#;
 
         let result = parse_kql_query(input);
@@ -1449,12 +1385,11 @@ mod tests {
     #[test]
     fn test_parse_limit_and_offset() {
         let input = r#"
-            FIND(?drug_name)
+            FIND(?drug.name)
             WHERE {
                 ?drug {type: "Drug"}
-                ATTR(?drug, "name", ?drug_name)
             }
-            ORDER BY ?drug_name
+            ORDER BY ?drug.name
             LIMIT 20
             OFFSET 10
         "#;
@@ -1470,7 +1405,7 @@ mod tests {
     #[test]
     fn test_parse_complex_query() {
         let input = r#"
-            FIND(?drug_name, ?risk)
+            FIND(?drug.name, ?drug.attributes.risk_level)
             WHERE {
                 ?drug {type: "Drug"}
                 ?headache{name: "Headache"}
@@ -1482,11 +1417,9 @@ mod tests {
                     (?drug, "is_class_of", ?nsaid_class)
                 }
 
-                ATTR(?drug, "name", ?drug_name)
-                ATTR(?drug, "risk_level", ?risk)
-                FILTER(?risk < 4)
+                FILTER(?drug.attributes.risk_level < 4)
             }
-            ORDER BY ?risk ASC
+            ORDER BY ?drug.attributes.risk_level ASC
             LIMIT 20
         "#;
 
@@ -1495,7 +1428,7 @@ mod tests {
 
         let (_, query) = result.unwrap();
         assert_eq!(query.find_clause.expressions.len(), 2);
-        assert_eq!(query.where_clauses.len(), 8); // 3 groundings + 1 prop + 1 not + 2 attrs + 1 filter
+        assert_eq!(query.where_clauses.len(), 6); // 3 groundings + 1 prop + 1 not + 1 filter
         assert!(query.order_by.is_some());
         assert_eq!(query.limit, Some(20));
         assert!(query.offset.is_none());
@@ -1504,16 +1437,13 @@ mod tests {
     #[test]
     fn test_parse_aggregation_with_grouping() {
         let input = r#"
-            FIND(?class_name, COUNT(?drug_name))
+            FIND(?class.name, COUNT(?drug.name))
             WHERE {
                 ?class {type: "DrugClass"}
-                ATTR(?class, "name", ?class_name)
-
                 ?drug {type: "Drug"}
                 (?drug, "is_class_of", ?class)
-                ATTR(?drug, "name", ?drug_name)
             }
-            ORDER BY ?class_name
+            ORDER BY ?class.name
         "#;
 
         let result = parse_kql_query(input);
@@ -1524,7 +1454,8 @@ mod tests {
         match &query.find_clause.expressions[1] {
             FindExpression::Aggregation { func, var, .. } => {
                 assert_eq!(*func, AggregationFunction::Count);
-                assert_eq!(var, "drug_name");
+                assert_eq!(var.var, "drug");
+                assert_eq!(var.path, vec!["name".to_string()]);
             }
             _ => panic!("Expected aggregation expression"),
         }
@@ -1533,12 +1464,10 @@ mod tests {
     #[test]
     fn test_parse_error_cases() {
         let invalid_inputs = vec![
-            "FIND() WHERE {}",                   // Empty FIND
-            "FIND(?var WHERE {}",                // Missing closing parenthesis
-            "FIND(?var) WHERE",                  // Missing WHERE block
-            "FIND(?var) WHERE { ?var }",         // Invalid grounding syntax
-            "FIND(?var) WHERE { PROP(?a, ?b) }", // Missing object in PROP
-            "FIND(?var) WHERE { ATTR(?a, ?b) }", // Missing value variable in ATTR
+            "FIND() WHERE {}",           // Empty FIND
+            "FIND(?var WHERE {}",        // Missing closing parenthesis
+            "FIND(?var) WHERE",          // Missing WHERE block
+            "FIND(?var) WHERE { ?var }", // Invalid grounding syntax
         ];
 
         for input in invalid_inputs {
@@ -1554,8 +1483,6 @@ mod tests {
             WHERE   {
                 ?drug  {  type:  "Drug"  }
                 ?prop  (  ?drug  ,  "treats"  ,  ?symptom  )
-                ATTR  (  ?drug  ,  "name"  ,  ?drug_name  )
-                ATTR  (  ?symptom  ,  "name"  ,  ?symptom_name  )
             }
             ORDER   BY   ?drug_name   ASC
             LIMIT   10
@@ -1567,7 +1494,7 @@ mod tests {
 
         let (_, query) = result.unwrap();
         assert_eq!(query.find_clause.expressions.len(), 2);
-        assert_eq!(query.where_clauses.len(), 4);
+        assert_eq!(query.where_clauses.len(), 2);
         assert_eq!(query.limit, Some(10));
     }
 }

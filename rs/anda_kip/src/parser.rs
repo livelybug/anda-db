@@ -92,7 +92,7 @@ pub fn parse_kip(input: &str) -> Result<Command, KipError> {
 /// ```rust,no_run
 /// use anda_kip::parse_kql;
 ///
-/// let query = parse_kql("FIND(?drug_name) WHERE { ?drug {type: \"Drug\"} ATTR(?drug, \"name\", ?drug_name) }");
+/// let query = parse_kql("FIND(?drug.name) WHERE { ?drug {type: \"Drug\"} }");
 /// ```
 pub fn parse_kql(input: &str) -> Result<KqlQuery, KipError> {
     let rt = all_consuming(json::ws(kql::parse_kql_query))
@@ -323,10 +323,9 @@ WITH METADATA {
                         assert_eq!(handle, "cognizine");
                         assert_eq!(
                             concept,
-                            &ast::ConceptMatcher {
-                                id: None,
-                                r#type: Some("Drug".to_string()),
-                                name: Some("Cognizine".to_string()),
+                            &ast::ConceptMatcher::Object {
+                                r#type: "Drug".to_string(),
+                                name: "Cognizine".to_string(),
                             }
                         );
                         assert!(metadata.is_none());
@@ -349,10 +348,9 @@ WITH METADATA {
                         assert_eq!(handle, "neural_bloom");
                         assert_eq!(
                             concept,
-                            &ast::ConceptMatcher {
-                                id: None,
-                                r#type: Some("Symptom".to_string()),
-                                name: Some("Neural Bloom".to_string()),
+                            &ast::ConceptMatcher::Object {
+                                r#type: "Symptom".to_string(),
+                                name: "Neural Bloom".to_string(),
                             }
                         );
                         assert!(metadata.is_none());

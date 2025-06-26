@@ -38,17 +38,15 @@
 //!
 //! // Parse a KQL query
 //! let query = parse_kip(r#"
-//!     FIND(?drug_name, ?risk_level)
+//!     FIND(?drug.name, ?drug.attributes.risk_level)
 //!     WHERE {
 //!         ?drug {type: "Drug"}
 //!         ?headache {name: "Headache"}
 //!         (?drug, "treats", ?headache)
 //!
-//!         ATTR(?drug, "name", ?drug_name)
-//!         ATTR(?drug, "risk_level", ?risk_level)
-//!         FILTER(?risk_level < 3)
+//!         FILTER(?drug.attributes.risk_level < 3)
 //!     }
-//!     ORDER BY ?risk_level ASC
+//!     ORDER BY ?drug.attributes.risk_level ASC
 //!     LIMIT 10
 //! "#).unwrap();
 //!

@@ -22,7 +22,7 @@ use crate::{
 /// # Example
 /// ```json
 /// {
-///   "command": "FIND(?drug_name) WHERE { ?symptom {name: $symptom_name} (?drug, \"treats\", ?symptom) ATTR(?drug, \"name\", ?drug_name) } LIMIT $limit",
+///   "command": "FIND(?drug.name) WHERE { ?symptom {name: $symptom_name} (?drug, \"treats\", ?symptom) } LIMIT $limit",
 ///   "parameters": {
 ///     "symptom_name": "Headache",
 ///     "limit": 10
@@ -273,7 +273,7 @@ mod tests {
         );
 
         let request = Request {
-            command: "FIND(?drug) WHERE { ?drug {type: \"Drug\"} ATTR(?drug, \"risk_level\", ?risk) FILTER(?risk < $risk_level) } LIMIT $limit".to_string(),
+            command: "FIND(?drug) WHERE { ?drug {type: \"Drug\"} FILTER(?drug.attributes.risk_level < $risk_level) } LIMIT $limit".to_string(),
             parameters,
             dry_run: false,
         };
@@ -281,7 +281,7 @@ mod tests {
         let result = request.to_command();
         assert_eq!(
             result,
-            "FIND(?drug) WHERE { ?drug {type: \"Drug\"} ATTR(?drug, \"risk_level\", ?risk) FILTER(?risk < 3.5) } LIMIT 10"
+            "FIND(?drug) WHERE { ?drug {type: \"Drug\"} FILTER(?drug.attributes.risk_level < 3.5) } LIMIT 10"
         );
         assert!(parse_kql(&result).is_ok());
     }
@@ -326,13 +326,11 @@ mod tests {
 
         let request = Request {
             command: r#"
-                FIND(?drug_name)
+                FIND(?drug.name)
                 WHERE {
                     ?symptom{name: $symptom_name}
                     (?drug, "treats", ?symptom)
-                    ATTR(?drug, "name", ?drug_name)
-                    ATTR(?drug, "experimental", ?include_experimental)
-                    FILTER(?include_experimental == $include_experimental)
+                    FILTER(?drug.attributes.experimental == $include_experimental)
                 }
                 LIMIT $limit
             "#
@@ -343,13 +341,11 @@ mod tests {
 
         let result = request.to_command();
         let expected = r#"
-                FIND(?drug_name)
+                FIND(?drug.name)
                 WHERE {
                     ?symptom{name: "Headache"}
                     (?drug, "treats", ?symptom)
-                    ATTR(?drug, "name", ?drug_name)
-                    ATTR(?drug, "experimental", ?include_experimental)
-                    FILTER(?include_experimental == false)
+                    FILTER(?drug.attributes.experimental == false)
                 }
                 LIMIT 5
             "#;
@@ -442,14 +438,12 @@ mod tests {
 
         let request = Request {
             command: r#"
-                FIND(?drug_name, ?confidence)
+                FIND(?drug.name, ?drug.metadata.confidence)
                 WHERE {
                     (?drug, "treats", {name: $symptom_name})
-                    ATTR(?drug, "name", ?drug_name)
-                    META(?drug, "confidence", ?confidence)
-                    FILTER(?confidence > $confidence_threshold)
+                    FILTER(?drug.metadata.confidence > $confidence_threshold)
                 }
-                ORDER BY ?confidence DESC
+                ORDER BY ?drug.metadata.confidence DESC
                 LIMIT $max_results
             "#
             .to_string(),
@@ -459,14 +453,12 @@ mod tests {
 
         let result = request.to_command();
         let expected = r#"
-                FIND(?drug_name, ?confidence)
+                FIND(?drug.name, ?drug.metadata.confidence)
                 WHERE {
                     (?drug, "treats", {name: "Brain Fog"})
-                    ATTR(?drug, "name", ?drug_name)
-                    META(?drug, "confidence", ?confidence)
-                    FILTER(?confidence > 0.8)
+                    FILTER(?drug.metadata.confidence > 0.8)
                 }
-                ORDER BY ?confidence DESC
+                ORDER BY ?drug.metadata.confidence DESC
                 LIMIT 20
             "#;
         assert_eq!(result, expected);

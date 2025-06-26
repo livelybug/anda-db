@@ -10,7 +10,7 @@ use nom::{
 };
 
 use super::json::{json_value, parse_number};
-use crate::ast::{Json, KeyValue, Map, Value};
+use crate::ast::{DotPathVar, Json, KeyValue, Map, Value};
 
 pub use super::json::quoted_string;
 
@@ -88,6 +88,31 @@ pub fn identifier(input: &str) -> IResult<&str, &str> {
 /// Parses a KIP variable, like `?my_var`.
 pub fn variable(input: &str) -> IResult<&str, String> {
     map(preceded(char('?'), identifier), |s| s.to_string()).parse(input)
+}
+
+/// Parses a dot notation path, like `?var`, `?var.field` or `?var.attributes.key`.
+pub fn dot_path_var(input: &str) -> IResult<&str, DotPathVar> {
+    let (remaining, (var, path_components)) = pair(
+        preceded(char('?'), identifier),
+        many0(preceded(char('.'), identifier)),
+    )
+    .parse(input)?;
+
+    // 验证剩余输入不以点号开头（避免 "?var." 这种情况）
+    if remaining.starts_with('.') {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            remaining,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
+
+    Ok((
+        remaining,
+        DotPathVar {
+            var: var.to_string(),
+            path: path_components.into_iter().map(|s| s.to_string()).collect(),
+        },
+    ))
 }
 
 /// Parses any KIP value (string, number, boolean, null).
@@ -193,6 +218,114 @@ mod tests {
         assert_eq!(variable("?var123"), Ok(("", "var123".to_string())));
         assert!(variable("my_var").is_err());
         assert!(variable("?").is_err());
+    }
+
+    #[test]
+    fn test_dot_path_var() {
+        // 测试简单变量（无路径组件）
+        let result = dot_path_var("?var");
+        assert!(result.is_ok());
+        let (remaining, dot_path) = result.unwrap();
+        assert_eq!(remaining, "");
+        assert_eq!(dot_path.var, "var");
+        assert_eq!(dot_path.path, Vec::<String>::new());
+
+        // 测试带一个路径组件的变量
+        let result = dot_path_var("?drug.name");
+        assert!(result.is_ok());
+        let (remaining, dot_path) = result.unwrap();
+        assert_eq!(remaining, "");
+        assert_eq!(dot_path.var, "drug");
+        assert_eq!(dot_path.path, vec!["name".to_string()]);
+
+        // 测试带多个路径组件的变量
+        let result = dot_path_var("?drug.attributes.risk_level");
+        assert!(result.is_ok());
+        let (remaining, dot_path) = result.unwrap();
+        assert_eq!(remaining, "");
+        assert_eq!(dot_path.var, "drug");
+        assert_eq!(
+            dot_path.path,
+            vec!["attributes".to_string(), "risk_level".to_string()]
+        );
+
+        // 测试更复杂的路径
+        let result = dot_path_var("?entity.metadata.created_by.user_id");
+        assert!(result.is_ok());
+        let (remaining, dot_path) = result.unwrap();
+        assert_eq!(remaining, "");
+        assert_eq!(dot_path.var, "entity");
+        assert_eq!(
+            dot_path.path,
+            vec![
+                "metadata".to_string(),
+                "created_by".to_string(),
+                "user_id".to_string()
+            ]
+        );
+
+        // 测试带下划线的变量名和路径
+        let result = dot_path_var("?my_var._private_field.sub_key");
+        assert!(result.is_ok());
+        let (remaining, dot_path) = result.unwrap();
+        assert_eq!(remaining, "");
+        assert_eq!(dot_path.var, "my_var");
+        assert_eq!(
+            dot_path.path,
+            vec!["_private_field".to_string(), "sub_key".to_string()]
+        );
+
+        // 测试带数字的标识符
+        let result = dot_path_var("?var123.field456.key789");
+        assert!(result.is_ok());
+        let (remaining, dot_path) = result.unwrap();
+        assert_eq!(remaining, "");
+        assert_eq!(dot_path.var, "var123");
+        assert_eq!(
+            dot_path.path,
+            vec!["field456".to_string(), "key789".to_string()]
+        );
+
+        // 测试解析停止在非标识符字符处
+        let result = dot_path_var("?var.field extra");
+        assert!(result.is_ok());
+        let (remaining, dot_path) = result.unwrap();
+        assert_eq!(remaining, " extra");
+        assert_eq!(dot_path.var, "var");
+        assert_eq!(dot_path.path, vec!["field".to_string()]);
+
+        // 测试解析停止在特殊字符处
+        let result = dot_path_var("?var.field,");
+        assert!(result.is_ok());
+        let (remaining, dot_path) = result.unwrap();
+        assert_eq!(remaining, ",");
+        assert_eq!(dot_path.var, "var");
+        assert_eq!(dot_path.path, vec!["field".to_string()]);
+    }
+
+    #[test]
+    fn test_dot_path_var_errors() {
+        // 测试缺少问号前缀
+        assert!(dot_path_var("var.field").is_err());
+
+        // 测试只有问号
+        assert!(dot_path_var("?").is_err());
+
+        // 测试问号后跟无效标识符
+        assert!(dot_path_var("?123invalid").is_err());
+
+        // 测试点后没有标识符
+        assert!(dot_path_var("?var.").is_err());
+        assert!(dot_path_var("?var..").is_err());
+
+        // 测试点后跟无效标识符
+        assert!(dot_path_var("?var.123invalid").is_err());
+
+        // 测试空输入
+        assert!(dot_path_var("").is_err());
+
+        // 测试连续的点
+        assert!(dot_path_var("?var..field").is_err());
     }
 
     #[test]
