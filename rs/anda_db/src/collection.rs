@@ -794,7 +794,7 @@ impl Collection {
         }
 
         let now_ms = unix_ms();
-        let name = fields.join("-");
+        let name = BTree::virtual_field_name(fields);
 
         {
             if self.metadata.read().btree_indexes.contains_key(&name) {
@@ -1071,6 +1071,27 @@ impl Collection {
         });
 
         Ok(id)
+    }
+
+    /// Adds a new document to the collection from a serializable value.
+    ///
+    /// This method:
+    /// 1. Converts the value into a Document using the collection's schema
+    /// 2. Validates the document against the schema
+    /// 3. Assigns a unique ID to the document
+    /// 4. Updates all relevant indexes
+    /// 5. Persists the document to storage
+    /// # Arguments
+    /// * `val` - The value to convert into a document
+    ///
+    /// # Returns
+    /// The ID of the newly added document, or an error if addition fails
+    pub async fn add_from<T>(&self, val: &T) -> Result<DocumentId, DBError>
+    where
+        T: Serialize,
+    {
+        let doc = Document::try_from(self.schema(), val)?;
+        self.add(doc).await
     }
 
     /// Updates an existing document with new field values.
@@ -1558,7 +1579,7 @@ impl Collection {
                 } else if let Some(index) =
                     self.btree_indexes.iter().find(|i| i.name() == index_name)
                 {
-                    let _: Vec<()> = index.search_range_with(filter, |_, ids| {
+                    let _: Vec<()> = index.range_query_with(filter, |_, ids| {
                         for id in ids {
                             if candidates.is_empty() || candidates.contains(id) {
                                 result.push(*id);

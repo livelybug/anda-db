@@ -30,21 +30,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     index.insert(5, berry.clone(), now_ms).unwrap();
 
     // Search for exact matches
-    let result = index.search_with(&apple, |ids| Some(ids.clone()));
+    let result = index.query_with(&apple, |ids| Some(ids.clone()));
     assert!(result.is_some());
     println!("Documents with 'apple': {:?}", result.unwrap());
 
     // Range queries
     let query = RangeQuery::Between(banana.clone(), date.clone());
-    let results = index.search_range_with(query, |k, ids| {
+    let results = index.range_query_with(query, |k, ids| {
         println!("Key: {}, IDs: {:?}", k, ids);
         (true, vec![k.clone()])
     });
     println!("Keys in range: {:?}", results);
 
-    // Prefix search (for String keys)
+    // Prefix query (for String keys)
     let results =
-        index.search_prefix_with("app", |k, ids| (true, Some((k.to_string(), ids.clone()))));
+        index.prefix_query_with("app", |k, ids| (true, Some((k.to_string(), ids.clone()))));
     println!("Keys with prefix 'app': {:?}", results);
 
     // persist the index to files
@@ -80,13 +80,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     assert_eq!(index2.len(), 5);
 
-    let result = index.search_with(&apple, |ids| Some(ids.clone()));
+    let result = index.query_with(&apple, |ids| Some(ids.clone()));
     assert!(result.is_some());
 
     // Remove data
     let ok = index.remove(1, apple.clone(), now_ms);
     assert!(ok);
-    let result = index.search_with(&apple, |ids| Some(ids.clone()));
+    let result = index.query_with(&apple, |ids| Some(ids.clone()));
     assert!(result.is_none());
 
     println!("OK");

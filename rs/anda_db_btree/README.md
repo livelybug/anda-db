@@ -11,7 +11,7 @@ A high-performance B-tree based index implementation for Anda-DB, optimized for 
 
 - **Support for various data types**: Index fields of u64, i64, String, binary data and more
 - **Efficient range queries**: Optimized for fast range-based lookups
-- **Prefix search**: Specialized support for string prefix searches
+- **Prefix query**: Specialized support for string prefix queries
 - **Efficient serialization**: Fast CBOR-based serialization and deserialization
 - **Incremental Persistent**: Support incremental index updates persistent (insertions and deletions)
 - **Thread-safe concurrent access**: Safely use the index from multiple threads
@@ -22,7 +22,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-anda_db_btree = "0.1.0"
+anda_db_btree = "0.4.0"
 ```
 
 ### Basic Example
@@ -60,21 +60,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     index.insert(5, berry.clone(), now_ms).unwrap();
 
     // Search for exact matches
-    let result = index.search_with(&apple, |ids| Some(ids.clone()));
+    let result = index.query_with(&apple, |ids| Some(ids.clone()));
     assert!(result.is_some());
     println!("Documents with 'apple': {:?}", result.unwrap());
 
     // Range queries
     let query = RangeQuery::Between(banana.clone(), date.clone());
-    let results = index.search_range_with(query, |k, ids| {
+    let results = index.range_query_with(query, |k, ids| {
         println!("Key: {}, IDs: {:?}", k, ids);
         (true, vec![k.clone()])
     });
     println!("Keys in range: {:?}", results);
 
-    // Prefix search (for String keys)
+    // Prefix query (for String keys)
     let results =
-        index.search_prefix_with("app", |k, ids| (true, Some((k.to_string(), ids.clone()))));
+        index.prefix_query_with("app", |k, ids| (true, Some((k.to_string(), ids.clone()))));
     println!("Keys with prefix 'app': {:?}", results);
 
     // persist the index to files
@@ -110,13 +110,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     assert_eq!(index2.len(), 5);
 
-    let result = index.search_with(&apple, |ids| Some(ids.clone()));
+    let result = index.query_with(&apple, |ids| Some(ids.clone()));
     assert!(result.is_some());
 
     // Remove data
     let ok = index.remove(1, apple.clone(), now_ms);
     assert!(ok);
-    let result = index.search_with(&apple, |ids| Some(ids.clone()));
+    let result = index.query_with(&apple, |ids| Some(ids.clone()));
     assert!(result.is_none());
 
     println!("OK");

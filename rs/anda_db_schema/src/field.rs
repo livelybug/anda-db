@@ -8,7 +8,10 @@
 //! All data is serialized into CBOR format for storage to improve storage efficiency and cross-platform compatibility.
 //!
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use std::{collections::BTreeMap, fmt};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    fmt,
+};
 
 use crate::{BoxError, SchemaError, validate_field_name};
 
@@ -293,6 +296,111 @@ impl From<FieldValue> for Cbor {
 
             FieldValue::Null => Cbor::Null,
         }
+    }
+}
+
+impl From<bool> for FieldValue {
+    fn from(val: bool) -> Self {
+        FieldValue::Bool(val)
+    }
+}
+
+impl From<i64> for FieldValue {
+    fn from(val: i64) -> Self {
+        FieldValue::I64(val)
+    }
+}
+
+impl From<u64> for FieldValue {
+    fn from(val: u64) -> Self {
+        FieldValue::U64(val)
+    }
+}
+
+impl From<f64> for FieldValue {
+    fn from(val: f64) -> Self {
+        FieldValue::F64(val)
+    }
+}
+
+impl From<f32> for FieldValue {
+    fn from(val: f32) -> Self {
+        FieldValue::F32(val)
+    }
+}
+
+impl From<Vec<u8>> for FieldValue {
+    fn from(val: Vec<u8>) -> Self {
+        FieldValue::Bytes(val)
+    }
+}
+
+impl From<String> for FieldValue {
+    fn from(val: String) -> Self {
+        FieldValue::Text(val)
+    }
+}
+
+impl From<Json> for FieldValue {
+    fn from(val: Json) -> Self {
+        FieldValue::Json(val)
+    }
+}
+
+impl From<Vec<bf16>> for FieldValue {
+    fn from(val: Vec<bf16>) -> Self {
+        FieldValue::Vector(val)
+    }
+}
+
+impl<T> From<Vec<T>> for FieldValue
+where
+    T: Into<FieldValue>,
+{
+    fn from(val: Vec<T>) -> Self {
+        FieldValue::Array(val.into_iter().map(|v| v.into()).collect())
+    }
+}
+
+impl<T> From<BTreeSet<T>> for FieldValue
+where
+    T: Into<FieldValue>,
+{
+    fn from(val: BTreeSet<T>) -> Self {
+        FieldValue::Array(val.into_iter().map(|v| v.into()).collect())
+    }
+}
+
+impl<T> From<HashSet<T>> for FieldValue
+where
+    T: Into<FieldValue>,
+{
+    fn from(val: HashSet<T>) -> Self {
+        FieldValue::Array(val.into_iter().map(|v| v.into()).collect())
+    }
+}
+
+impl<T> From<BTreeMap<String, T>> for FieldValue
+where
+    T: Into<FieldValue>,
+{
+    fn from(obj: BTreeMap<String, T>) -> Self {
+        FieldValue::Map(obj.into_iter().map(|(k, v)| (k, v.into())).collect())
+    }
+}
+
+impl<T> From<HashMap<String, T>> for FieldValue
+where
+    T: Into<FieldValue>,
+{
+    fn from(obj: HashMap<String, T>) -> Self {
+        FieldValue::Map(obj.into_iter().map(|(k, v)| (k, v.into())).collect())
+    }
+}
+
+impl From<Map<String, Json>> for FieldValue {
+    fn from(obj: Map<String, Json>) -> Self {
+        FieldValue::Map(obj.into_iter().map(|(k, v)| (k, v.into())).collect())
     }
 }
 

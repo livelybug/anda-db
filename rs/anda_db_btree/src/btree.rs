@@ -63,8 +63,8 @@ where
     /// a new bucket should be created for new data
     bucket_overload_size: u32,
 
-    /// Number of search operations performed
-    search_count: AtomicU64,
+    /// Number of query operations performed
+    query_count: AtomicU64,
 
     /// Last saved version of the index
     last_saved_version: AtomicU64,
@@ -127,8 +127,8 @@ pub struct BTreeStats {
     /// Number of elements in the index
     pub num_elements: u64,
 
-    /// Number of search operations performed
-    pub search_count: u64,
+    /// Number of query operations performed
+    pub query_count: u64,
 
     /// Number of insert operations performed
     pub insert_count: u64,
@@ -291,7 +291,7 @@ where
             }),
             bucket_overload_size,
             max_bucket_id: AtomicU32::new(0),
-            search_count: AtomicU64::new(0),
+            query_count: AtomicU64::new(0),
             last_saved_version: AtomicU64::new(0),
         }
     }
@@ -336,7 +336,7 @@ where
         // Extract configuration values
         let bucket_overload_size = index.metadata.config.bucket_overload_size;
         let max_bucket_id = AtomicU32::new(index.metadata.stats.max_bucket_id);
-        let search_count = AtomicU64::new(index.metadata.stats.search_count);
+        let query_count = AtomicU64::new(index.metadata.stats.query_count);
         let last_saved_version = AtomicU64::new(index.metadata.stats.version);
 
         Ok(BTreeIndex {
@@ -347,7 +347,7 @@ where
             btree: RwLock::new(BTreeSet::new()),
             metadata: RwLock::new(index.metadata),
             bucket_overload_size,
-            search_count,
+            query_count,
             max_bucket_id,
             last_saved_version,
         })
@@ -419,7 +419,7 @@ where
     pub fn metadata(&self) -> BTreeMetadata {
         let mut metadata = self.metadata.read().clone();
         metadata.stats.num_elements = self.postings.len() as u64;
-        metadata.stats.search_count = self.search_count.load(Ordering::Relaxed);
+        metadata.stats.query_count = self.query_count.load(Ordering::Relaxed);
         metadata.stats.max_bucket_id = self.max_bucket_id.load(Ordering::Relaxed);
         metadata
     }
@@ -428,7 +428,7 @@ where
     pub fn stats(&self) -> BTreeStats {
         let mut stats = { self.metadata.read().stats.clone() };
         stats.num_elements = self.postings.len() as u64;
-        stats.search_count = self.search_count.load(Ordering::Relaxed);
+        stats.query_count = self.query_count.load(Ordering::Relaxed);
         stats.max_bucket_id = self.max_bucket_id.load(Ordering::Relaxed);
         stats
     }
@@ -934,39 +934,39 @@ where
         removed_count
     }
 
-    /// Searches the index for an exact key match
+    /// Queries the index for an exact key match
     ///
     /// # Arguments
     ///
-    /// * `field_value` - Key to search for
+    /// * `field_value` - Key to query for
     /// * `f` - Function to apply to the posting value
     ///
     /// # Returns
     ///
     /// * `Option<R>` - Result of the function applied to the posting value
-    pub fn search_with<F, R>(&self, field_value: &FV, f: F) -> Option<R>
+    pub fn query_with<F, R>(&self, field_value: &FV, f: F) -> Option<R>
     where
         F: FnOnce(&Vec<PK>) -> Option<R>,
     {
-        self.search_count.fetch_add(1, Ordering::Relaxed);
+        self.query_count.fetch_add(1, Ordering::Relaxed);
 
         self.postings
             .get(field_value)
             .and_then(|posting| f(&posting.2))
     }
 
-    /// Searches the index using a range query
+    /// Queries the index using a range query
     ///
     /// # Arguments
     ///
     /// * `query` - Range query specification
     /// * `f` - Function to apply to the posting value. The function should return a tuple
-    ///   containing a boolean indicating if the search should continue and an optional result.
+    ///   containing a boolean indicating if the query should continue and an optional result.
     ///
     /// # Returns
     ///
     /// * `Vec<R>` - Vector of results from the function applied to the posting values
-    pub fn search_range_with<F, R>(&self, query: RangeQuery<FV>, mut f: F) -> Vec<R>
+    pub fn range_query_with<F, R>(&self, query: RangeQuery<FV>, mut f: F) -> Vec<R>
     where
         F: FnMut(&FV, &Vec<PK>) -> (bool, Vec<R>),
     {
@@ -975,7 +975,7 @@ where
             return results;
         }
 
-        self.search_count.fetch_add(1, Ordering::Relaxed);
+        self.query_count.fetch_add(1, Ordering::Relaxed);
 
         match query {
             RangeQuery::Eq(key) => {
@@ -1119,6 +1119,11 @@ where
         }
 
         results
+    }
+
+    ///  Returns all keys in the index.
+    pub fn keys(&self) -> Vec<FV> {
+        self.btree.read().iter().cloned().collect()
     }
 
     fn range_keys(&self, query: RangeQuery<FV>) -> Vec<FV> {
@@ -1361,18 +1366,18 @@ impl<PK> BTreeIndex<PK, String>
 where
     PK: Ord + Debug + Clone + Serialize + DeserializeOwned,
 {
-    /// Specialized version of prefix search for String type
+    /// Specialized version of prefix query for String type
     /// Searches the index using a prefix.
     ///
     /// # Arguments
     ///
-    /// * `prefix` - Prefix to search for
+    /// * `prefix` - Prefix to query for
     /// * `f` - Function to apply to the posting value. The function should return a tuple
-    ///   containing a boolean indicating if the search should continue and an optional result.
+    ///   containing a boolean indicating if the query should continue and an optional result.
     ///
     /// # Returns
     /// * `Vec<R>` - Vector of results from the function applied to the posting values
-    pub fn search_prefix_with<F, R>(&self, prefix: &str, mut f: F) -> Vec<R>
+    pub fn prefix_query_with<F, R>(&self, prefix: &str, mut f: F) -> Vec<R>
     where
         F: FnMut(&str, &Vec<PK>) -> (bool, Option<R>),
     {
@@ -1381,8 +1386,8 @@ where
             return results;
         }
 
-        self.search_count.fetch_add(1, Ordering::Relaxed);
-        // Use prefix search
+        self.query_count.fetch_add(1, Ordering::Relaxed);
+        // Use prefix query
         for k in self
             .btree
             .read()
@@ -1556,7 +1561,7 @@ mod tests {
         assert!(!result);
 
         // 测试删除后的搜索
-        let result = index.search_with(&"apple".to_string(), |ids| Some(ids.clone()));
+        let result = index.query_with(&"apple".to_string(), |ids| Some(ids.clone()));
         assert!(result.is_some());
         let ids = result.unwrap();
         assert!(!ids.contains(&1)); // ID 1 已被删除
@@ -1566,28 +1571,28 @@ mod tests {
         let result = index.remove(6, "apple".to_string(), now_ms());
         assert!(result);
 
-        let result = index.search_with(&"apple".to_string(), |ids| Some(ids.clone()));
+        let result = index.query_with(&"apple".to_string(), |ids| Some(ids.clone()));
         assert!(result.is_none()); // 键应该已经被完全移除
     }
 
     #[test]
-    fn test_search() {
+    fn test_query() {
         let index = create_populated_index();
 
         // 测试精确搜索
-        let result = index.search_with(&"apple".to_string(), |ids| Some(ids.clone()));
+        let result = index.query_with(&"apple".to_string(), |ids| Some(ids.clone()));
         assert!(result.is_some());
         let ids = result.unwrap();
         assert!(ids.contains(&1));
         assert!(ids.contains(&6));
 
         // 测试搜索不存在的键
-        let result = index.search_with(&"nonexistent".to_string(), |ids| Some(ids.clone()));
+        let result = index.query_with(&"nonexistent".to_string(), |ids| Some(ids.clone()));
         assert!(result.is_none());
     }
 
     #[test]
-    fn test_range_search() {
+    fn test_range_query() {
         let index = create_populated_index();
         let apple = "apple".to_string();
         let banana = "banana".to_string();
@@ -1598,39 +1603,39 @@ mod tests {
         // 测试等于查询
         let query = RangeQuery::Eq(apple.clone());
         let results =
-            index.search_range_with(query, |k, ids| (true, vec![(k.clone(), ids.clone())]));
+            index.range_query_with(query, |k, ids| (true, vec![(k.clone(), ids.clone())]));
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, "apple");
 
         // 测试大于查询
         let query = RangeQuery::Gt(cherry.clone());
-        let results = index.search_range_with(query, |k, _| (true, vec![k.clone()]));
+        let results = index.range_query_with(query, |k, _| (true, vec![k.clone()]));
         assert_eq!(results.len(), 2);
         assert!(results.contains(&"date".to_string()));
         assert!(results.contains(&"eggplant".to_string()));
 
         // 测试大于等于查询
         let query = RangeQuery::Ge(cherry.clone());
-        let results = index.search_range_with(query, |k, _| (true, vec![k.clone()]));
+        let results = index.range_query_with(query, |k, _| (true, vec![k.clone()]));
         assert_eq!(results.len(), 3);
         assert!(results.contains(&"cherry".to_string()));
 
         // 测试小于查询
         let query = RangeQuery::Lt(cherry.clone());
-        let results = index.search_range_with(query, |k, _| (true, vec![k.clone()]));
+        let results = index.range_query_with(query, |k, _| (true, vec![k.clone()]));
         assert_eq!(results.len(), 2);
         assert!(results.contains(&apple));
         assert!(results.contains(&banana));
 
         // 测试小于等于查询
         let query = RangeQuery::Le(cherry.clone());
-        let results = index.search_range_with(query, |k, _| (true, vec![k.clone()]));
+        let results = index.range_query_with(query, |k, _| (true, vec![k.clone()]));
         assert_eq!(results.len(), 3);
         assert!(results.contains(&cherry));
 
         // 测试范围查询
         let query = RangeQuery::Between(banana.clone(), date.clone());
-        let results = index.search_range_with(query, |k, _| (true, vec![k.clone()]));
+        let results = index.range_query_with(query, |k, _| (true, vec![k.clone()]));
         assert_eq!(results.len(), 3);
         assert!(results.contains(&banana));
         assert!(results.contains(&cherry));
@@ -1639,14 +1644,14 @@ mod tests {
         // 测试包含查询
         let keys = vec![apple.clone(), eggplant.clone()];
         let query = RangeQuery::Include(keys);
-        let results = index.search_range_with(query, |k, _| (true, vec![k.clone()]));
+        let results = index.range_query_with(query, |k, _| (true, vec![k.clone()]));
         assert_eq!(results.len(), 2);
         assert!(results.contains(&apple));
         assert!(results.contains(&eggplant));
 
         // 测试提前终止搜索
         let query = RangeQuery::Ge(apple.clone());
-        let results = index.search_range_with(query, |k, _| (k != "banana", vec![k.clone()]));
+        let results = index.range_query_with(query, |k, _| (k != "banana", vec![k.clone()]));
         assert_eq!(results.len(), 2);
         assert_eq!(results[0], "apple");
         assert_eq!(results[1], "banana");
@@ -1679,7 +1684,7 @@ mod tests {
             Box::new(RangeQuery::Ge(cherry.clone())), // >= cherry (cherry, date, eggplant, fig, grape)
         ]);
 
-        let results = index.search_range_with(query, |k, _| (true, vec![k.clone()]));
+        let results = index.range_query_with(query, |k, _| (true, vec![k.clone()]));
         assert_eq!(results.len(), 2);
         assert!(results.contains(&cherry));
         assert!(results.contains(&date));
@@ -1690,7 +1695,7 @@ mod tests {
             Box::new(RangeQuery::Gt(date.clone())),   // > date (eggplant, fig, grape)
         ]);
 
-        let results = index.search_range_with(query, |k, _| (true, vec![k.clone()]));
+        let results = index.range_query_with(query, |k, _| (true, vec![k.clone()]));
         assert_eq!(results.len(), 0); // 应该为空集
 
         // 测试精确匹配和范围查询的 AND 操作
@@ -1700,7 +1705,7 @@ mod tests {
             Box::new(RangeQuery::Eq(cherry.clone())),   // == cherry
         ]);
 
-        let results = index.search_range_with(query, |k, _| (true, vec![k.clone()]));
+        let results = index.range_query_with(query, |k, _| (true, vec![k.clone()]));
         assert_eq!(results.len(), 1);
         assert!(results.contains(&cherry));
 
@@ -1711,7 +1716,7 @@ mod tests {
             Box::new(RangeQuery::Ge(fig.clone())),    // >= fig (fig, grape)
         ]);
 
-        let results = index.search_range_with(query, |k, _| (true, vec![k.clone()]));
+        let results = index.range_query_with(query, |k, _| (true, vec![k.clone()]));
         assert_eq!(results.len(), 4);
         assert!(results.contains(&apple));
         assert!(results.contains(&banana));
@@ -1724,7 +1729,7 @@ mod tests {
             Box::new(RangeQuery::Between(cherry.clone(), fig.clone())),  // cherry到fig
         ]);
 
-        let results = index.search_range_with(query, |k, _| (true, vec![k.clone()]));
+        let results = index.range_query_with(query, |k, _| (true, vec![k.clone()]));
         assert_eq!(results.len(), 6);
         assert!(results.contains(&banana));
         assert!(results.contains(&berry));
@@ -1740,7 +1745,7 @@ mod tests {
             eggplant.clone(),
         )));
 
-        let results = index.search_range_with(query, |k, _| (true, vec![k.clone()]));
+        let results = index.range_query_with(query, |k, _| (true, vec![k.clone()]));
         assert!(results.contains(&apple));
         assert!(results.contains(&banana));
         assert!(results.contains(&fig));
@@ -1752,7 +1757,7 @@ mod tests {
         // 测试 NOT + Eq 操作
         let query = RangeQuery::Not(Box::new(RangeQuery::Eq(apple.clone())));
 
-        let results = index.search_range_with(query, |k, _| (true, vec![k.clone()]));
+        let results = index.range_query_with(query, |k, _| (true, vec![k.clone()]));
         assert!(!results.contains(&apple));
         assert!(results.contains(&banana));
         assert!(results.contains(&cherry));
@@ -1771,7 +1776,7 @@ mod tests {
             ])),
         ]);
 
-        let results = index.search_range_with(query, |k, _| (true, vec![k.clone()]));
+        let results = index.range_query_with(query, |k, _| (true, vec![k.clone()]));
         assert!(results.contains(&apple));
         assert!(results.contains(&banana));
         assert!(results.contains(&fig));
@@ -1785,7 +1790,7 @@ mod tests {
             Box::new(RangeQuery::Not(Box::new(RangeQuery::Le(cherry.clone())))), // NOT <= cherry
         ]);
 
-        let results = index.search_range_with(query, |k, _| (true, vec![k.clone()]));
+        let results = index.range_query_with(query, |k, _| (true, vec![k.clone()]));
         // 这应该返回所有键，因为每个键要么 < date 要么 > cherry
         assert_eq!(results.len(), index.len());
 
@@ -1795,7 +1800,7 @@ mod tests {
             Box::new(RangeQuery::Le(eggplant.clone())), // <= eggplant
         ])));
 
-        let results = index.search_range_with(query, |k, _| (true, vec![k.clone()]));
+        let results = index.range_query_with(query, |k, _| (true, vec![k.clone()]));
         assert!(results.contains(&apple));
         assert!(results.contains(&banana));
         assert!(results.contains(&fig));
@@ -1811,7 +1816,7 @@ mod tests {
         ]);
 
         let mut count = 0;
-        let results = index.search_range_with(query, |_, _| {
+        let results = index.range_query_with(query, |_, _| {
             count += 1;
             (count < 3, vec![count.to_string()])
         });
@@ -1824,7 +1829,7 @@ mod tests {
     fn test_range_keys() {
         let index = create_populated_index();
 
-        // 测试 search_range_keys 方法处理 And 逻辑
+        // 测试 range_keys 方法处理 And 逻辑
         let apple = "apple".to_string();
         let banana = "banana".to_string();
         let cherry = "cherry".to_string();
@@ -1840,7 +1845,7 @@ mod tests {
         assert!(keys.contains(&banana));
         assert!(keys.contains(&cherry));
 
-        // 测试 search_range_keys 方法处理 Or 逻辑
+        // 测试 range_keys 方法处理 Or 逻辑
         let query = RangeQuery::Or(vec![
             Box::new(RangeQuery::Eq(apple.clone())),
             Box::new(RangeQuery::Eq(eggplant.clone())),
@@ -1851,7 +1856,7 @@ mod tests {
         assert!(keys.contains(&apple));
         assert!(keys.contains(&eggplant));
 
-        // 测试 search_range_keys 方法处理 Not 逻辑
+        // 测试 range_keys 方法处理 Not 逻辑
         let query = RangeQuery::Not(Box::new(RangeQuery::Eq(apple.clone())));
 
         let keys = index.range_keys(query);
@@ -1861,7 +1866,7 @@ mod tests {
     }
 
     #[test]
-    fn test_prefix_search() {
+    fn test_prefix_query() {
         let index = create_populated_index();
 
         // 插入一些带前缀的数据
@@ -1869,14 +1874,14 @@ mod tests {
         let _ = index.insert(11, "application".to_string(), now_ms());
 
         // 测试前缀搜索
-        let results = index.search_prefix_with("app", |k, _| (true, Some(k.to_string())));
+        let results = index.prefix_query_with("app", |k, _| (true, Some(k.to_string())));
         assert_eq!(results.len(), 3);
         assert!(results.contains(&"app".to_string()));
         assert!(results.contains(&"apple".to_string()));
         assert!(results.contains(&"application".to_string()));
 
         // 测试提前终止搜索
-        let results = index.search_prefix_with("app", |k, _| (k != "apple", Some(k.to_string())));
+        let results = index.prefix_query_with("app", |k, _| (k != "apple", Some(k.to_string())));
         assert_eq!(results.len(), 2);
         assert_eq!(results[0], "app");
         assert_eq!(results[1], "apple");
@@ -1943,7 +1948,7 @@ mod tests {
         assert_eq!(loaded_index.len(), index.len());
 
         // 测试搜索
-        let result = loaded_index.search_with(&"apple".to_string(), |ids| Some(ids.clone()));
+        let result = loaded_index.query_with(&"apple".to_string(), |ids| Some(ids.clone()));
         assert!(result.is_some());
         let ids = result.unwrap();
         assert!(ids.contains(&1));
@@ -1972,7 +1977,7 @@ mod tests {
         // 验证所有数据都可以被搜索到
         for i in 0..100 {
             let key = format!("key_{i}");
-            let result = index.search_with(&key, |ids| Some(ids.clone()));
+            let result = index.query_with(&key, |ids| Some(ids.clone()));
             assert!(result.is_some());
             let ids = result.unwrap();
             assert!(ids.contains(&i));
@@ -2000,7 +2005,7 @@ mod tests {
 
         // Verify all values were inserted
         for value in &values {
-            let result = index.search_with(value, |ids| Some(ids.clone()));
+            let result = index.query_with(value, |ids| Some(ids.clone()));
             assert!(result.is_some());
             let ids = result.unwrap();
             assert!(ids.contains(&1));
@@ -2018,7 +2023,7 @@ mod tests {
 
         // Verify both document IDs are present
         for value in &values {
-            let result = index.search_with(value, |ids| Some(ids.clone()));
+            let result = index.query_with(value, |ids| Some(ids.clone()));
             assert!(result.is_some());
             let ids = result.unwrap();
             assert!(ids.contains(&1));
@@ -2069,7 +2074,7 @@ mod tests {
 
         // Verify all values can still be found
         for value in &large_values {
-            let result = overflow_index.search_with(value, |ids| Some(ids.clone()));
+            let result = overflow_index.query_with(value, |ids| Some(ids.clone()));
             assert!(result.is_some());
             let ids = result.unwrap();
             assert!(ids.contains(&1));
@@ -2097,7 +2102,7 @@ mod tests {
 
         // 确认初始数据已正确插入
         for value in &values {
-            let result = index.search_with(value, |ids| Some(ids.clone()));
+            let result = index.query_with(value, |ids| Some(ids.clone()));
             assert!(result.is_some());
             let ids = result.unwrap();
 
@@ -2125,13 +2130,13 @@ mod tests {
         assert_eq!(removed, 2); // 只有2个值被实际删除
 
         // 验证删除结果 - apple和banana仍然存在，但不再包含文档ID 1
-        let apple_result = index.search_with(&"apple".to_string(), |ids| Some(ids.clone()));
+        let apple_result = index.query_with(&"apple".to_string(), |ids| Some(ids.clone()));
         assert!(apple_result.is_some());
         let apple_ids = apple_result.unwrap();
         assert_eq!(apple_ids.len(), 2);
         assert!(!apple_ids.contains(&1) && apple_ids.contains(&2) && apple_ids.contains(&3));
 
-        let banana_result = index.search_with(&"banana".to_string(), |ids| Some(ids.clone()));
+        let banana_result = index.query_with(&"banana".to_string(), |ids| Some(ids.clone()));
         assert!(banana_result.is_some());
         let banana_ids = banana_result.unwrap();
         assert_eq!(banana_ids.len(), 2);
@@ -2153,12 +2158,12 @@ mod tests {
         // 验证这些键已经完全从索引中移除
         assert!(
             index
-                .search_with(&"date".to_string(), |ids| Some(ids.clone()))
+                .query_with(&"date".to_string(), |ids| Some(ids.clone()))
                 .is_none()
         );
         assert!(
             index
-                .search_with(&"eggplant".to_string(), |ids| Some(ids.clone()))
+                .query_with(&"eggplant".to_string(), |ids| Some(ids.clone()))
                 .is_none()
         );
 
@@ -2192,7 +2197,7 @@ mod tests {
 
         // 验证所有键仍然存在，但只包含文档ID 2
         for value in &large_values {
-            let result = overflow_index.search_with(value, |ids| Some(ids.clone()));
+            let result = overflow_index.query_with(value, |ids| Some(ids.clone()));
             assert!(result.is_some());
             let ids = result.unwrap();
             assert_eq!(ids.len(), 1);
@@ -2206,7 +2211,7 @@ mod tests {
 
         // 验证所有键都已被移除
         for value in &large_values {
-            let result = overflow_index.search_with(value, |ids| Some(ids.clone()));
+            let result = overflow_index.query_with(value, |ids| Some(ids.clone()));
             assert!(result.is_none());
         }
     }
@@ -2252,7 +2257,7 @@ mod tests {
             let base = t * n_keys_per_thread;
             for i in 0..n_keys_per_thread {
                 let key = format!("key_{}", base + i);
-                let result = index.search_with(&key, |ids| Some(ids.clone()));
+                let result = index.query_with(&key, |ids| Some(ids.clone()));
                 assert!(result.is_some(), "key {key} not found");
 
                 // 验证该键包含5个文档ID
@@ -2309,7 +2314,7 @@ mod tests {
             let base = t * n_keys_per_thread;
             for i in 0..n_keys_per_thread {
                 let key = format!("key_{}", base + i);
-                let result = index.search_with(&key, |ids| Some(ids.clone()));
+                let result = index.query_with(&key, |ids| Some(ids.clone()));
                 assert!(result.is_some(), "删除后键 {key} 不应该被完全移除");
 
                 let ids = result.unwrap();
@@ -2358,7 +2363,7 @@ mod tests {
             let base = t * n_keys_per_thread;
             for i in 0..n_keys_per_thread {
                 let key = format!("key_{}", base + i);
-                let result = index.search_with(&key, |ids| Some(ids.clone()));
+                let result = index.query_with(&key, |ids| Some(ids.clone()));
                 assert!(result.is_none(), "键 {key} 应该已完全从索引中移除");
             }
         }
@@ -2371,7 +2376,7 @@ mod tests {
         // 初始状态
         let stats = index.stats();
         assert_eq!(stats.num_elements, 0);
-        assert_eq!(stats.search_count, 0);
+        assert_eq!(stats.query_count, 0);
         assert_eq!(stats.insert_count, 0);
         assert_eq!(stats.delete_count, 0);
 
@@ -2385,13 +2390,13 @@ mod tests {
         assert_eq!(stats.insert_count, 2);
 
         // 执行一些搜索
-        let _ = index.search_with(&"apple".to_string(), |_| Some(()));
+        let _ = index.query_with(&"apple".to_string(), |_| Some(()));
         let _: Vec<()> =
-            index.search_range_with(RangeQuery::Ge("a".to_string()), |_, _| (true, vec![]));
+            index.range_query_with(RangeQuery::Ge("a".to_string()), |_, _| (true, vec![]));
 
         // 检查搜索后的统计信息
         let stats = index.stats();
-        assert_eq!(stats.search_count, 2);
+        assert_eq!(stats.query_count, 2);
 
         // 删除一些数据
         let _ = index.remove(1, "apple".to_string(), now_ms());

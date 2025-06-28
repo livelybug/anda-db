@@ -1,8 +1,9 @@
-use anda_db_schema::{AndaDBSchema, FieldEntry, FieldType, FieldTyped, Json, Schema, SchemaError};
-use anda_kip::Map;
+use anda_db_schema::{
+    AndaDBSchema, FieldEntry, FieldType, FieldTyped, FieldValue, Json, Schema, SchemaError,
+};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fmt,
     str::FromStr,
 };
@@ -19,8 +20,8 @@ pub struct Concept {
     pub _id: u64,
     pub r#type: String,
     pub name: String,
-    pub attributes: Map<String, Json>,
-    pub metadata: Map<String, Json>,
+    pub attributes: BTreeMap<String, Json>,
+    pub metadata: BTreeMap<String, Json>,
 }
 
 impl Concept {
@@ -41,19 +42,28 @@ pub struct Proposition {
 
     pub predicates: BTreeSet<String>,
 
-    pub properties: HashMap<String, Properties>,
+    pub properties: BTreeMap<String, Properties>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, FieldTyped)]
 pub struct Properties {
     #[serde(rename = "a")]
-    pub attributes: Map<String, Json>,
+    pub attributes: BTreeMap<String, Json>,
 
     #[serde(rename = "m")]
-    pub metadata: Map<String, Json>,
+    pub metadata: BTreeMap<String, Json>,
 }
 
-#[derive(Debug, Clone)]
+impl From<Properties> for FieldValue {
+    fn from(value: Properties) -> Self {
+        FieldValue::Map(BTreeMap::from([
+            ("a".to_string(), value.attributes.into()),
+            ("m".to_string(), value.metadata.into()),
+        ]))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum EntityID {
     Concept(u64),
     Proposition(u64, String),

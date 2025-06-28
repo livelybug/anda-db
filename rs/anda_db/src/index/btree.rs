@@ -74,6 +74,10 @@ impl BTree {
         format!("btree_indexes/{name}/p_{bucket}.cbor")
     }
 
+    pub fn virtual_field_name(fields: &[&str]) -> String {
+        fields.join("-")
+    }
+
     pub async fn new(field: Fe, storage: Storage, now_ms: u64) -> Result<Self, DBError> {
         let config = BTreeConfig {
             bucket_overload_size: storage.object_chunk_size() as u32 * 2,
@@ -124,24 +128,20 @@ impl BTree {
     }
 
     async fn inner_new(
-        virtual_field: Vec<String>,
+        fields: Vec<String>,
         ft: &Ft,
         config: BTreeConfig,
         storage: Storage,
         now_ms: u64,
     ) -> Result<Self, DBError> {
         let btree = match ft {
-            Ft::U64 => BTree::U64(InnerBTree::new(virtual_field, config, storage, now_ms).await?),
-            Ft::I64 => BTree::I64(InnerBTree::new(virtual_field, config, storage, now_ms).await?),
-            Ft::Text => {
-                BTree::String(InnerBTree::new(virtual_field, config, storage, now_ms).await?)
-            }
-            Ft::Bytes => {
-                BTree::Bytes(InnerBTree::new(virtual_field, config, storage, now_ms).await?)
-            }
+            Ft::U64 => BTree::U64(InnerBTree::new(fields, config, storage, now_ms).await?),
+            Ft::I64 => BTree::I64(InnerBTree::new(fields, config, storage, now_ms).await?),
+            Ft::Text => BTree::String(InnerBTree::new(fields, config, storage, now_ms).await?),
+            Ft::Bytes => BTree::Bytes(InnerBTree::new(fields, config, storage, now_ms).await?),
             _ => {
                 return Err(DBError::Index {
-                    name: virtual_field.join("-"),
+                    name: fields.join("-"),
                     source: format!("BTree: unsupported field type: {ft:?}").into(),
                 });
             }
@@ -363,20 +363,20 @@ impl BTree {
         }
     }
 
-    pub fn search_with<F, R>(&self, field_value: &Fv, f: F) -> Option<R>
+    pub fn query_with<F, R>(&self, field_value: &Fv, f: F) -> Option<R>
     where
         F: FnOnce(&Vec<DocumentId>) -> Option<R>,
     {
         match (self, field_value) {
-            (BTree::I64(btree), Fv::I64(val)) => btree.index.search_with(val, f),
-            (BTree::U64(btree), Fv::U64(val)) => btree.index.search_with(val, f),
-            (BTree::String(btree), Fv::Text(val)) => btree.index.search_with(val, f),
-            (BTree::Bytes(btree), Fv::Bytes(val)) => btree.index.search_with(val, f),
+            (BTree::I64(btree), Fv::I64(val)) => btree.index.query_with(val, f),
+            (BTree::U64(btree), Fv::U64(val)) => btree.index.query_with(val, f),
+            (BTree::String(btree), Fv::Text(val)) => btree.index.query_with(val, f),
+            (BTree::Bytes(btree), Fv::Bytes(val)) => btree.index.query_with(val, f),
             _ => None,
         }
     }
 
-    pub fn search_range_with<F, R>(&self, query: RangeQuery<Fv>, mut f: F) -> Vec<R>
+    pub fn range_query_with<F, R>(&self, query: RangeQuery<Fv>, mut f: F) -> Vec<R>
     where
         F: FnMut(Fv, &Vec<DocumentId>) -> (bool, Vec<R>),
     {
@@ -384,7 +384,7 @@ impl BTree {
             BTree::I64(btree) => match RangeQuery::<i64>::try_convert_from(query) {
                 Ok(q) => btree
                     .index
-                    .search_range_with(q, |fv, pks| f(Fv::I64(*fv), pks)),
+                    .range_query_with(q, |fv, pks| f(Fv::I64(*fv), pks)),
                 Err(_) => {
                     vec![]
                 }
@@ -392,7 +392,7 @@ impl BTree {
             BTree::U64(btree) => match RangeQuery::<u64>::try_convert_from(query) {
                 Ok(q) => btree
                     .index
-                    .search_range_with(q, |fv, pks| f(Fv::U64(*fv), pks)),
+                    .range_query_with(q, |fv, pks| f(Fv::U64(*fv), pks)),
                 Err(_) => {
                     vec![]
                 }
@@ -400,7 +400,7 @@ impl BTree {
             BTree::String(btree) => match RangeQuery::<String>::try_convert_from(query) {
                 Ok(q) => btree
                     .index
-                    .search_range_with(q, |fv, pks| f(Fv::Text(fv.to_owned()), pks)),
+                    .range_query_with(q, |fv, pks| f(Fv::Text(fv.to_owned()), pks)),
                 Err(_) => {
                     vec![]
                 }
@@ -408,7 +408,7 @@ impl BTree {
             BTree::Bytes(btree) => match RangeQuery::<Vec<u8>>::try_convert_from(query) {
                 Ok(q) => btree
                     .index
-                    .search_range_with(q, |fv, pks| f(Fv::Bytes(fv.clone()), pks)),
+                    .range_query_with(q, |fv, pks| f(Fv::Bytes(fv.clone()), pks)),
                 Err(_) => {
                     vec![]
                 }

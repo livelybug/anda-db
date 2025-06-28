@@ -47,6 +47,17 @@ impl From<Document> for DocumentOwned {
 }
 
 impl Document {
+    /// Creates a virtual field value by serializing the provided values in Canonical CBOR format.
+    /// It is used in BTree indexes to combine multiple field values into a single serialized value.
+    pub fn virtual_field_value(vals: &[Option<&Fv>]) -> Option<Fv> {
+        if vals.is_empty() {
+            return None;
+        }
+
+        let data = canonical_cbor_into_vec(vals).ok()?;
+        Some(Fv::Bytes(data))
+    }
+
     /// Creates a new Document with the specified schema and ID.
     ///
     /// # Arguments
@@ -207,8 +218,8 @@ impl Document {
                     }
                 }
 
-                let data = canonical_cbor_into_vec(&vals).ok()?;
-                Some(Cow::Owned(Fv::Bytes(data)))
+                let data = Self::virtual_field_value(&vals)?;
+                Some(Cow::Owned(data))
             }
         }
     }
