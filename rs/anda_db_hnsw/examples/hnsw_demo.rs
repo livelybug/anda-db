@@ -27,11 +27,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         dimension: DIM,
         ..Default::default()
     };
-    // 39900 inserted 100 vectors in 2.482874333s
-    // 39900 Search returned 10 results in 4.483417ms
-    // 40000 inserted 100 vectors in 2.736496208s
-    // 40000 Search returned 10 results in 3.011458ms
-    // 40000 Removed vector 21574 in 13.337416ms
+    // 39900 inserted 100 vectors in 2.479251625s
+    // 39900 Search returned 10 results in 2.368542ms
+    // 40000 inserted 100 vectors in 2.459010458s
+    // 40000 Search returned 10 results in 2.661541ms
+    // 40000 Removed vector 16909 in 16.174542ms
     // config.select_neighbors_strategy = SelectNeighborsStrategy::Simple;
     // 39900 inserted 100 vectors in 631.205083ms
     // 39900 Search returned 10 results in 2.442875ms

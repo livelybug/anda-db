@@ -51,6 +51,7 @@ schemars = "0.9"
 sha3 = "0.10"
 thiserror = "2"
 parking_lot = "0.12"
+papaya = { version = "0.2" }
 log = { version = "0.4", features = ["kv", "kv_serde"] }
 tantivy-tokenizer-api = "0.5"
 tantivy = "0.24"

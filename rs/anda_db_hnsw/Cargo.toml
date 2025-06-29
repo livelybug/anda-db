@@ -2,7 +2,7 @@
 name = "anda_db_hnsw"
 description = "A high-performance vector search library in Rust."
 repository = "https://github.com/ldclabs/anda_db/tree/main/rs/anda_db_hnsw"
-version = "0.4.3"
+version = "0.4.4"
 publish = true
 edition.workspace = true
 keywords.workspace = true
@@ -12,7 +12,6 @@ license.workspace = true
 [dependencies]
 ciborium = { workspace = true }
 croaring = { workspace = true }
-dashmap = { workspace = true, features = ["serde"] }
 futures = { workspace = true }
 rand = { workspace = true }
 ordered-float = { workspace = true }
@@ -21,6 +20,7 @@ ndarray = { workspace = true }
 serde = { workspace = true }
 smallvec = { workspace = true, features = ["serde", "const_new"] }
 parking_lot = { workspace = true }
+papaya = { workspace = true, features = ["serde"] }
 thiserror = { workspace = true }
 log = { workspace = true }
 

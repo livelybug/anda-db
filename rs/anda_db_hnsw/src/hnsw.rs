@@ -1,13 +1,14 @@
 //! # Anda-DB HNSW Vector Search Library
 
 use croaring::{Portable, Treemap};
-use dashmap::DashMap;
 use half::bf16;
 use ordered_float::OrderedFloat;
+use papaya::HashMap as CoHashMap;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::{
+    borrow::Cow,
     cmp::{self, Reverse},
     collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet},
     io::{Read, Write},
@@ -33,7 +34,7 @@ pub struct HnswIndex {
     layer_gen: LayerGen,
 
     /// Map of node IDs to nodes.
-    nodes: DashMap<u64, HnswNode>,
+    nodes: CoHashMap<u64, HnswNode>,
 
     /// Entry point for search (node_id, layer)
     entry_point: RwLock<(u64, u8)>,
@@ -199,7 +200,7 @@ pub struct HnswStats {
 /// Serializable HNSW index structure (owned version).
 #[derive(Clone, Serialize, Deserialize)]
 struct HnswIndexOwned {
-    pub nodes: DashMap<u64, HnswNode>,
+    pub nodes: CoHashMap<u64, HnswNode>,
     pub entry_point: (u64, u8),
     pub metadata: HnswMetadata,
 }
@@ -207,7 +208,7 @@ struct HnswIndexOwned {
 /// Serializable HNSW index structure (reference version).
 #[derive(Clone, Serialize)]
 struct HnswIndexRef<'a> {
-    nodes: &'a DashMap<u64, HnswNode>,
+    nodes: &'a HashMap<u64, HnswNode>,
     entry_point: (u64, u8),
     metadata: &'a HnswMetadata,
 }
@@ -234,7 +235,7 @@ impl HnswIndex {
             name: name.clone(),
             config: config.clone(),
             layer_gen,
-            nodes: DashMap::new(),
+            nodes: CoHashMap::new(),
             entry_point: RwLock::new((0, 0)),
             metadata: RwLock::new(HnswMetadata {
                 name,
@@ -357,7 +358,7 @@ impl HnswIndex {
                         source: err.into(),
                     })?;
 
-                self.nodes.insert(id, node);
+                self.nodes.pin().insert(id, node);
             }
         }
         Ok(())
@@ -428,6 +429,7 @@ impl HnswIndex {
         F: FnMut(&HnswNode) -> R,
     {
         self.nodes
+            .pin()
             .get(&id)
             .map(|node| f(&node))
             .ok_or_else(|| HnswError::NotFound {
@@ -462,8 +464,9 @@ impl HnswIndex {
             });
         }
 
+        let nodes = self.nodes.pin();
         // Check if ID already exists.
-        if self.nodes.contains_key(&id) {
+        if nodes.contains_key(&id) {
             return Err(HnswError::AlreadyExists {
                 name: self.name.clone(),
                 id,
@@ -480,8 +483,8 @@ impl HnswIndex {
             ];
 
         // If this is the first node, set it as the entry point
-        if self.nodes.is_empty() {
-            self.nodes.insert(
+        if nodes.is_empty() {
+            nodes.insert(
                 id,
                 HnswNode {
                     id,
@@ -604,7 +607,7 @@ impl HnswIndex {
             version: 1,                // Initial version
         };
 
-        self.nodes.insert(id, new_node);
+        nodes.insert(id, new_node);
         self.ids.write().add(id);
 
         let mut local_dirty_nodes = BTreeSet::new();
@@ -635,7 +638,8 @@ impl HnswIndex {
             Vec::with_capacity(64); // id, layer, connections
         for (neighbor_id, updates) in neighbor_updates_required {
             // 获取邻居节点的可变引用（锁定对应分片）
-            if let Some(mut neighbor_node) = self.nodes.get_mut(&neighbor_id) {
+            if let Some(neighbor_node) = nodes.get(&neighbor_id) {
+                let mut neighbor_node = neighbor_node.clone();
                 // 1. 添加反向连接
                 #[allow(clippy::type_complexity)]
                 let mut to_truncate: Vec<(u8, SmallVec<[(u64, bf16); 64]>)> = Vec::new();
@@ -663,7 +667,8 @@ impl HnswIndex {
                 // 3. 更新版本号并标记为脏节点
                 neighbor_node.version += 1;
                 local_dirty_nodes.insert(neighbor_id);
-            } // Mutex guard for neighbor_node is dropped here
+                nodes.insert(neighbor_id, neighbor_node);
+            };
         }
 
         // --- 阶段四：修剪节点 ---
@@ -687,15 +692,17 @@ impl HnswIndex {
                 ) {
                     // select_neighbors 会读取 self.nodes
                     // 修改 self.nodes 必须在 select_neighbors 之后
-                    if let Some(mut node) = self.nodes.get_mut(&neighbor_id) {
-                        if let Some(n_layer) = node.neighbors.get_mut(layer as usize) {
+                    if let Some(node) = nodes.get(&neighbor_id) {
+                        if node.neighbors.len() > layer as usize {
                             // Update neighbor connections
-                            *n_layer = selected
+                            let mut node = node.clone();
+                            node.neighbors[layer as usize] = selected
                                 .into_iter()
                                 .map(|(id, dist, _)| (id, bf16::from_f32(dist)))
                                 .collect();
+                            nodes.insert(neighbor_id, node);
                         }
-                    }
+                    };
                 }
             }
         }
@@ -737,7 +744,8 @@ impl HnswIndex {
     pub fn remove(&self, id: u64, now_ms: u64) -> bool {
         let mut deleted = false;
 
-        if let Some((_, node)) = self.nodes.remove(&id) {
+        let nodes = self.nodes.pin();
+        if let Some(node) = nodes.remove(&id) {
             deleted = true;
             self.ids.write().remove(id);
             self.try_update_entry_point(&node);
@@ -751,19 +759,22 @@ impl HnswIndex {
         if deleted {
             let mut dirty_nodes = BTreeSet::new();
             // 遍历所有节点，删除与已删除节点的连接
-            self.nodes.iter_mut().for_each(|mut n| {
+            for n in nodes.values() {
                 let mut updated = false;
+                let mut o = Cow::Borrowed(n);
                 for layer in 0..=(n.layer as usize) {
                     if let Some(pos) = n.neighbors[layer].iter().position(|&(idx, _)| idx == id) {
-                        n.neighbors[layer].swap_remove(pos);
+                        o.to_mut().neighbors[layer].swap_remove(pos);
                         updated = true;
                     }
                 }
                 if updated {
-                    n.version += 1;
+                    o.to_mut().version += 1;
                     dirty_nodes.insert(n.id);
+                    nodes.insert(n.id, o.into_owned());
                 }
-            });
+            }
+
             if !dirty_nodes.is_empty() {
                 self.dirty_nodes.write().extend(dirty_nodes);
             }
@@ -890,8 +901,9 @@ impl HnswIndex {
         let mut results: BinaryHeap<(OrderedFloat<f32>, u64, u8)> =
             BinaryHeap::with_capacity(ef * 2);
 
+        let nodes = self.nodes.pin();
         // Calculate distance to entry point
-        let entry_dist = match self.nodes.get(&entry_point) {
+        let entry_dist = match nodes.get(&entry_point) {
             Some(node) => self.get_distance_with_cache(distance_cache, query, &node)?,
             None => {
                 return Err(HnswError::NotFound {
@@ -919,12 +931,12 @@ impl HnswIndex {
             }
 
             // Check neighbors of current node
-            if let Some(node) = self.nodes.get(&point) {
+            if let Some(node) = nodes.get(&point) {
                 if let Some(neighbors) = node.neighbors.get(layer as usize) {
                     for &(neighbor, _) in neighbors {
                         if !visited.contains(&neighbor) {
                             visited.insert(neighbor);
-                            if let Some(neighbor_node) = self.nodes.get(&neighbor) {
+                            if let Some(neighbor_node) = nodes.get(&neighbor) {
                                 match self.get_distance_with_cache(
                                     distance_cache,
                                     query,
@@ -1005,6 +1017,7 @@ impl HnswIndex {
             return Ok(candidates);
         }
 
+        let nodes = self.nodes.pin();
         match strategy {
             SelectNeighborsStrategy::Simple => {
                 // Simple strategy: select m closest neighbors
@@ -1042,7 +1055,7 @@ impl HnswIndex {
                             let dist = if let Some(&cached_dist) = distance_cache.get(&cache_key) {
                                 cached_dist
                             } else if let (Some(cand_node), Some(sel_node)) =
-                                (self.nodes.get(&cand_id), self.nodes.get(&sel_id))
+                                (nodes.get(&cand_id), nodes.get(&sel_id))
                             {
                                 let new_dist = self
                                     .config
@@ -1154,7 +1167,7 @@ impl HnswIndex {
         meta.stats.last_saved = now_ms.max(meta.stats.last_saved);
         ciborium::into_writer(
             &HnswIndexRef {
-                nodes: &DashMap::new(),
+                nodes: &HashMap::new(),
                 entry_point: *self.entry_point.read(),
                 metadata: &meta,
             },
@@ -1220,8 +1233,9 @@ impl HnswIndex {
         }
 
         let mut buf = Vec::with_capacity(4096);
+        let nodes = self.nodes.pin();
         while let Some(id) = dirty_nodes.pop_first() {
-            if let Some(node) = self.nodes.get(&id) {
+            if let Some(node) = nodes.get(&id) {
                 buf.clear();
                 ciborium::into_writer(&node, &mut buf).expect("Failed to serialize node");
                 match f(id, &buf).await {
@@ -1267,10 +1281,11 @@ impl HnswIndex {
             *point
         };
 
+        let nodes = self.nodes.pin();
         loop {
             if let Some(neighbors) = deleted_node.neighbors.get(max_layer as usize) {
                 for &(neighbor, _) in neighbors {
-                    if let Some(neighbor_node) = self.nodes.get(&neighbor) {
+                    if let Some(neighbor_node) = nodes.get(&neighbor) {
                         *self.entry_point.write() = (neighbor, neighbor_node.layer);
                         return;
                     }
@@ -1283,7 +1298,7 @@ impl HnswIndex {
             max_layer -= 1;
         }
 
-        if let Some(node) = self.nodes.iter().next() {
+        if let Some((_, node)) = nodes.iter().next() {
             *self.entry_point.write() = (node.id, node.layer);
         } else {
             *self.entry_point.write() = (0, 0);
@@ -1707,7 +1722,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    #[ignore]
     async fn test_concurrent_operations() {
         use std::sync::Arc;
         use tokio::sync::Barrier;
