@@ -11,7 +11,7 @@ use anda_kip::{Command, Executor, Json, KipError, KmlStatement, KqlQuery, MetaCo
 use async_trait::async_trait;
 use parking_lot::RwLock;
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, btree_map},
     sync::Arc,
     time::Duration,
 };
@@ -142,10 +142,10 @@ impl CognitiveNexus {
                 .unwrap();
                 let ids = self
                     .concepts
-                    .search_ids(Query {
-                        filter: Some(Filter::Field((virtual_name, RangeQuery::Eq(virtual_val)))),
-                        ..Default::default()
-                    })
+                    .query_ids(
+                        Filter::Field((virtual_name, RangeQuery::Eq(virtual_val))),
+                        None,
+                    )
                     .await?;
 
                 if let Some(id) = ids.first() {
@@ -202,10 +202,10 @@ impl CognitiveNexus {
 
                 let ids = self
                     .propositions
-                    .search_ids(Query {
-                        filter: Some(Filter::Field((virtual_name, RangeQuery::Eq(virtual_val)))),
-                        ..Default::default()
-                    })
+                    .query_ids(
+                        Filter::Field((virtual_name, RangeQuery::Eq(virtual_val))),
+                        None,
+                    )
                     .await?;
 
                 if let Some(id) = ids.first() {
@@ -318,6 +318,197 @@ impl CognitiveNexus {
         Ok(())
     }
 
+    async fn delete_attributes(
+        &self,
+        pks: Vec<EntityPK>,
+        attrs: Vec<String>,
+    ) -> Result<(), DBError> {
+        let cached_pks: RwLock<HashMap<EntityPK, EntityID>> = RwLock::new(HashMap::new());
+        for pk in pks {
+            let id = self.resolve_entity_id(&pk, &cached_pks).await?;
+            match id {
+                EntityID::Concept(id) => {
+                    if let Ok(mut concept) = self.concepts.get_as::<Concept>(id).await {
+                        let length = concept.attributes.len();
+                        for attr in &attrs {
+                            concept.attributes.remove(attr);
+                        }
+                        if concept.attributes.len() < length {
+                            self.concepts
+                                .update(
+                                    id,
+                                    BTreeMap::from([(
+                                        "attributes".to_string(),
+                                        concept.attributes.into(),
+                                    )]),
+                                )
+                                .await?;
+                        }
+                    }
+                }
+
+                EntityID::Proposition(id, predicate) => {
+                    if let Ok(mut proposition) = self.propositions.get_as::<Proposition>(id).await {
+                        if let Some(prop) = proposition.properties.get_mut(&predicate) {
+                            let length = prop.attributes.len();
+                            for attr in &attrs {
+                                prop.attributes.remove(attr);
+                            }
+
+                            if prop.attributes.len() < length {
+                                self.propositions
+                                    .update(
+                                        id,
+                                        BTreeMap::from([(
+                                            "properties".to_string(),
+                                            proposition.properties.into(),
+                                        )]),
+                                    )
+                                    .await?;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn delete_metadata(&self, pks: Vec<EntityPK>, keys: Vec<String>) -> Result<(), DBError> {
+        let cached_pks: RwLock<HashMap<EntityPK, EntityID>> = RwLock::new(HashMap::new());
+        for pk in pks {
+            let id = self.resolve_entity_id(&pk, &cached_pks).await?;
+            match id {
+                EntityID::Concept(id) => {
+                    if let Ok(mut concept) = self.concepts.get_as::<Concept>(id).await {
+                        let length = concept.metadata.len();
+                        for key in &keys {
+                            concept.metadata.remove(key);
+                        }
+                        if concept.metadata.len() < length {
+                            self.concepts
+                                .update(
+                                    id,
+                                    BTreeMap::from([(
+                                        "metadata".to_string(),
+                                        concept.metadata.into(),
+                                    )]),
+                                )
+                                .await?;
+                        }
+                    }
+                }
+
+                EntityID::Proposition(id, predicate) => {
+                    if let Ok(mut proposition) = self.propositions.get_as::<Proposition>(id).await {
+                        if let Some(prop) = proposition.properties.get_mut(&predicate) {
+                            let length = prop.metadata.len();
+                            for key in &keys {
+                                prop.metadata.remove(key);
+                            }
+
+                            if prop.metadata.len() < length {
+                                self.propositions
+                                    .update(
+                                        id,
+                                        BTreeMap::from([(
+                                            "properties".to_string(),
+                                            proposition.properties.into(),
+                                        )]),
+                                    )
+                                    .await?;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn delete_propositions(&self, pks: Vec<PropositionPK>) -> Result<(), DBError> {
+        let cached_pks: RwLock<HashMap<EntityPK, EntityID>> = RwLock::new(HashMap::new());
+        // id -> predicates
+        let mut proposition_ids: HashMap<u64, BTreeSet<String>> = HashMap::new();
+        for pk in pks {
+            if let Ok(EntityID::Proposition(id, pred)) = self
+                .resolve_entity_id(&EntityPK::Proposition(pk), &cached_pks)
+                .await
+            {
+                proposition_ids.entry(id).or_default().insert(pred.clone());
+            }
+        }
+
+        for (id, predicates) in proposition_ids {
+            if let Ok(mut proposition) = self.propositions.get_as::<Proposition>(id).await {
+                // Remove specified predicates
+                for pred in predicates {
+                    proposition.predicates.remove(&pred);
+                    proposition.properties.remove(&pred);
+                }
+
+                // If no predicates left, delete the proposition
+                if proposition.predicates.is_empty() {
+                    let _ = self.propositions.remove(id).await;
+                } else {
+                    // Otherwise, update the proposition with remaining predicates
+                    self.propositions
+                        .update(
+                            id,
+                            BTreeMap::from([
+                                ("predicates".to_string(), proposition.predicates.into()),
+                                ("properties".to_string(), proposition.properties.into()),
+                            ]),
+                        )
+                        .await?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn delete_concepts(&self, pks: Vec<ConceptPK>) -> Result<(), DBError> {
+        let cached_pks: RwLock<HashMap<EntityPK, EntityID>> = RwLock::new(HashMap::new());
+        let mut concepts_ids: BTreeSet<u64> = BTreeSet::new();
+        let mut propositions_ids: BTreeSet<u64> = BTreeSet::new();
+        for pk in pks {
+            if let Ok(EntityID::Concept(id)) = self
+                .resolve_entity_id(&EntityPK::Concept(pk), &cached_pks)
+                .await
+            {
+                concepts_ids.insert(id);
+            }
+        }
+
+        for id in &concepts_ids {
+            let eid: Fv = EntityID::Concept(*id).to_string().into();
+            let ids = self
+                .propositions
+                .query_ids(
+                    Filter::Or(vec![
+                        Box::new(Filter::Field((
+                            "subject".to_string(),
+                            RangeQuery::Eq(eid.clone()),
+                        ))),
+                        Box::new(Filter::Field(("object".to_string(), RangeQuery::Eq(eid)))),
+                    ]),
+                    None,
+                )
+                .await?;
+            propositions_ids.extend(ids);
+        }
+
+        for id in propositions_ids {
+            let _ = self.propositions.remove(id).await;
+        }
+
+        for id in concepts_ids {
+            let _ = self.concepts.remove(id).await;
+        }
+
+        Ok(())
+    }
+
     // Helper method to resolve EntityPK to EntityID
     async fn resolve_entity_id(
         &self,
@@ -343,13 +534,10 @@ impl CognitiveNexus {
 
                     let ids = self
                         .concepts
-                        .search_ids(Query {
-                            filter: Some(Filter::Field((
-                                virtual_name,
-                                RangeQuery::Eq(virtual_val),
-                            ))),
-                            ..Default::default()
-                        })
+                        .query_ids(
+                            Filter::Field((virtual_name, RangeQuery::Eq(virtual_val))),
+                            None,
+                        )
                         .await?;
 
                     if let Some(id) = ids.first() {
@@ -390,13 +578,10 @@ impl CognitiveNexus {
 
                     let ids = self
                         .propositions
-                        .search_ids(Query {
-                            filter: Some(Filter::Field((
-                                virtual_name,
-                                RangeQuery::Eq(virtual_val),
-                            ))),
-                            ..Default::default()
-                        })
+                        .query_ids(
+                            Filter::Field((virtual_name, RangeQuery::Eq(virtual_val))),
+                            None,
+                        )
                         .await?;
 
                     if let Some(id) = ids.first() {

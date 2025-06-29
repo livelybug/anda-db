@@ -1500,6 +1500,22 @@ impl Collection {
         Ok(result)
     }
 
+    /// Queries document IDs based on a filter condition.
+    ///
+    /// # Arguments
+    /// * `filter` - The filter condition to apply
+    /// * `limit` - Maximum number of results to return (0 means no limit)
+    /// # Returns
+    /// A vector of document IDs matching the filter, or an error if filtering fails.
+    pub async fn query_ids(
+        &self,
+        filter: Filter,
+        limit: Option<usize>,
+    ) -> Result<Vec<DocumentId>, DBError> {
+        self.search_count.fetch_add(1, Ordering::Relaxed);
+        self.filter_by_field(filter, &[], limit.unwrap_or(0))
+    }
+
     /// Gets a document by its ID.
     ///
     /// # Arguments
@@ -1634,7 +1650,7 @@ impl Collection {
                 for id in self.doc_segments.read().keys() {
                     if !exclude.contains(id) && (candidates.is_empty() || candidates.contains(id)) {
                         result.push(*id);
-                        if result.len() >= limit {
+                        if limit > 0 && result.len() >= limit {
                             return Ok(result);
                         }
                     }
