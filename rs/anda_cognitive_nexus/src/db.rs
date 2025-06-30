@@ -3,15 +3,18 @@ use anda_db::{
     database::{AndaDB, DBMetadata},
     error::DBError,
     index::BTree,
-    query::{Filter, Query, RangeQuery},
+    query::{Filter, RangeQuery},
 };
 use anda_db_schema::{Document, Fv};
 use anda_db_tfs::jieba_tokenizer;
-use anda_kip::{Command, Executor, Json, KipError, KmlStatement, KqlQuery, MetaCommand};
+use anda_kip::{
+    Command, ConceptBlock, ConceptMatcher, DeleteStatement, Executor, Json, KipError, KmlStatement,
+    KqlQuery, MetaCommand, PropositionBlock, SetProposition, TargetTerm, UpsertBlock, UpsertItem,
+};
 use async_trait::async_trait;
-use parking_lot::RwLock;
+use serde_json::json;
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, btree_map},
+    collections::{BTreeMap, BTreeSet, HashMap},
     sync::Arc,
     time::Duration,
 };
@@ -112,22 +115,235 @@ impl CognitiveNexus {
         unimplemented!("execute_kql is not implemented yet");
     }
 
-    async fn execute_kml(&self, _command: KmlStatement, _dry_run: bool) -> Result<Json, KipError> {
-        unimplemented!("execute_kml is not implemented yet");
+    async fn execute_kml(&self, command: KmlStatement, dry_run: bool) -> Result<Json, KipError> {
+        match command {
+            KmlStatement::Upsert(upsert_block) => self.execute_upsert(upsert_block, dry_run).await,
+            KmlStatement::Delete(delete_statement) => {
+                self.execute_delete(delete_statement, dry_run).await
+            }
+        }
     }
 
     async fn execute_meta(&self, _command: MetaCommand, _dry_run: bool) -> Result<Json, KipError> {
         unimplemented!("execute_meta is not implemented yet");
     }
 
+    async fn execute_upsert(
+        &self,
+        upsert_block: UpsertBlock,
+        dry_run: bool,
+    ) -> Result<Json, KipError> {
+        let mut handle_map: HashMap<String, EntityID> = HashMap::new();
+        let mut cached_pks: HashMap<EntityPK, EntityID> = HashMap::new();
+        let mut concept_nodes: Vec<EntityID> = Vec::new();
+        let mut proposition_links: Vec<EntityID> = Vec::new();
+        let default_metadata: BTreeMap<String, Json> = upsert_block
+            .metadata
+            .map(|val| val.into_iter().map(|(k, v)| (k, v.into())).collect())
+            .unwrap_or_default();
+
+        for item in upsert_block.items {
+            match item {
+                UpsertItem::Concept(concept_block) => {
+                    if let Some(entity_id) = self
+                        .execute_concept_block(
+                            concept_block,
+                            &default_metadata,
+                            &mut handle_map,
+                            &mut cached_pks,
+                            dry_run,
+                        )
+                        .await?
+                    {
+                        concept_nodes.push(entity_id);
+                    }
+                }
+                UpsertItem::Proposition(proposition_block) => {
+                    if let Some(entity_id) = self
+                        .execute_proposition_block(
+                            proposition_block,
+                            &default_metadata,
+                            &mut handle_map,
+                            &mut cached_pks,
+                            dry_run,
+                        )
+                        .await?
+                    {
+                        proposition_links.push(entity_id);
+                    }
+                }
+            }
+        }
+
+        Ok(json!({
+            "concept_nodes": concept_nodes,
+            "proposition_links": proposition_links,
+        }))
+    }
+
+    async fn execute_concept_block(
+        &self,
+        concept_block: ConceptBlock,
+        default_metadata: &BTreeMap<String, Json>,
+        handle_map: &mut HashMap<String, EntityID>,
+        cached_pks: &mut HashMap<EntityPK, EntityID>,
+        dry_run: bool,
+    ) -> Result<Option<EntityID>, KipError> {
+        let concept_pk = ConceptPK::try_from(concept_block.concept)?;
+        if let Some(propositions) = &concept_block.set_propositions {
+            for set_prop in propositions {
+                self.check_target_term_for_kml(&set_prop.object, handle_map)?;
+            }
+        }
+
+        if dry_run {
+            return Ok(None);
+        }
+
+        let attributes = concept_block
+            .set_attributes
+            .map(|val| val.into_iter().map(|(k, v)| (k, v.into())).collect())
+            .unwrap_or_default();
+        let metadata = concept_block
+            .metadata
+            .map(|val| val.into_iter().map(|(k, v)| (k, v.into())).collect())
+            .unwrap_or_else(|| default_metadata.clone());
+
+        let entity_id = self
+            .upsert_concept(concept_pk, attributes, metadata)
+            .await
+            .map_err(|err| KipError::Execution(format!("{err:?}")))?;
+
+        handle_map.insert(concept_block.handle.clone(), entity_id.clone());
+
+        if let Some(propositions) = concept_block.set_propositions {
+            for set_prop in propositions {
+                self.execute_set_proposition(
+                    &entity_id,
+                    set_prop,
+                    default_metadata,
+                    handle_map,
+                    cached_pks,
+                )
+                .await
+                .map_err(|err| KipError::Execution(format!("{err:?}")))?;
+            }
+        }
+
+        Ok(Some(entity_id))
+    }
+
+    async fn execute_proposition_block(
+        &self,
+        proposition_block: PropositionBlock,
+        default_metadata: &BTreeMap<String, Json>,
+        handle_map: &mut HashMap<String, EntityID>,
+        cached_pks: &mut HashMap<EntityPK, EntityID>,
+        dry_run: bool,
+    ) -> Result<Option<EntityID>, KipError> {
+        let proposition_pk = PropositionPK::try_from(proposition_block.proposition)?;
+        if dry_run {
+            return Ok(None);
+        }
+
+        let attributes = proposition_block
+            .set_attributes
+            .map(|val| val.into_iter().map(|(k, v)| (k, v.into())).collect())
+            .unwrap_or_default();
+        let metadata = proposition_block
+            .metadata
+            .map(|val| val.into_iter().map(|(k, v)| (k, v.into())).collect())
+            .unwrap_or_else(|| default_metadata.clone());
+
+        let entity_id = self
+            .upsert_proposition(proposition_pk, attributes, metadata, cached_pks)
+            .await
+            .map_err(|err| KipError::Execution(format!("{err:?}")))?;
+
+        handle_map.insert(proposition_block.handle.clone(), entity_id.clone());
+
+        Ok(Some(entity_id))
+    }
+
+    async fn execute_set_proposition(
+        &self,
+        subject: &EntityID,
+        set_prop: SetProposition,
+        default_metadata: &BTreeMap<String, Json>,
+        handle_map: &HashMap<String, EntityID>,
+        cached_pks: &mut HashMap<EntityPK, EntityID>,
+    ) -> Result<EntityID, KipError> {
+        let object_id = self
+            .resolve_target_term(set_prop.object, handle_map, cached_pks)
+            .await?;
+
+        let proposition_pk = PropositionPK::Object {
+            subject: Box::new(subject.clone().into()),
+            predicate: set_prop.predicate,
+            object: Box::new(object_id.clone().into()),
+        };
+        let metadata = set_prop
+            .metadata
+            .map(|val| val.into_iter().map(|(k, v)| (k, v.into())).collect())
+            .unwrap_or_else(|| default_metadata.clone());
+
+        let entity_id = self
+            .upsert_proposition(proposition_pk, BTreeMap::new(), metadata, cached_pks)
+            .await
+            .map_err(|err| KipError::Execution(format!("{err:?}")))?;
+
+        Ok(entity_id)
+    }
+
+    async fn execute_delete(
+        &self,
+        delete_statement: DeleteStatement,
+        dry_run: bool,
+    ) -> Result<Json, KipError> {
+        if dry_run {
+            return Ok(Json::Object(serde_json::Map::from_iter([
+                ("operation".to_string(), Json::String("delete".to_string())),
+                ("dry_run".to_string(), Json::Bool(true)),
+            ])));
+        }
+
+        match delete_statement {
+            DeleteStatement::DeleteAttributes {
+                attributes,
+                target: _,
+                where_clauses: _,
+            } => {
+                // 注意：当前实现需要WHERE子句的KQL查询支持
+                // 这里提供一个简化版本，实际需要实现KQL查询来获取目标实体
+                return Err(KipError::NotImplemented(
+                    "DELETE ATTRIBUTES requires KQL query support".to_string(),
+                ));
+            }
+            DeleteStatement::DeletePropositions {
+                target: _,
+                where_clauses: _,
+            } => {
+                return Err(KipError::NotImplemented(
+                    "DELETE PROPOSITIONS requires KQL query support".to_string(),
+                ));
+            }
+            DeleteStatement::DeleteConcept {
+                target: _,
+                where_clauses: _,
+            } => {
+                return Err(KipError::NotImplemented(
+                    "DELETE CONCEPT requires KQL query support".to_string(),
+                ));
+            }
+        }
+    }
+
     async fn upsert_concept(
         &self,
         pk: ConceptPK,
-        attributes: Option<BTreeMap<String, Json>>,
-        metadata: Option<BTreeMap<String, Json>>,
+        attributes: BTreeMap<String, Json>,
+        metadata: BTreeMap<String, Json>,
     ) -> Result<EntityID, DBError> {
-        let attributes = attributes.unwrap_or_default();
-        let metadata = metadata.unwrap_or_default();
         match pk {
             ConceptPK::ID(id) => {
                 self.update_concept(id, attributes, metadata).await?;
@@ -169,13 +385,10 @@ impl CognitiveNexus {
     async fn upsert_proposition(
         &self,
         pk: PropositionPK,
-        attributes: Option<BTreeMap<String, Json>>,
-        metadata: Option<BTreeMap<String, Json>>,
+        attributes: BTreeMap<String, Json>,
+        metadata: BTreeMap<String, Json>,
+        cached_pks: &mut HashMap<EntityPK, EntityID>,
     ) -> Result<EntityID, DBError> {
-        let attributes = attributes.unwrap_or_default();
-        let metadata = metadata.unwrap_or_default();
-        let cached_pks: RwLock<HashMap<EntityPK, EntityID>> = RwLock::new(HashMap::new());
-
         match pk {
             PropositionPK::ID(id, predicate) => {
                 self.update_proposition(id, predicate.clone(), attributes, metadata)
@@ -188,10 +401,8 @@ impl CognitiveNexus {
                 object,
             } => {
                 // Convert EntityPK to EntityID for searching
-                let subject = self
-                    .resolve_entity_id(subject.as_ref(), &cached_pks)
-                    .await?;
-                let object = self.resolve_entity_id(object.as_ref(), &cached_pks).await?;
+                let subject = self.resolve_entity_id(subject.as_ref(), cached_pks).await?;
+                let object = self.resolve_entity_id(object.as_ref(), cached_pks).await?;
 
                 let virtual_name = BTree::virtual_field_name(&["subject", "object"]);
                 let virtual_val = Document::virtual_field_value(&[
@@ -248,7 +459,7 @@ impl CognitiveNexus {
         if !self.concepts.contains(id) {
             return Err(DBError::NotFound {
                 name: "concept node".to_string(),
-                path: id.to_string(),
+                path: ConceptPK::ID(id).to_string(),
                 source: "CognitiveNexus::update_concept".into(),
             });
         }
@@ -285,7 +496,7 @@ impl CognitiveNexus {
         if !self.propositions.contains(id) {
             return Err(DBError::NotFound {
                 name: "proposition link".to_string(),
-                path: id.to_string(),
+                path: PropositionPK::ID(id, predicate).to_string(),
                 source: "CognitiveNexus::update_proposition".into(),
             });
         }
@@ -322,10 +533,10 @@ impl CognitiveNexus {
         &self,
         pks: Vec<EntityPK>,
         attrs: Vec<String>,
+        cached_pks: &mut HashMap<EntityPK, EntityID>,
     ) -> Result<(), DBError> {
-        let cached_pks: RwLock<HashMap<EntityPK, EntityID>> = RwLock::new(HashMap::new());
         for pk in pks {
-            let id = self.resolve_entity_id(&pk, &cached_pks).await?;
+            let id = self.resolve_entity_id(&pk, cached_pks).await?;
             match id {
                 EntityID::Concept(id) => {
                     if let Ok(mut concept) = self.concepts.get_as::<Concept>(id).await {
@@ -374,10 +585,14 @@ impl CognitiveNexus {
         Ok(())
     }
 
-    async fn delete_metadata(&self, pks: Vec<EntityPK>, keys: Vec<String>) -> Result<(), DBError> {
-        let cached_pks: RwLock<HashMap<EntityPK, EntityID>> = RwLock::new(HashMap::new());
+    async fn delete_metadata(
+        &self,
+        pks: Vec<EntityPK>,
+        keys: Vec<String>,
+        cached_pks: &mut HashMap<EntityPK, EntityID>,
+    ) -> Result<(), DBError> {
         for pk in pks {
-            let id = self.resolve_entity_id(&pk, &cached_pks).await?;
+            let id = self.resolve_entity_id(&pk, cached_pks).await?;
             match id {
                 EntityID::Concept(id) => {
                     if let Ok(mut concept) = self.concepts.get_as::<Concept>(id).await {
@@ -426,13 +641,16 @@ impl CognitiveNexus {
         Ok(())
     }
 
-    async fn delete_propositions(&self, pks: Vec<PropositionPK>) -> Result<(), DBError> {
-        let cached_pks: RwLock<HashMap<EntityPK, EntityID>> = RwLock::new(HashMap::new());
+    async fn delete_propositions(
+        &self,
+        pks: Vec<PropositionPK>,
+        cached_pks: &mut HashMap<EntityPK, EntityID>,
+    ) -> Result<(), DBError> {
         // id -> predicates
         let mut proposition_ids: HashMap<u64, BTreeSet<String>> = HashMap::new();
         for pk in pks {
             if let Ok(EntityID::Proposition(id, pred)) = self
-                .resolve_entity_id(&EntityPK::Proposition(pk), &cached_pks)
+                .resolve_entity_id(&EntityPK::Proposition(pk), cached_pks)
                 .await
             {
                 proposition_ids.entry(id).or_default().insert(pred.clone());
@@ -467,13 +685,16 @@ impl CognitiveNexus {
         Ok(())
     }
 
-    async fn delete_concepts(&self, pks: Vec<ConceptPK>) -> Result<(), DBError> {
-        let cached_pks: RwLock<HashMap<EntityPK, EntityID>> = RwLock::new(HashMap::new());
+    async fn delete_concepts(
+        &self,
+        pks: Vec<ConceptPK>,
+        cached_pks: &mut HashMap<EntityPK, EntityID>,
+    ) -> Result<(), DBError> {
         let mut concepts_ids: BTreeSet<u64> = BTreeSet::new();
         let mut propositions_ids: BTreeSet<u64> = BTreeSet::new();
         for pk in pks {
             if let Ok(EntityID::Concept(id)) = self
-                .resolve_entity_id(&EntityPK::Concept(pk), &cached_pks)
+                .resolve_entity_id(&EntityPK::Concept(pk), cached_pks)
                 .await
             {
                 concepts_ids.insert(id);
@@ -509,14 +730,64 @@ impl CognitiveNexus {
         Ok(())
     }
 
+    fn check_target_term_for_kml(
+        &self,
+        target: &TargetTerm,
+        handle_map: &HashMap<String, EntityID>,
+    ) -> Result<(), KipError> {
+        match target {
+            TargetTerm::Variable(handle) => {
+                if !handle_map.contains_key(handle) {
+                    return Err(KipError::InvalidCommand(format!(
+                        "Undefined handle: {handle}"
+                    )));
+                }
+            }
+            TargetTerm::Concept(concept_matcher) => {
+                let _ = ConceptPK::try_from(concept_matcher.clone())?;
+            }
+            TargetTerm::Proposition(proposition_matcher) => {
+                let _ = PropositionPK::try_from(*proposition_matcher.clone())?;
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn resolve_target_term(
+        &self,
+        target: TargetTerm,
+        handle_map: &HashMap<String, EntityID>,
+        cached_pks: &mut HashMap<EntityPK, EntityID>,
+    ) -> Result<EntityID, KipError> {
+        match target {
+            TargetTerm::Variable(handle) => handle_map
+                .get(&handle)
+                .cloned()
+                .ok_or_else(|| KipError::InvalidCommand(format!("Undefined handle: {handle}"))),
+            TargetTerm::Concept(concept_matcher) => {
+                let concept_pk = ConceptPK::try_from(concept_matcher)?;
+                self.resolve_entity_id(&EntityPK::Concept(concept_pk), cached_pks)
+                    .await
+                    .map_err(|err| KipError::Execution(format!("{err:?}")))
+            }
+            TargetTerm::Proposition(proposition_matcher) => {
+                let proposition_pk = PropositionPK::try_from(*proposition_matcher)?;
+                self.resolve_entity_id(&EntityPK::Proposition(proposition_pk), cached_pks)
+                    .await
+                    .map_err(|err| KipError::Execution(format!("{err:?}")))
+            }
+        }
+    }
+
     // Helper method to resolve EntityPK to EntityID
     async fn resolve_entity_id(
         &self,
         entity_pk: &EntityPK,
-        cached_pks: &RwLock<HashMap<EntityPK, EntityID>>,
+        cached_pks: &mut HashMap<EntityPK, EntityID>,
     ) -> Result<EntityID, DBError> {
         {
-            if let Some(id) = cached_pks.read().get(entity_pk) {
+            if let Some(id) = cached_pks.get(entity_pk) {
                 return Ok(id.clone());
             }
         }
@@ -545,7 +816,7 @@ impl CognitiveNexus {
                     } else {
                         Err(DBError::NotFound {
                             name: "concept node".to_string(),
-                            path: format!("type: {}, name: {}", r#type, name),
+                            path: concept_pk.to_string(),
                             source: "CognitiveNexus::resolve_entity_id".into(),
                         })
                     }
@@ -563,10 +834,10 @@ impl CognitiveNexus {
                     // 使用 Box::pin 来处理递归调用
                     let subject_future =
                         Box::pin(self.resolve_entity_id(subject.as_ref(), cached_pks));
+                    let subject_id = subject_future.await?;
+
                     let object_future =
                         Box::pin(self.resolve_entity_id(object.as_ref(), cached_pks));
-
-                    let subject_id = subject_future.await?;
                     let object_id = object_future.await?;
 
                     let virtual_name = BTree::virtual_field_name(&["subject", "object"]);
@@ -589,10 +860,7 @@ impl CognitiveNexus {
                     } else {
                         Err(DBError::NotFound {
                             name: "proposition link".to_string(),
-                            path: format!(
-                                "subject: {}, predicate: {}, object: {}",
-                                subject_id, object_id, predicate
-                            ),
+                            path: proposition_pk.to_string(),
                             source: "CognitiveNexus::resolve_entity_id".into(),
                         })
                     }
@@ -600,7 +868,7 @@ impl CognitiveNexus {
             },
         }?;
 
-        cached_pks.write().insert(entity_pk.clone(), id.clone());
+        cached_pks.insert(entity_pk.clone(), id.clone());
         Ok(id)
     }
 }

@@ -18,6 +18,19 @@ pub enum ConceptPK {
     Object { r#type: String, name: String },
 }
 
+impl fmt::Display for ConceptPK {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            // `{id: "<id>"}`
+            ConceptPK::ID(id) => write!(f, "{{id: {:?}}}", EntityID::Concept(*id)),
+            // `{type: "<type>", name: "<name>"}`
+            ConceptPK::Object { r#type, name } => {
+                write!(f, "{{type: {:?}, name: {:?}}}", r#type, name)
+            }
+        }
+    }
+}
+
 impl TryFrom<ConceptMatcher> for ConceptPK {
     type Error = KipError;
 
@@ -48,6 +61,25 @@ pub enum PropositionPK {
         predicate: String,
         object: Box<EntityPK>,
     },
+}
+
+impl fmt::Display for PropositionPK {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            // `(id: "<link_id>")`
+            PropositionPK::ID(id, predicate) => write!(
+                f,
+                "(id: {:?})",
+                EntityID::Proposition(*id, predicate.clone()),
+            ),
+            // `(?subject, "<predicate>", ?object)`
+            PropositionPK::Object {
+                subject,
+                predicate,
+                object,
+            } => write!(f, "({}, {:?}, {})", subject, predicate, object),
+        }
+    }
 }
 
 impl TryFrom<PropositionMatcher> for PropositionPK {
@@ -99,6 +131,15 @@ pub enum EntityPK {
     Proposition(PropositionPK),
 }
 
+impl fmt::Display for EntityPK {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            EntityPK::Concept(pk) => write!(f, "{}", pk),
+            EntityPK::Proposition(pk) => write!(f, "{}", pk),
+        }
+    }
+}
+
 impl TryFrom<TargetTerm> for EntityPK {
     type Error = KipError;
 
@@ -111,6 +152,15 @@ impl TryFrom<TargetTerm> for EntityPK {
             _ => Err(KipError::InvalidCommand(format!(
                 "TargetTerm must be either Concept or Proposition, got: {value:?}"
             ))),
+        }
+    }
+}
+
+impl From<EntityID> for EntityPK {
+    fn from(value: EntityID) -> Self {
+        match value {
+            EntityID::Concept(id) => EntityPK::Concept(ConceptPK::ID(id)),
+            EntityID::Proposition(id, pred) => EntityPK::Proposition(PropositionPK::ID(id, pred)),
         }
     }
 }
