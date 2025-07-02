@@ -200,7 +200,7 @@ pub struct ConceptClause {
     /// The matcher for concept, which can be a combination of `id`, `type`, and `name`
     pub matcher: ConceptMatcher,
     /// A variable (e.g., `?drug`)
-    pub variable: Option<String>,
+    pub variable: String,
 }
 
 /// Represents a identifier for a concept node.

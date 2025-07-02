@@ -113,10 +113,9 @@ pub fn parse_concept_matcher(input: &str) -> IResult<&str, ConceptMatcher> {
 }
 
 fn parse_concept_clause(input: &str) -> IResult<&str, ConceptClause> {
-    map(
-        (opt(variable), parse_concept_matcher),
-        |(variable, matcher)| ConceptClause { variable, matcher },
-    )
+    map((variable, parse_concept_matcher), |(variable, matcher)| {
+        ConceptClause { variable, matcher }
+    })
     .parse(input)
 }
 
@@ -567,7 +566,7 @@ mod tests {
         let (_, query) = result.unwrap();
         match &query.where_clauses[0] {
             WhereClause::Concept(clause) => {
-                assert_eq!(clause.variable, Some("drug".to_string()));
+                assert_eq!(clause.variable, "drug".to_string());
                 assert_eq!(
                     clause.matcher,
                     ConceptMatcher::Object {

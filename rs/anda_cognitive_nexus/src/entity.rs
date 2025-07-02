@@ -1,27 +1,20 @@
 use anda_db_schema::{
-    AndaDBSchema, FieldEntry, FieldType, FieldTyped, FieldValue, Json, Schema, SchemaError,
+    AndaDBSchema, FieldEntry, FieldType, FieldTyped, FieldValue, Json, Map, Schema, SchemaError,
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet},
     fmt,
     str::FromStr,
 };
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(tag = "$type")]
-pub enum Entity {
-    Concept(Concept),
-    Proposition(Proposition),
-}
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, AndaDBSchema)]
 pub struct Concept {
     pub _id: u64,
     pub r#type: String,
     pub name: String,
-    pub attributes: BTreeMap<String, Json>,
-    pub metadata: BTreeMap<String, Json>,
+    pub attributes: Map<String, Json>,
+    pub metadata: Map<String, Json>,
 }
 
 impl Concept {
@@ -48,10 +41,10 @@ pub struct Proposition {
 #[derive(Debug, Clone, Default, Deserialize, Serialize, FieldTyped)]
 pub struct Properties {
     #[serde(rename = "a")]
-    pub attributes: BTreeMap<String, Json>,
+    pub attributes: Map<String, Json>,
 
     #[serde(rename = "m")]
-    pub metadata: BTreeMap<String, Json>,
+    pub metadata: Map<String, Json>,
 }
 
 impl From<Properties> for FieldValue {
@@ -63,7 +56,7 @@ impl From<Properties> for FieldValue {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum EntityID {
     Concept(u64),
     Proposition(u64, String),

@@ -473,7 +473,7 @@ mod tests {
                             r#type: "Drug".to_string(),
                             name: "Aspirin".to_string(),
                         },
-                        variable: Some("drug".to_string()),
+                        variable: "drug".to_string(),
                     })
                 );
             }
@@ -558,7 +558,7 @@ mod tests {
                             r#type: "Drug".to_string(),
                             name: "OutdatedDrug".to_string(),
                         },
-                        variable: Some("drug".to_string()),
+                        variable: "drug".to_string(),
                     })
                 );
             }

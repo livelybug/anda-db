@@ -1,13 +1,11 @@
-use anda_db::error::DBError;
-use anda_db_schema::{
-    AndaDBSchema, BoxError, FieldEntry, FieldType, FieldTyped, Json, Schema, SchemaError,
-};
 use anda_kip::*;
-use serde::{Deserialize, Serialize};
+use parking_lot::RwLock;
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{HashMap, HashSet},
     fmt,
+    hash::Hash,
     str::FromStr,
+    sync::Arc,
 };
 
 use crate::entity::*;
@@ -162,5 +160,42 @@ impl From<EntityID> for EntityPK {
             EntityID::Concept(id) => EntityPK::Concept(ConceptPK::ID(id)),
             EntityID::Proposition(id, pred) => EntityPK::Proposition(PropositionPK::ID(id, pred)),
         }
+    }
+}
+
+// 查询执行上下文
+#[derive(Clone, Debug, Default)]
+pub struct QueryContext {
+    // 变量名到实体ID的映射
+    pub bindings: HashMap<String, HashSet<EntityID>>,
+    pub cache: Arc<QueryCache>,
+}
+
+#[derive(Debug, Default)]
+pub struct QueryCache {
+    pub concepts: RwLock<HashMap<u64, Concept>>,
+    pub propositions: RwLock<HashMap<u64, Proposition>>,
+}
+
+#[derive(Debug)]
+pub enum TargetEntities {
+    Any(String),
+    AnyPropositions,
+    IDs(HashSet<EntityID>),
+}
+
+pub trait Pipe<T> {
+    fn pipe<F, R>(self, f: F) -> R
+    where
+        F: FnOnce(Self) -> R,
+        Self: Sized;
+}
+
+impl<T> Pipe<T> for T {
+    fn pipe<F, R>(self, f: F) -> R
+    where
+        F: FnOnce(Self) -> R,
+    {
+        f(self)
     }
 }
