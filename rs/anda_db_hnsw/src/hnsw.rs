@@ -424,14 +424,14 @@ impl HnswIndex {
     }
 
     /// Gets a node by ID and applies a function to it.
-    pub fn get_node_with<R, F>(&self, id: u64, mut f: F) -> Result<R, HnswError>
+    pub fn get_node_with<R, F>(&self, id: u64, f: F) -> Result<R, HnswError>
     where
         F: FnMut(&HnswNode) -> R,
     {
         self.nodes
             .pin()
             .get(&id)
-            .map(|node| f(&node))
+            .map(f)
             .ok_or_else(|| HnswError::NotFound {
                 name: self.name.clone(),
                 id,
@@ -748,7 +748,7 @@ impl HnswIndex {
         if let Some(node) = nodes.remove(&id) {
             deleted = true;
             self.ids.write().remove(id);
-            self.try_update_entry_point(&node);
+            self.try_update_entry_point(node);
             self.update_metadata(|m| {
                 m.stats.version += 1;
                 m.stats.last_deleted = now_ms;
@@ -904,7 +904,7 @@ impl HnswIndex {
         let nodes = self.nodes.pin();
         // Calculate distance to entry point
         let entry_dist = match nodes.get(&entry_point) {
-            Some(node) => self.get_distance_with_cache(distance_cache, query, &node)?,
+            Some(node) => self.get_distance_with_cache(distance_cache, query, node)?,
             None => {
                 return Err(HnswError::NotFound {
                     name: self.name.clone(),
@@ -940,7 +940,7 @@ impl HnswIndex {
                                 match self.get_distance_with_cache(
                                     distance_cache,
                                     query,
-                                    &neighbor_node,
+                                    neighbor_node,
                                 ) {
                                     Ok(dist) => {
                                         if let Some((OrderedFloat(max_dist), _, _)) = results.peek()

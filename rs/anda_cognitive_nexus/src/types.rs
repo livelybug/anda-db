@@ -116,9 +116,6 @@ impl TryFrom<PropositionMatcher> for PropositionPK {
                     object,
                 })
             }
-            _ => Err(KipError::InvalidCommand(format!(
-                "PropositionMatcher must be either ID or Object, got: {value:?}"
-            ))),
         }
     }
 }
@@ -184,6 +181,46 @@ pub enum TargetEntities {
     Any(String),
     AnyPropositions,
     IDs(Vec<EntityID>),
+}
+
+pub struct PropositionsMatchResult {
+    pub matched_propositions: HashSet<EntityID>,
+    pub matched_subjects: HashSet<EntityID>,
+    pub matched_objects: HashSet<EntityID>,
+    pub matched_predicates: HashSet<String>,
+}
+
+impl Default for PropositionsMatchResult {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PropositionsMatchResult {
+    pub fn new() -> Self {
+        Self {
+            matched_propositions: HashSet::new(),
+            matched_subjects: HashSet::new(),
+            matched_objects: HashSet::new(),
+            matched_predicates: HashSet::new(),
+        }
+    }
+
+    pub fn add_match(
+        &mut self,
+        subject: EntityID,
+        object: EntityID,
+        predicates: Vec<String>,
+        proposition_id: u64,
+    ) {
+        self.matched_subjects.insert(subject);
+        self.matched_objects.insert(object);
+        for pred in &predicates {
+            self.matched_propositions
+                .insert(EntityID::Proposition(proposition_id, pred.clone()));
+        }
+        self.matched_predicates.extend(predicates);
+    }
 }
 
 #[derive(Clone, Debug)]

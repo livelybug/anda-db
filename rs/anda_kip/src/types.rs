@@ -1,4 +1,3 @@
-use nom::Err;
 use serde::{Deserialize, Serialize};
 
 use crate::ast::{DotPathVar, Json, Map};

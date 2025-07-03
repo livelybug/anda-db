@@ -1574,6 +1574,7 @@ impl Collection {
         candidates: &[DocumentId],
         limit: usize,
     ) -> Result<Vec<DocumentId>, DBError> {
+        let mut seen = HashSet::new();
         let mut result = Vec::new();
         match filter {
             Filter::Field((index_name, filter)) => {
@@ -1597,7 +1598,7 @@ impl Collection {
                 {
                     let _: Vec<()> = index.range_query_with(filter, |_, ids| {
                         for id in ids {
-                            if candidates.is_empty() || candidates.contains(id) {
+                            if (candidates.is_empty() || candidates.contains(id)) && seen.insert(*id) {
                                 result.push(*id);
                                 if limit > 0 && result.len() >= limit {
                                     return (false, vec![]);
@@ -1614,7 +1615,6 @@ impl Collection {
                 }
             }
             Filter::Or(queries) => {
-                let mut seen = HashSet::new();
                 for query in queries {
                     let ids = self.filter_by_field(*query, candidates, limit)?;
                     for id in ids {
@@ -1648,7 +1648,7 @@ impl Collection {
             Filter::Not(query) => {
                 let exclude: Vec<u64> = self.filter_by_field(*query, &[], 0)?;
                 for id in self.doc_segments.read().keys() {
-                    if !exclude.contains(id) && (candidates.is_empty() || candidates.contains(id)) {
+                    if !exclude.contains(id) && (candidates.is_empty() || candidates.contains(id)) && seen.insert(*id) {
                         result.push(*id);
                         if limit > 0 && result.len() >= limit {
                             return Ok(result);

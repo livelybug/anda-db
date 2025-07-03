@@ -95,7 +95,7 @@ impl CognitiveNexus {
     }
 
     pub fn name(&self) -> &str {
-        &self.db.name()
+        self.db.name()
     }
 
     pub fn metadata(&self) -> DBMetadata {
@@ -200,7 +200,7 @@ impl CognitiveNexus {
             }
         }
 
-        let ids = match clause.matcher {
+        let result = match clause.matcher {
             PropositionMatcher::ID(id) => {
                 let entity_id = EntityID::from_str(&id).map_err(KipError::Parse)?;
                 if !matches!(entity_id, EntityID::Proposition(_, _)) {
@@ -208,7 +208,7 @@ impl CognitiveNexus {
                         "Invalid proposition link ID: {id:?}"
                     )));
                 }
-                vec![entity_id]
+                TargetEntities::IDs(vec![entity_id])
             }
             PropositionMatcher::Object {
                 subject,
@@ -220,8 +220,10 @@ impl CognitiveNexus {
             }
         };
 
-        if let Some(var) = clause.variable {
-            ctx.entities.insert(var, ids.into_iter().collect());
+        if let TargetEntities::IDs(ids) = result {
+            if let Some(var) = clause.variable {
+                ctx.entities.insert(var, ids.into_iter().collect());
+            }
         }
 
         Ok(())
@@ -399,7 +401,7 @@ impl CognitiveNexus {
         subject: TargetTerm,
         predicate: PredTerm,
         object: TargetTerm,
-    ) -> Result<Vec<EntityID>, KipError> {
+    ) -> Result<TargetEntities, KipError> {
         let subject_var = match &subject {
             TargetTerm::Variable(var) => Some(var.clone()),
             _ => None,
@@ -416,7 +418,7 @@ impl CognitiveNexus {
         let subjects = self.resolve_target_term_ids(ctx, subject).await?;
         let objects = self.resolve_target_term_ids(ctx, object).await?;
 
-        match (subjects, predicate, objects) {
+        let result = match (subjects, predicate, objects) {
             (
                 subjects,
                 PredTerm::MultiHop {
@@ -426,523 +428,358 @@ impl CognitiveNexus {
                 },
                 objects,
             ) => {
-                let mut matched_propositions: HashSet<EntityID> = HashSet::new();
-                let mut matched_subjects: HashSet<EntityID> = HashSet::new();
-                let mut matched_objects: HashSet<EntityID> = HashSet::new();
-                let mut matched_predicates: HashSet<String> = HashSet::new();
-
-                // 获取起始节点集合
-                let start_nodes = match subjects {
-                    TargetEntities::IDs(ids) => ids,
-                    _ => {
-                        return Err(KipError::InvalidCommand(format!(
-                            "Subject cannot be variable in multi-hop matching"
-                        )));
-                    }
-                };
-
-                // 获取目标节点集合（用于验证路径终点）
-                let target_nodes: Option<HashSet<EntityID>> = match objects {
-                    TargetEntities::IDs(ids) => Some(ids.into_iter().collect()),
-                    _ => None,
-                };
-
-                let max_hops = max.unwrap_or(10).min(10);
-
-                // 对每个起始节点执行BFS
-                for start_node in start_nodes {
-                    let paths = self
-                        .bfs_multi_hop(
-                            &ctx.cache,
-                            start_node.clone(),
-                            &predicate,
-                            min,
-                            max_hops,
-                            target_nodes.as_ref(),
-                        )
-                        .await?;
-
-                    // 处理找到的路径
-                    for path in paths {
-                        matched_subjects.insert(path.start);
-                        matched_objects.insert(path.end);
-                        matched_predicates.insert(predicate.clone());
-
-                        // 将路径中的所有命题添加到结果中
-                        for prop_id in path.propositions {
-                            matched_propositions.insert(prop_id);
-                        }
-                    }
-                }
-
-                // 将匹配的结果插入到上下文中
-                if let Some(var) = subject_var {
-                    ctx.entities.insert(var, matched_subjects);
-                }
-                if let Some(var) = predicate_var {
-                    ctx.predicates.insert(var, matched_predicates);
-                }
-                if let Some(var) = object_var {
-                    ctx.entities.insert(var, matched_objects);
-                }
-                Ok(matched_propositions.into_iter().collect())
+                self.handle_multi_hop_matching(ctx, subjects, predicate, min, max, objects)
+                    .await?
             }
             (TargetEntities::IDs(subject_ids), predicate, TargetEntities::IDs(object_ids)) => {
-                let mut matched_propositions: HashSet<EntityID> = HashSet::new();
-                let mut matched_subjects: HashSet<EntityID> = HashSet::new();
-                let mut matched_objects: HashSet<EntityID> = HashSet::new();
-                let mut matched_predicates: HashSet<String> = HashSet::new();
-                for subject_id in &subject_ids {
-                    for object_id in &object_ids {
-                        let virtual_name = BTree::virtual_field_name(&["subject", "object"]);
-                        let virtual_val = Document::virtual_field_value(&[
-                            Some(&Fv::Text(subject_id.to_string())),
-                            Some(&Fv::Text(object_id.to_string())),
-                        ])
-                        .unwrap();
-
-                        let ids = self
-                            .propositions
-                            .query_ids(
-                                Filter::Field((virtual_name, RangeQuery::Eq(virtual_val))),
-                                None,
-                            )
-                            .await
-                            .map_err(|e| {
-                                KipError::Execution(format!(
-                                    "Failed to query propositions: {:?}",
-                                    e
-                                ))
-                            })?;
-
-                        for id in ids {
-                            let rt = self
-                                .try_get_proposition_with(&ctx.cache, id, |proposition| {
-                                    match &predicate {
-                                        PredTerm::Literal(pred) => {
-                                            if proposition.predicates.contains(pred) {
-                                                return Ok(Some((
-                                                    proposition.subject.clone(),
-                                                    proposition.object.clone(),
-                                                    vec![pred.clone()],
-                                                )));
-                                            }
-                                        }
-                                        PredTerm::Variable(_) => {
-                                            return Ok(Some((
-                                                proposition.subject.clone(),
-                                                proposition.object.clone(),
-                                                proposition.predicates.iter().cloned().collect(),
-                                            )));
-                                        }
-                                        PredTerm::Alternative(preds) => {
-                                            let preds = proposition
-                                                .predicates
-                                                .iter()
-                                                .filter(|p| preds.contains(p))
-                                                .cloned()
-                                                .collect::<Vec<_>>();
-                                            if !preds.is_empty() {
-                                                return Ok(Some((
-                                                    proposition.subject.clone(),
-                                                    proposition.object.clone(),
-                                                    preds,
-                                                )));
-                                            }
-                                        }
-                                        _ => {}
-                                    }
-                                    Ok(None)
-                                })
-                                .await?;
-
-                            if let Some((subj, obj, preds)) = rt {
-                                for pred in &preds {
-                                    matched_propositions
-                                        .insert(EntityID::Proposition(id, pred.clone()));
-                                }
-
-                                matched_subjects.insert(subj);
-                                matched_objects.insert(obj);
-                                matched_predicates.extend(preds);
-                            }
-                        }
-                    }
-                }
-
-                // 将匹配的结果插入到上下文中
-                if let Some(var) = subject_var {
-                    ctx.entities.insert(var, matched_subjects);
-                }
-                if let Some(var) = predicate_var {
-                    ctx.predicates.insert(var, matched_predicates);
-                }
-                if let Some(var) = object_var {
-                    ctx.entities.insert(var, matched_objects);
-                }
-                Ok(matched_propositions.into_iter().collect())
+                self.handle_subject_object_ids_matching(ctx, subject_ids, object_ids, predicate)
+                    .await?
             }
             (TargetEntities::IDs(subject_ids), predicate, TargetEntities::AnyPropositions) => {
-                let mut matched_propositions: HashSet<EntityID> = HashSet::new();
-                let mut matched_subjects: HashSet<EntityID> = HashSet::new();
-                let mut matched_objects: HashSet<EntityID> = HashSet::new();
-                let mut matched_predicates: HashSet<String> = HashSet::new();
-                for subject_id in &subject_ids {
-                    let ids = self
-                        .propositions
-                        .query_ids(
-                            Filter::Field((
-                                "subject".to_string(),
-                                RangeQuery::Eq(Fv::Text(subject_id.to_string())),
-                            )),
-                            None,
-                        )
-                        .await
-                        .map_err(|e| {
-                            KipError::Execution(format!("Failed to query propositions: {:?}", e))
-                        })?;
-
-                    for id in ids {
-                        let rt = self
-                            .try_get_proposition_with(&ctx.cache, id, |proposition| {
-                                if matches!(proposition.object, EntityID::Concept(_)) {
-                                    return Ok(None);
-                                }
-
-                                match &predicate {
-                                    PredTerm::Literal(pred) => {
-                                        if proposition.predicates.contains(pred) {
-                                            return Ok(Some((
-                                                proposition.subject.clone(),
-                                                proposition.object.clone(),
-                                                vec![pred.clone()],
-                                            )));
-                                        }
-                                    }
-                                    PredTerm::Variable(_) => {
-                                        return Ok(Some((
-                                            proposition.subject.clone(),
-                                            proposition.object.clone(),
-                                            proposition.predicates.iter().cloned().collect(),
-                                        )));
-                                    }
-                                    PredTerm::Alternative(preds) => {
-                                        let preds = proposition
-                                            .predicates
-                                            .iter()
-                                            .filter(|p| preds.contains(p))
-                                            .cloned()
-                                            .collect::<Vec<_>>();
-                                        if !preds.is_empty() {
-                                            return Ok(Some((
-                                                proposition.subject.clone(),
-                                                proposition.object.clone(),
-                                                preds,
-                                            )));
-                                        }
-                                    }
-                                    _ => {}
-                                }
-                                Ok(None)
-                            })
-                            .await?;
-
-                        if let Some((subj, obj, preds)) = rt {
-                            for pred in &preds {
-                                matched_propositions
-                                    .insert(EntityID::Proposition(id, pred.clone()));
-                            }
-
-                            matched_subjects.insert(subj);
-                            matched_objects.insert(obj);
-                            matched_predicates.extend(preds);
-                        }
-                    }
-                }
-
-                // 将匹配的结果插入到上下文中
-                if let Some(var) = subject_var {
-                    ctx.entities.insert(var, matched_subjects);
-                }
-                if let Some(var) = predicate_var {
-                    ctx.predicates.insert(var, matched_predicates);
-                }
-                if let Some(var) = object_var {
-                    ctx.entities.insert(var, matched_objects);
-                }
-                Ok(matched_propositions.into_iter().collect())
+                self.handle_subject_ids_any_matching(ctx, subject_ids, predicate, true)
+                    .await?
             }
             (TargetEntities::IDs(subject_ids), predicate, TargetEntities::Any(_)) => {
-                let mut matched_propositions: HashSet<EntityID> = HashSet::new();
-                let mut matched_subjects: HashSet<EntityID> = HashSet::new();
-                let mut matched_objects: HashSet<EntityID> = HashSet::new();
-                let mut matched_predicates: HashSet<String> = HashSet::new();
-                for subject_id in &subject_ids {
-                    let ids = self
-                        .propositions
-                        .query_ids(
-                            Filter::Field((
-                                "subject".to_string(),
-                                RangeQuery::Eq(Fv::Text(subject_id.to_string())),
-                            )),
-                            None,
-                        )
-                        .await
-                        .map_err(|e| {
-                            KipError::Execution(format!("Failed to query propositions: {:?}", e))
-                        })?;
-
-                    for id in ids {
-                        let rt = self
-                            .try_get_proposition_with(&ctx.cache, id, |proposition| {
-                                match &predicate {
-                                    PredTerm::Literal(pred) => {
-                                        if proposition.predicates.contains(pred) {
-                                            return Ok(Some((
-                                                proposition.subject.clone(),
-                                                proposition.object.clone(),
-                                                vec![pred.clone()],
-                                            )));
-                                        }
-                                    }
-                                    PredTerm::Variable(_) => {
-                                        return Ok(Some((
-                                            proposition.subject.clone(),
-                                            proposition.object.clone(),
-                                            proposition.predicates.iter().cloned().collect(),
-                                        )));
-                                    }
-                                    PredTerm::Alternative(preds) => {
-                                        let preds = proposition
-                                            .predicates
-                                            .iter()
-                                            .filter(|p| preds.contains(p))
-                                            .cloned()
-                                            .collect::<Vec<_>>();
-                                        if !preds.is_empty() {
-                                            return Ok(Some((
-                                                proposition.subject.clone(),
-                                                proposition.object.clone(),
-                                                preds,
-                                            )));
-                                        }
-                                    }
-                                    _ => {}
-                                }
-                                Ok(None)
-                            })
-                            .await?;
-
-                        if let Some((subj, obj, preds)) = rt {
-                            for pred in &preds {
-                                matched_propositions
-                                    .insert(EntityID::Proposition(id, pred.clone()));
-                            }
-
-                            matched_subjects.insert(subj);
-                            matched_objects.insert(obj);
-                            matched_predicates.extend(preds);
-                        }
-                    }
-                }
-
-                // 将匹配的结果插入到上下文中
-                if let Some(var) = subject_var {
-                    ctx.entities.insert(var, matched_subjects);
-                }
-                if let Some(var) = predicate_var {
-                    ctx.predicates.insert(var, matched_predicates);
-                }
-                if let Some(var) = object_var {
-                    ctx.entities.insert(var, matched_objects);
-                }
-
-                Ok(matched_propositions.into_iter().collect())
+                self.handle_subject_ids_any_matching(ctx, subject_ids, predicate, false)
+                    .await?
             }
             (TargetEntities::AnyPropositions, predicate, TargetEntities::IDs(object_ids)) => {
-                let mut matched_propositions: HashSet<EntityID> = HashSet::new();
-                let mut matched_subjects: HashSet<EntityID> = HashSet::new();
-                let mut matched_objects: HashSet<EntityID> = HashSet::new();
-                let mut matched_predicates: HashSet<String> = HashSet::new();
-                for object_id in &object_ids {
-                    let ids = self
-                        .propositions
-                        .query_ids(
-                            Filter::Field((
-                                "object".to_string(),
-                                RangeQuery::Eq(Fv::Text(object_id.to_string())),
-                            )),
-                            None,
-                        )
-                        .await
-                        .map_err(|e| {
-                            KipError::Execution(format!("Failed to query propositions: {:?}", e))
-                        })?;
-
-                    for id in ids {
-                        let rt = self
-                            .try_get_proposition_with(&ctx.cache, id, |proposition| {
-                                if matches!(proposition.subject, EntityID::Concept(_)) {
-                                    return Ok(None);
-                                }
-
-                                match &predicate {
-                                    PredTerm::Literal(pred) => {
-                                        if proposition.predicates.contains(pred) {
-                                            return Ok(Some((
-                                                proposition.subject.clone(),
-                                                proposition.object.clone(),
-                                                vec![pred.clone()],
-                                            )));
-                                        }
-                                    }
-                                    PredTerm::Variable(_) => {
-                                        return Ok(Some((
-                                            proposition.subject.clone(),
-                                            proposition.object.clone(),
-                                            proposition.predicates.iter().cloned().collect(),
-                                        )));
-                                    }
-                                    PredTerm::Alternative(preds) => {
-                                        let preds = proposition
-                                            .predicates
-                                            .iter()
-                                            .filter(|p| preds.contains(p))
-                                            .cloned()
-                                            .collect::<Vec<_>>();
-                                        if !preds.is_empty() {
-                                            return Ok(Some((
-                                                proposition.subject.clone(),
-                                                proposition.object.clone(),
-                                                preds,
-                                            )));
-                                        }
-                                    }
-                                    _ => {}
-                                }
-                                Ok(None)
-                            })
-                            .await?;
-
-                        if let Some((subj, obj, preds)) = rt {
-                            for pred in &preds {
-                                matched_propositions
-                                    .insert(EntityID::Proposition(id, pred.clone()));
-                            }
-
-                            matched_subjects.insert(subj);
-                            matched_objects.insert(obj);
-                            matched_predicates.extend(preds);
-                        }
-                    }
-                }
-
-                // 将匹配的结果插入到上下文中
-                if let Some(var) = subject_var {
-                    ctx.entities.insert(var, matched_subjects);
-                }
-                if let Some(var) = predicate_var {
-                    ctx.predicates.insert(var, matched_predicates);
-                }
-                if let Some(var) = object_var {
-                    ctx.entities.insert(var, matched_objects);
-                }
-                Ok(matched_propositions.into_iter().collect())
+                self.handle_any_to_object_ids_matching(ctx, object_ids, predicate, true)
+                    .await?
             }
             (TargetEntities::Any(_), predicate, TargetEntities::IDs(object_ids)) => {
-                let mut matched_propositions: HashSet<EntityID> = HashSet::new();
-                let mut matched_subjects: HashSet<EntityID> = HashSet::new();
-                let mut matched_objects: HashSet<EntityID> = HashSet::new();
-                let mut matched_predicates: HashSet<String> = HashSet::new();
-                for object_id in &object_ids {
-                    let ids = self
-                        .propositions
-                        .query_ids(
-                            Filter::Field((
-                                "object".to_string(),
-                                RangeQuery::Eq(Fv::Text(object_id.to_string())),
-                            )),
-                            None,
-                        )
-                        .await
-                        .map_err(|e| {
-                            KipError::Execution(format!("Failed to query propositions: {:?}", e))
-                        })?;
+                self.handle_any_to_object_ids_matching(ctx, object_ids, predicate, false)
+                    .await?
+            }
+            (_, predicate, _) => {
+                if matches!(&predicate, PredTerm::Variable(_)) {
+                    return Ok(TargetEntities::AnyPropositions);
+                }
 
-                    for id in ids {
-                        let rt = self
-                            .try_get_proposition_with(&ctx.cache, id, |proposition| {
-                                match &predicate {
-                                    PredTerm::Literal(pred) => {
-                                        if proposition.predicates.contains(pred) {
-                                            return Ok(Some((
-                                                proposition.subject.clone(),
-                                                proposition.object.clone(),
-                                                vec![pred.clone()],
-                                            )));
-                                        }
-                                    }
-                                    PredTerm::Variable(_) => {
-                                        return Ok(Some((
-                                            proposition.subject.clone(),
-                                            proposition.object.clone(),
-                                            proposition.predicates.iter().cloned().collect(),
-                                        )));
-                                    }
-                                    PredTerm::Alternative(preds) => {
-                                        let preds = proposition
-                                            .predicates
-                                            .iter()
-                                            .filter(|p| preds.contains(p))
-                                            .cloned()
-                                            .collect::<Vec<_>>();
-                                        if !preds.is_empty() {
-                                            return Ok(Some((
-                                                proposition.subject.clone(),
-                                                proposition.object.clone(),
-                                                preds,
-                                            )));
-                                        }
-                                    }
-                                    _ => {}
-                                }
-                                Ok(None)
-                            })
-                            .await?;
+                self.handle_predicate_matching(ctx, predicate).await?
+            }
+        };
 
-                        if let Some((subj, obj, preds)) = rt {
-                            for pred in &preds {
-                                matched_propositions
-                                    .insert(EntityID::Proposition(id, pred.clone()));
-                            }
+        if let Some(var) = subject_var {
+            ctx.entities.insert(var, result.matched_subjects.clone());
+        }
+        if let Some(var) = predicate_var {
+            ctx.predicates
+                .insert(var, result.matched_predicates.clone());
+        }
+        if let Some(var) = object_var {
+            ctx.entities.insert(var, result.matched_objects.clone());
+        }
 
-                            matched_subjects.insert(subj);
-                            matched_objects.insert(obj);
-                            matched_predicates.extend(preds);
-                        }
+        Ok(TargetEntities::IDs(
+            result.matched_propositions.into_iter().collect(),
+        ))
+    }
+
+    // 处理多跳匹配
+    async fn handle_multi_hop_matching(
+        &self,
+        ctx: &QueryContext,
+        subjects: TargetEntities,
+        predicate: String,
+        min: u16,
+        max: Option<u16>,
+        objects: TargetEntities,
+    ) -> Result<PropositionsMatchResult, KipError> {
+        let mut result = PropositionsMatchResult::new();
+
+        if matches!(&subjects, TargetEntities::IDs(_)) {
+            let start_nodes = match subjects {
+                TargetEntities::IDs(ids) => ids,
+                _ => unreachable!(),
+            };
+
+            let max_hops = max.unwrap_or(10).min(10);
+            for start_node in start_nodes {
+                let paths = self
+                    .bfs_multi_hop(
+                        &ctx.cache,
+                        start_node.clone(),
+                        &predicate,
+                        min,
+                        max_hops,
+                        &objects,
+                        false,
+                    )
+                    .await?;
+
+                for path in paths {
+                    result.matched_subjects.insert(path.start);
+                    result.matched_objects.insert(path.end);
+                    result.matched_predicates.insert(predicate.clone());
+                    result.matched_propositions.extend(path.propositions);
+                }
+            }
+        } else {
+            let start_nodes = match objects {
+                TargetEntities::IDs(ids) => ids,
+                _ => {
+                    return Err(KipError::InvalidCommand(
+                        "The subject or object cannot both be variables in multi-hop matching"
+                            .to_string(),
+                    ));
+                }
+            };
+
+            let max_hops = max.unwrap_or(10).min(10);
+            for start_node in start_nodes {
+                let paths = self
+                    .bfs_multi_hop(
+                        &ctx.cache,
+                        start_node.clone(),
+                        &predicate,
+                        min,
+                        max_hops,
+                        &subjects,
+                        true,
+                    )
+                    .await?;
+
+                for path in paths {
+                    result.matched_subjects.insert(path.end);
+                    result.matched_objects.insert(path.start);
+                    result.matched_predicates.insert(predicate.clone());
+                    result.matched_propositions.extend(path.propositions);
+                }
+            }
+        }
+
+        Ok(result)
+    }
+
+    // 处理主体和客体都是具体ID的匹配
+    async fn handle_subject_object_ids_matching(
+        &self,
+        ctx: &QueryContext,
+        subject_ids: Vec<EntityID>,
+        object_ids: Vec<EntityID>,
+        predicate: PredTerm,
+    ) -> Result<PropositionsMatchResult, KipError> {
+        let mut result = PropositionsMatchResult::new();
+
+        for subject_id in &subject_ids {
+            for object_id in &object_ids {
+                let virtual_name = BTree::virtual_field_name(&["subject", "object"]);
+                let virtual_val = Document::virtual_field_value(&[
+                    Some(&Fv::Text(subject_id.to_string())),
+                    Some(&Fv::Text(object_id.to_string())),
+                ])
+                .unwrap();
+
+                let ids = self
+                    .propositions
+                    .query_ids(
+                        Filter::Field((virtual_name, RangeQuery::Eq(virtual_val))),
+                        None,
+                    )
+                    .await
+                    .map_err(|e| {
+                        KipError::Execution(format!("Failed to query propositions: {:?}", e))
+                    })?;
+
+                for id in ids {
+                    if let Some((subj, preds, obj)) = self
+                        .try_get_proposition_with(&ctx.cache, id, |proposition| {
+                            self.match_predicate_against_proposition(proposition, &predicate)
+                        })
+                        .await?
+                    {
+                        result.add_match(subj, obj, preds, id);
                     }
                 }
-
-                // 将匹配的结果插入到上下文中
-                if let Some(var) = subject_var {
-                    ctx.entities.insert(var, matched_subjects);
-                }
-                if let Some(var) = predicate_var {
-                    ctx.predicates.insert(var, matched_predicates);
-                }
-                if let Some(var) = object_var {
-                    ctx.entities.insert(var, matched_objects);
-                }
-
-                Ok(matched_propositions.into_iter().collect())
             }
-            (subjects, predicate, objects) => {
-                unimplemented!("match_propositions is not fully implemented yet");
+        }
+
+        Ok(result)
+    }
+
+    // 处理主体ID和任意对象的匹配
+    async fn handle_subject_ids_any_matching(
+        &self,
+        ctx: &QueryContext,
+        subject_ids: Vec<EntityID>,
+        predicate: PredTerm,
+        any_propositions: bool,
+    ) -> Result<PropositionsMatchResult, KipError> {
+        let mut result = PropositionsMatchResult::new();
+
+        for subject_id in &subject_ids {
+            let ids = self
+                .propositions
+                .query_ids(
+                    Filter::Field((
+                        "subject".to_string(),
+                        RangeQuery::Eq(Fv::Text(subject_id.to_string())),
+                    )),
+                    None,
+                )
+                .await
+                .map_err(|e| {
+                    KipError::Execution(format!("Failed to query propositions: {:?}", e))
+                })?;
+
+            for id in ids {
+                if let Some((subj, preds, obj)) = self
+                    .try_get_proposition_with(&ctx.cache, id, |proposition| {
+                        if any_propositions && matches!(proposition.object, EntityID::Concept(_)) {
+                            return Ok(None);
+                        }
+                        self.match_predicate_against_proposition(proposition, &predicate)
+                    })
+                    .await?
+                {
+                    result.add_match(subj, obj, preds, id);
+                }
             }
+        }
+
+        Ok(result)
+    }
+
+    // 处理任意主体和对象ID的匹配
+    async fn handle_any_to_object_ids_matching(
+        &self,
+        ctx: &QueryContext,
+        object_ids: Vec<EntityID>,
+        predicate: PredTerm,
+        any_propositions: bool,
+    ) -> Result<PropositionsMatchResult, KipError> {
+        let mut result = PropositionsMatchResult::new();
+
+        for object_id in &object_ids {
+            let ids = self
+                .propositions
+                .query_ids(
+                    Filter::Field((
+                        "object".to_string(),
+                        RangeQuery::Eq(Fv::Text(object_id.to_string())),
+                    )),
+                    None,
+                )
+                .await
+                .map_err(|e| {
+                    KipError::Execution(format!("Failed to query propositions: {:?}", e))
+                })?;
+
+            for id in ids {
+                if let Some((subj, preds, obj)) = self
+                    .try_get_proposition_with(&ctx.cache, id, |proposition| {
+                        if any_propositions && matches!(proposition.subject, EntityID::Concept(_)) {
+                            return Ok(None);
+                        }
+                        self.match_predicate_against_proposition(proposition, &predicate)
+                    })
+                    .await?
+                {
+                    result.add_match(subj, obj, preds, id);
+                }
+            }
+        }
+
+        Ok(result)
+    }
+
+    // 处理谓词匹配
+    async fn handle_predicate_matching(
+        &self,
+        ctx: &QueryContext,
+        predicate: PredTerm,
+    ) -> Result<PropositionsMatchResult, KipError> {
+        let mut result = PropositionsMatchResult::new();
+        let predicates = match &predicate {
+            PredTerm::Literal(pred) => vec![pred.clone()],
+            PredTerm::Alternative(preds) => preds.clone(),
+            _ => {
+                return Err(KipError::InvalidCommand(format!(
+                    "Predicate must be either Literal or Alternative, got: {predicate:?}"
+                )));
+            }
+        };
+
+        let ids = self
+            .propositions
+            .query_ids(
+                Filter::Field((
+                    "predicates".to_string(),
+                    RangeQuery::Or(
+                        predicates
+                            .into_iter()
+                            .map(|v| Box::new(RangeQuery::Eq(v.into())))
+                            .collect(),
+                    ),
+                )),
+                None,
+            )
+            .await
+            .map_err(|e| KipError::Execution(format!("Failed to query propositions: {:?}", e)))?;
+
+        for id in ids {
+            if let Some((subj, preds, obj)) = self
+                .try_get_proposition_with(&ctx.cache, id, |proposition| {
+                    self.match_predicate_against_proposition(proposition, &predicate)
+                })
+                .await?
+            {
+                result.add_match(subj, obj, preds, id);
+            }
+        }
+
+        Ok(result)
+    }
+
+    // 处理谓词匹配逻辑
+    fn match_predicate_against_proposition(
+        &self,
+        proposition: &Proposition,
+        predicate: &PredTerm,
+    ) -> Result<Option<(EntityID, Vec<String>, EntityID)>, KipError> {
+        match predicate {
+            PredTerm::Literal(pred) => {
+                if proposition.predicates.contains(pred) {
+                    Ok(Some((
+                        proposition.subject.clone(),
+                        vec![pred.clone()],
+                        proposition.object.clone(),
+                    )))
+                } else {
+                    Ok(None)
+                }
+            }
+            PredTerm::Variable(_) => Ok(Some((
+                proposition.subject.clone(),
+                proposition.predicates.iter().cloned().collect(),
+                proposition.object.clone(),
+            ))),
+            PredTerm::Alternative(preds) => {
+                let matched_preds = proposition
+                    .predicates
+                    .iter()
+                    .filter(|p| preds.contains(p))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if !matched_preds.is_empty() {
+                    Ok(Some((
+                        proposition.subject.clone(),
+                        matched_preds,
+                        proposition.object.clone(),
+                    )))
+                } else {
+                    Ok(None)
+                }
+            }
+            _ => Err(KipError::InvalidCommand(format!(
+                "Predicate must be either Literal or Variable, got: {predicate:?}"
+            ))),
         }
     }
 
     // BFS 路径查找实现
+    #[allow(clippy::too_many_arguments)]
     async fn bfs_multi_hop(
         &self,
         cache: &QueryCache,
@@ -950,7 +787,8 @@ impl CognitiveNexus {
         predicate: &str,
         min_hops: u16,
         max_hops: u16,
-        target_nodes: Option<&HashSet<EntityID>>,
+        targets: &TargetEntities,
+        reverse: bool,
     ) -> Result<Vec<GraphPath>, KipError> {
         use std::collections::VecDeque;
 
@@ -977,22 +815,31 @@ impl CognitiveNexus {
             // 如果达到最大跳数，停止扩展此路径
             if current_path.hops >= max_hops {
                 if current_path.hops >= min_hops {
-                    if let Some(targets) = target_nodes {
-                        if targets.contains(&current_path.end) {
+                    match targets {
+                        TargetEntities::IDs(ids) => {
+                            if ids.contains(&current_path.end) {
+                                results.push(current_path);
+                            }
+                        }
+                        TargetEntities::AnyPropositions => {
+                            if matches!(current_path.end, EntityID::Proposition(_, _)) {
+                                results.push(current_path);
+                            }
+                        }
+                        TargetEntities::Any(_) => {
                             results.push(current_path);
                         }
-                    } else {
-                        results.push(current_path);
                     }
                 }
                 continue;
             }
+
             // 查找从当前节点出发的所有指定谓词的边
-            let outgoing_props = self
-                .find_outgoing_propositions(cache, &current_path.end, predicate)
+            let props = self
+                .find_propositions(cache, &current_path.end, predicate, reverse)
                 .await?;
 
-            for (prop_id, target_node) in outgoing_props {
+            for (prop_id, target_node) in props {
                 let mut new_path = current_path.clone();
                 new_path.end = target_node;
                 new_path.propositions.push(prop_id);
@@ -1000,12 +847,20 @@ impl CognitiveNexus {
 
                 // 如果满足最小跳数要求，检查是否为有效结果
                 if new_path.hops >= min_hops {
-                    if let Some(targets) = target_nodes {
-                        if targets.contains(&new_path.end) {
+                    match targets {
+                        TargetEntities::IDs(ids) => {
+                            if ids.contains(&new_path.end) {
+                                results.push(new_path.clone());
+                            }
+                        }
+                        TargetEntities::AnyPropositions => {
+                            if matches!(new_path.end, EntityID::Proposition(_, _)) {
+                                results.push(new_path.clone());
+                            }
+                        }
+                        TargetEntities::Any(_) => {
                             results.push(new_path.clone());
                         }
-                    } else {
-                        results.push(new_path.clone());
                     }
                 }
 
@@ -1019,25 +874,24 @@ impl CognitiveNexus {
         Ok(results)
     }
 
-    async fn find_outgoing_propositions(
+    async fn find_propositions(
         &self,
         cache: &QueryCache,
         node: &EntityID,
         predicate: &str,
+        reverse: bool,
     ) -> Result<Vec<(EntityID, EntityID)>, KipError> {
         let ids = self
             .propositions
             .query_ids(
-                Filter::And(vec![
-                    Box::new(Filter::Field((
-                        "subject".to_string(),
-                        RangeQuery::Eq(Fv::Text(node.to_string())),
-                    ))),
-                    Box::new(Filter::Field((
-                        "predicates".to_string(),
-                        RangeQuery::Eq(Fv::Text(predicate.to_string())),
-                    ))),
-                ]),
+                Filter::Field((
+                    if reverse {
+                        "object".to_string()
+                    } else {
+                        "subject".to_string()
+                    },
+                    RangeQuery::Eq(Fv::Text(node.to_string())),
+                )),
                 None,
             )
             .await
@@ -1047,10 +901,18 @@ impl CognitiveNexus {
         for id in ids {
             let rt = self
                 .try_get_proposition_with(cache, id, |proposition| {
-                    Ok(Some((
-                        EntityID::Proposition(id, predicate.to_string()),
-                        proposition.object.clone(),
-                    )))
+                    if proposition.predicates.contains(predicate) {
+                        Ok(Some((
+                            EntityID::Proposition(id, predicate.to_string()),
+                            if reverse {
+                                proposition.subject.clone()
+                            } else {
+                                proposition.object.clone()
+                            },
+                        )))
+                    } else {
+                        Ok(None)
+                    }
                 })
                 .await?;
 
@@ -1131,7 +993,7 @@ impl CognitiveNexus {
         match target {
             TargetTerm::Variable(var) => {
                 if let Some(ids) = ctx.entities.get(&var) {
-                    Ok(TargetEntities::IDs(ids.into_iter().cloned().collect()))
+                    Ok(TargetEntities::IDs(ids.iter().cloned().collect()))
                 } else {
                     Ok(TargetEntities::Any(var))
                 }
@@ -1164,10 +1026,10 @@ impl CognitiveNexus {
                         object,
                     } => {
                         // 递归查询命题
-                        let ids =
+                        let result =
                             Box::pin(self.match_propositions(ctx, subject, predicate, object))
                                 .await?;
-                        Ok(TargetEntities::IDs(ids))
+                        Ok(result)
                     }
                 }
             }
@@ -1299,7 +1161,7 @@ impl CognitiveNexus {
                 EntityID::Proposition(id, predicate) => {
                     let rt = self
                         .try_get_proposition_with(cache, *id, |prop| {
-                            Self::extract_proposition_field_value(prop, &predicate, &[])
+                            Self::extract_proposition_field_value(prop, predicate, &[])
                         })
                         .await?;
                     result.push(rt);
@@ -1383,7 +1245,7 @@ impl CognitiveNexus {
         F: FnOnce(&Concept) -> Result<R, KipError>,
     {
         if let Some(concept) = cache.concepts.read().get(&id) {
-            return Ok(f(concept)?);
+            return f(concept);
         }
         let concept: Concept = self
             .concepts
@@ -1405,7 +1267,7 @@ impl CognitiveNexus {
         F: FnOnce(&Proposition) -> Result<R, KipError>,
     {
         if let Some(proposition) = cache.propositions.read().get(&id) {
-            return Ok(f(proposition)?);
+            return f(proposition);
         }
         let proposition: Proposition = self
             .propositions
@@ -1473,7 +1335,7 @@ impl CognitiveNexus {
         let prop = proposition
             .properties
             .get(predicate)
-            .map(|v| Cow::Borrowed(v))
+            .map(Cow::Borrowed)
             .unwrap_or_else(|| {
                 Cow::Owned(Properties {
                     attributes: Map::new(),
@@ -1781,11 +1643,11 @@ impl CognitiveNexus {
 
         let attributes = concept_block
             .set_attributes
-            .map(|val| val.into_iter().map(|(k, v)| (k, v.into())).collect())
+            .map(|val| val.into_iter().collect())
             .unwrap_or_default();
         let metadata = concept_block
             .metadata
-            .map(|val| val.into_iter().map(|(k, v)| (k, v.into())).collect())
+            .map(|val| val.into_iter().collect())
             .unwrap_or_else(|| default_metadata.clone());
 
         let entity_id = self
@@ -1827,11 +1689,11 @@ impl CognitiveNexus {
 
         let attributes = proposition_block
             .set_attributes
-            .map(|val| val.into_iter().map(|(k, v)| (k, v.into())).collect())
+            .map(|val| val.into_iter().collect())
             .unwrap_or_default();
         let metadata = proposition_block
             .metadata
-            .map(|val| val.into_iter().map(|(k, v)| (k, v.into())).collect())
+            .map(|val| val.into_iter().collect())
             .unwrap_or_else(|| default_metadata.clone());
 
         let entity_id = self
@@ -1863,7 +1725,7 @@ impl CognitiveNexus {
         };
         let metadata = set_prop
             .metadata
-            .map(|val| val.into_iter().map(|(k, v)| (k, v.into())).collect())
+            .map(|val| val.into_iter().collect())
             .unwrap_or_else(|| default_metadata.clone());
 
         let entity_id = self
@@ -1888,32 +1750,28 @@ impl CognitiveNexus {
 
         match delete_statement {
             DeleteStatement::DeleteAttributes {
-                attributes,
+                attributes: _,
                 target: _,
                 where_clauses: _,
             } => {
                 // 注意：当前实现需要WHERE子句的KQL查询支持
                 // 这里提供一个简化版本，实际需要实现KQL查询来获取目标实体
-                return Err(KipError::NotImplemented(
+                Err(KipError::NotImplemented(
                     "DELETE ATTRIBUTES requires KQL query support".to_string(),
-                ));
+                ))
             }
             DeleteStatement::DeletePropositions {
                 target: _,
                 where_clauses: _,
-            } => {
-                return Err(KipError::NotImplemented(
-                    "DELETE PROPOSITIONS requires KQL query support".to_string(),
-                ));
-            }
+            } => Err(KipError::NotImplemented(
+                "DELETE PROPOSITIONS requires KQL query support".to_string(),
+            )),
             DeleteStatement::DeleteConcept {
                 target: _,
                 where_clauses: _,
-            } => {
-                return Err(KipError::NotImplemented(
-                    "DELETE CONCEPT requires KQL query support".to_string(),
-                ));
-            }
+            } => Err(KipError::NotImplemented(
+                "DELETE CONCEPT requires KQL query support".to_string(),
+            )),
         }
     }
 
