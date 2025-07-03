@@ -129,7 +129,7 @@ pub fn parse_target_term(input: &str) -> IResult<&str, TargetTerm> {
 }
 
 fn parse_predicate_path(input: &str) -> IResult<&str, PredTerm> {
-    let (input, first) = parse_quantified_predicate(input)?;
+    let (input, first) = parse_multi_hop_predicate(input)?;
 
     match first {
         PredTerm::Literal(predicate) if input.contains('|') => map(
@@ -149,11 +149,11 @@ fn parse_predicate_path(input: &str) -> IResult<&str, PredTerm> {
     }
 }
 
-fn parse_quantified_predicate(input: &str) -> IResult<&str, PredTerm> {
+fn parse_multi_hop_predicate(input: &str) -> IResult<&str, PredTerm> {
     alt((
         map(
             (quoted_string, parse_predicate_quantifier),
-            |(predicate, (min, max))| PredTerm::Quantified {
+            |(predicate, (min, max))| PredTerm::MultiHop {
                 predicate,
                 min,
                 max,
@@ -179,7 +179,7 @@ fn parse_predicate_quantifier(input: &str) -> IResult<&str, (u16, Option<u16>)> 
                     Ok((min, Some(max)))
                 } else {
                     Err(format!(
-                        "invalid quantifier: min {min} cannot be greater than max {max}"
+                        "invalid multi-hop predicate: min {min} cannot be greater than max {max}"
                     ))
                 }
             },
@@ -733,7 +733,7 @@ mod tests {
                     assert_eq!(subject, &TargetTerm::Variable("a".to_string()));
                     assert_eq!(object, &TargetTerm::Variable("b".to_string()));
                     match &predicate {
-                        PredTerm::Quantified {
+                        PredTerm::MultiHop {
                             predicate,
                             min,
                             max,

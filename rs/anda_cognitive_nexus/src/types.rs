@@ -167,7 +167,9 @@ impl From<EntityID> for EntityPK {
 #[derive(Clone, Debug, Default)]
 pub struct QueryContext {
     // 变量名到实体ID的映射
-    pub bindings: HashMap<String, HashSet<EntityID>>,
+    pub entities: HashMap<String, HashSet<EntityID>>,
+    // 变量名到谓词的映射
+    pub predicates: HashMap<String, HashSet<String>>,
     pub cache: Arc<QueryCache>,
 }
 
@@ -181,7 +183,15 @@ pub struct QueryCache {
 pub enum TargetEntities {
     Any(String),
     AnyPropositions,
-    IDs(HashSet<EntityID>),
+    IDs(Vec<EntityID>),
+}
+
+#[derive(Clone, Debug)]
+pub struct GraphPath {
+    pub start: EntityID,
+    pub end: EntityID,
+    pub propositions: Vec<EntityID>,
+    pub hops: u16,
 }
 
 pub trait Pipe<T> {

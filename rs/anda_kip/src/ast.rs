@@ -312,8 +312,8 @@ pub enum PredTerm {
     Literal(String),
     /// A list of literal predicates (e.g., `"treats" | "causes"`)
     Alternative(Vec<String>),
-    /// A quantified predicate (e.g., `"is_subclass_of"{0,5}`)
-    Quantified {
+    /// A multi-hop predicate (e.g., `"is_subclass_of"{0,5}`)
+    MultiHop {
         predicate: String,
         min: u16,
         max: Option<u16>,
