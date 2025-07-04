@@ -1741,38 +1741,352 @@ impl CognitiveNexus {
         delete_statement: DeleteStatement,
         dry_run: bool,
     ) -> Result<Json, KipError> {
-        if dry_run {
-            return Ok(Json::Object(serde_json::Map::from_iter([
-                ("operation".to_string(), Json::String("delete".to_string())),
-                ("dry_run".to_string(), Json::Bool(true)),
-            ])));
-        }
-
         match delete_statement {
             DeleteStatement::DeleteAttributes {
-                attributes: _,
-                target: _,
-                where_clauses: _,
+                attributes,
+                target,
+                where_clauses,
             } => {
-                // 注意：当前实现需要WHERE子句的KQL查询支持
-                // 这里提供一个简化版本，实际需要实现KQL查询来获取目标实体
-                Err(KipError::NotImplemented(
-                    "DELETE ATTRIBUTES requires KQL query support".to_string(),
-                ))
+                self.execute_delete_attributes(attributes, target, where_clauses, dry_run)
+                    .await
+            }
+            DeleteStatement::DeleteMetadata {
+                keys,
+                target,
+                where_clauses,
+            } => {
+                self.execute_delete_metadata(keys, target, where_clauses, dry_run)
+                    .await
             }
             DeleteStatement::DeletePropositions {
-                target: _,
-                where_clauses: _,
-            } => Err(KipError::NotImplemented(
-                "DELETE PROPOSITIONS requires KQL query support".to_string(),
-            )),
+                target,
+                where_clauses,
+            } => {
+                self.execute_delete_propositions(target, where_clauses, dry_run)
+                    .await
+            }
             DeleteStatement::DeleteConcept {
-                target: _,
-                where_clauses: _,
-            } => Err(KipError::NotImplemented(
-                "DELETE CONCEPT requires KQL query support".to_string(),
-            )),
+                target,
+                where_clauses,
+            } => {
+                self.execute_delete_concepts(target, where_clauses, dry_run)
+                    .await
+            }
         }
+    }
+
+    async fn execute_delete_attributes(
+        &self,
+        attributes: Vec<String>,
+        target: String,
+        where_clauses: Vec<WhereClause>,
+        dry_run: bool,
+    ) -> Result<Json, KipError> {
+        if dry_run {
+            return Ok(json!({
+                "updated_concepts": 0,
+                "updated_propositions": 0,
+            }));
+        }
+
+        let mut ctx = QueryContext::default();
+        for clause in where_clauses {
+            self.execute_where_clause(&mut ctx, clause).await?;
+        }
+
+        let target_entities = ctx.entities.get(&target).cloned().ok_or_else(|| {
+            KipError::InvalidCommand(format!("Target term '{}' not found in context", target))
+        })?;
+        let mut updated_concepts: u64 = 0;
+        let mut updated_propositions: u64 = 0;
+        for entity_id in target_entities {
+            match entity_id {
+                EntityID::Concept(id) => {
+                    if let Ok(mut concept) = self
+                        .try_get_concept_with(&ctx.cache, id, |concept| Ok(concept.clone()))
+                        .await
+                    {
+                        let length = concept.attributes.len();
+                        for attr in &attributes {
+                            concept.attributes.remove(attr);
+                        }
+                        if concept.attributes.len() < length
+                            && self
+                                .concepts
+                                .update(
+                                    id,
+                                    BTreeMap::from([(
+                                        "attributes".to_string(),
+                                        concept.attributes.into(),
+                                    )]),
+                                )
+                                .await
+                                .is_ok()
+                        {
+                            updated_concepts += 1;
+                        }
+                    }
+                }
+                EntityID::Proposition(id, predicate) => {
+                    if let Ok(mut proposition) = self
+                        .try_get_proposition_with(&ctx.cache, id, |prop| Ok(prop.clone()))
+                        .await
+                    {
+                        if let Some(prop) = proposition.properties.get_mut(&predicate) {
+                            let length = prop.attributes.len();
+                            for attr in &attributes {
+                                prop.attributes.remove(attr);
+                            }
+
+                            if prop.attributes.len() < length
+                                && self
+                                    .propositions
+                                    .update(
+                                        id,
+                                        BTreeMap::from([(
+                                            "properties".to_string(),
+                                            proposition.properties.into(),
+                                        )]),
+                                    )
+                                    .await
+                                    .is_ok()
+                            {
+                                updated_propositions += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(json!({
+            "updated_concepts": updated_concepts,
+            "updated_propositions": updated_propositions,
+        }))
+    }
+
+    async fn execute_delete_metadata(
+        &self,
+        keys: Vec<String>,
+        target: String,
+        where_clauses: Vec<WhereClause>,
+        dry_run: bool,
+    ) -> Result<Json, KipError> {
+        if dry_run {
+            return Ok(json!({
+                "updated_concepts": 0,
+                "updated_propositions": 0,
+            }));
+        }
+
+        let mut ctx = QueryContext::default();
+        for clause in where_clauses {
+            self.execute_where_clause(&mut ctx, clause).await?;
+        }
+
+        let target_entities = ctx.entities.get(&target).cloned().ok_or_else(|| {
+            KipError::InvalidCommand(format!("Target term '{}' not found in context", target))
+        })?;
+        let mut updated_concepts: u64 = 0;
+        let mut updated_propositions: u64 = 0;
+        for entity_id in target_entities {
+            match entity_id {
+                EntityID::Concept(id) => {
+                    if let Ok(mut concept) = self
+                        .try_get_concept_with(&ctx.cache, id, |concept| Ok(concept.clone()))
+                        .await
+                    {
+                        let length = concept.metadata.len();
+                        for name in &keys {
+                            concept.metadata.remove(name);
+                        }
+                        if concept.attributes.len() < length
+                            && self
+                                .concepts
+                                .update(
+                                    id,
+                                    BTreeMap::from([(
+                                        "metadata".to_string(),
+                                        concept.metadata.into(),
+                                    )]),
+                                )
+                                .await
+                                .is_ok()
+                        {
+                            updated_concepts += 1;
+                        }
+                    }
+                }
+                EntityID::Proposition(id, predicate) => {
+                    if let Ok(mut proposition) = self
+                        .try_get_proposition_with(&ctx.cache, id, |prop| Ok(prop.clone()))
+                        .await
+                    {
+                        if let Some(prop) = proposition.properties.get_mut(&predicate) {
+                            let length = prop.metadata.len();
+                            for name in &keys {
+                                prop.metadata.remove(name);
+                            }
+
+                            if prop.metadata.len() < length
+                                && self
+                                    .propositions
+                                    .update(
+                                        id,
+                                        BTreeMap::from([(
+                                            "properties".to_string(),
+                                            proposition.properties.into(),
+                                        )]),
+                                    )
+                                    .await
+                                    .is_ok()
+                            {
+                                updated_propositions += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(json!({
+            "updated_concepts": updated_concepts,
+            "updated_propositions": updated_propositions,
+        }))
+    }
+
+    async fn execute_delete_propositions(
+        &self,
+        target: String,
+        where_clauses: Vec<WhereClause>,
+        dry_run: bool,
+    ) -> Result<Json, KipError> {
+        if dry_run {
+            return Ok(json!({
+                "deleted_propositions": 0
+            }));
+        }
+
+        let mut ctx = QueryContext::default();
+        for clause in where_clauses {
+            self.execute_where_clause(&mut ctx, clause).await?;
+        }
+
+        let target_entities = ctx.entities.get(&target).cloned().ok_or_else(|| {
+            KipError::InvalidCommand(format!("Target term '{}' not found in context", target))
+        })?;
+
+        let mut deleted_propositions: u64 = 0;
+        for entity_id in target_entities {
+            match entity_id {
+                EntityID::Concept(_) => {
+                    // ignore
+                }
+                EntityID::Proposition(id, predicate) => {
+                    if let Ok(mut proposition) = self
+                        .try_get_proposition_with(&ctx.cache, id, |prop| Ok(prop.clone()))
+                        .await
+                    {
+                        // Remove specified predicates
+                        proposition.predicates.remove(&predicate);
+                        proposition.properties.remove(&predicate);
+
+                        // If no predicates left, delete the proposition
+                        if proposition.predicates.is_empty() {
+                            let _ = self.propositions.remove(id).await;
+                        } else {
+                            // Otherwise, update the proposition with remaining predicates
+                            if self
+                                .propositions
+                                .update(
+                                    id,
+                                    BTreeMap::from([
+                                        ("predicates".to_string(), proposition.predicates.into()),
+                                        ("properties".to_string(), proposition.properties.into()),
+                                    ]),
+                                )
+                                .await
+                                .is_ok()
+                            {
+                                deleted_propositions += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(json!({
+            "deleted_propositions": deleted_propositions
+        }))
+    }
+
+    async fn execute_delete_concepts(
+        &self,
+        target: String,
+        where_clauses: Vec<WhereClause>,
+        dry_run: bool,
+    ) -> Result<Json, KipError> {
+        if dry_run {
+            return Ok(json!({
+                "deleted_propositions": 0,
+                "deleted_concepts": 0
+            }));
+        }
+        let mut ctx = QueryContext::default();
+        for clause in where_clauses {
+            self.execute_where_clause(&mut ctx, clause).await?;
+        }
+
+        let target_entities = ctx.entities.get(&target).cloned().ok_or_else(|| {
+            KipError::InvalidCommand(format!("Target term '{}' not found in context", target))
+        })?;
+        let mut deleted_propositions: u64 = 0;
+        let mut deleted_concepts: u64 = 0;
+        for entity_id in target_entities {
+            match &entity_id {
+                EntityID::Concept(id) => {
+                    let mut propositions_ids: BTreeSet<u64> = BTreeSet::new();
+                    let eid: Fv = entity_id.to_string().into();
+                    if let Ok(ids) = self
+                        .propositions
+                        .query_ids(
+                            Filter::Or(vec![
+                                Box::new(Filter::Field((
+                                    "subject".to_string(),
+                                    RangeQuery::Eq(eid.clone()),
+                                ))),
+                                Box::new(Filter::Field((
+                                    "object".to_string(),
+                                    RangeQuery::Eq(eid),
+                                ))),
+                            ]),
+                            None,
+                        )
+                        .await
+                    {
+                        propositions_ids.extend(ids);
+                    }
+
+                    deleted_propositions += propositions_ids.len() as u64;
+
+                    for id in propositions_ids {
+                        let _ = self.propositions.remove(id).await;
+                    }
+
+                    deleted_concepts += 1;
+                    let _ = self.concepts.remove(*id).await;
+                }
+                EntityID::Proposition(_, _) => {
+                    // ignore
+                }
+            }
+        }
+
+        Ok(json!({
+            "deleted_propositions": deleted_propositions,
+            "deleted_concepts": deleted_concepts
+        }))
     }
 
     async fn upsert_concept(
@@ -1962,207 +2276,6 @@ impl CognitiveNexus {
         }
 
         self.propositions.update(id, update_fields).await?;
-
-        Ok(())
-    }
-
-    async fn delete_attributes(
-        &self,
-        pks: Vec<EntityPK>,
-        attrs: Vec<String>,
-        cached_pks: &mut HashMap<EntityPK, EntityID>,
-    ) -> Result<(), DBError> {
-        for pk in pks {
-            let id = self.resolve_entity_id(&pk, cached_pks).await?;
-            match id {
-                EntityID::Concept(id) => {
-                    if let Ok(mut concept) = self.concepts.get_as::<Concept>(id).await {
-                        let length = concept.attributes.len();
-                        for attr in &attrs {
-                            concept.attributes.remove(attr);
-                        }
-                        if concept.attributes.len() < length {
-                            self.concepts
-                                .update(
-                                    id,
-                                    BTreeMap::from([(
-                                        "attributes".to_string(),
-                                        concept.attributes.into(),
-                                    )]),
-                                )
-                                .await?;
-                        }
-                    }
-                }
-
-                EntityID::Proposition(id, predicate) => {
-                    if let Ok(mut proposition) = self.propositions.get_as::<Proposition>(id).await {
-                        if let Some(prop) = proposition.properties.get_mut(&predicate) {
-                            let length = prop.attributes.len();
-                            for attr in &attrs {
-                                prop.attributes.remove(attr);
-                            }
-
-                            if prop.attributes.len() < length {
-                                self.propositions
-                                    .update(
-                                        id,
-                                        BTreeMap::from([(
-                                            "properties".to_string(),
-                                            proposition.properties.into(),
-                                        )]),
-                                    )
-                                    .await?;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    async fn delete_metadata(
-        &self,
-        pks: Vec<EntityPK>,
-        keys: Vec<String>,
-        cached_pks: &mut HashMap<EntityPK, EntityID>,
-    ) -> Result<(), DBError> {
-        for pk in pks {
-            let id = self.resolve_entity_id(&pk, cached_pks).await?;
-            match id {
-                EntityID::Concept(id) => {
-                    if let Ok(mut concept) = self.concepts.get_as::<Concept>(id).await {
-                        let length = concept.metadata.len();
-                        for key in &keys {
-                            concept.metadata.remove(key);
-                        }
-                        if concept.metadata.len() < length {
-                            self.concepts
-                                .update(
-                                    id,
-                                    BTreeMap::from([(
-                                        "metadata".to_string(),
-                                        concept.metadata.into(),
-                                    )]),
-                                )
-                                .await?;
-                        }
-                    }
-                }
-
-                EntityID::Proposition(id, predicate) => {
-                    if let Ok(mut proposition) = self.propositions.get_as::<Proposition>(id).await {
-                        if let Some(prop) = proposition.properties.get_mut(&predicate) {
-                            let length = prop.metadata.len();
-                            for key in &keys {
-                                prop.metadata.remove(key);
-                            }
-
-                            if prop.metadata.len() < length {
-                                self.propositions
-                                    .update(
-                                        id,
-                                        BTreeMap::from([(
-                                            "properties".to_string(),
-                                            proposition.properties.into(),
-                                        )]),
-                                    )
-                                    .await?;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    async fn delete_propositions(
-        &self,
-        pks: Vec<PropositionPK>,
-        cached_pks: &mut HashMap<EntityPK, EntityID>,
-    ) -> Result<(), DBError> {
-        // id -> predicates
-        let mut proposition_ids: HashMap<u64, BTreeSet<String>> = HashMap::new();
-        for pk in pks {
-            if let Ok(EntityID::Proposition(id, pred)) = self
-                .resolve_entity_id(&EntityPK::Proposition(pk), cached_pks)
-                .await
-            {
-                proposition_ids.entry(id).or_default().insert(pred.clone());
-            }
-        }
-
-        for (id, predicates) in proposition_ids {
-            if let Ok(mut proposition) = self.propositions.get_as::<Proposition>(id).await {
-                // Remove specified predicates
-                for pred in predicates {
-                    proposition.predicates.remove(&pred);
-                    proposition.properties.remove(&pred);
-                }
-
-                // If no predicates left, delete the proposition
-                if proposition.predicates.is_empty() {
-                    let _ = self.propositions.remove(id).await;
-                } else {
-                    // Otherwise, update the proposition with remaining predicates
-                    self.propositions
-                        .update(
-                            id,
-                            BTreeMap::from([
-                                ("predicates".to_string(), proposition.predicates.into()),
-                                ("properties".to_string(), proposition.properties.into()),
-                            ]),
-                        )
-                        .await?;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    async fn delete_concepts(
-        &self,
-        pks: Vec<ConceptPK>,
-        cached_pks: &mut HashMap<EntityPK, EntityID>,
-    ) -> Result<(), DBError> {
-        let mut concepts_ids: BTreeSet<u64> = BTreeSet::new();
-        let mut propositions_ids: BTreeSet<u64> = BTreeSet::new();
-        for pk in pks {
-            if let Ok(EntityID::Concept(id)) = self
-                .resolve_entity_id(&EntityPK::Concept(pk), cached_pks)
-                .await
-            {
-                concepts_ids.insert(id);
-            }
-        }
-
-        for id in &concepts_ids {
-            let eid: Fv = EntityID::Concept(*id).to_string().into();
-            let ids = self
-                .propositions
-                .query_ids(
-                    Filter::Or(vec![
-                        Box::new(Filter::Field((
-                            "subject".to_string(),
-                            RangeQuery::Eq(eid.clone()),
-                        ))),
-                        Box::new(Filter::Field(("object".to_string(), RangeQuery::Eq(eid)))),
-                    ]),
-                    None,
-                )
-                .await?;
-            propositions_ids.extend(ids);
-        }
-
-        for id in propositions_ids {
-            let _ = self.propositions.remove(id).await;
-        }
-
-        for id in concepts_ids {
-            let _ = self.concepts.remove(id).await;
-        }
 
         Ok(())
     }

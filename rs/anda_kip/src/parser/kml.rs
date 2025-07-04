@@ -121,6 +121,7 @@ fn parse_delete_statement(input: &str) -> IResult<&str, DeleteStatement> {
         ws(tag("DELETE ")),
         alt((
             parse_delete_attributes,
+            parse_delete_metadata,
             parse_delete_propositions,
             parse_delete_concept,
         )),
@@ -140,6 +141,25 @@ fn parse_delete_attributes(input: &str) -> IResult<&str, DeleteStatement> {
         ),
         |(attributes, target, where_clauses)| DeleteStatement::DeleteAttributes {
             attributes,
+            target,
+            where_clauses,
+        },
+    )
+    .parse(input)
+}
+
+fn parse_delete_metadata(input: &str) -> IResult<&str, DeleteStatement> {
+    map(
+        preceded(
+            ws(tag("METADATA")),
+            (
+                braced_block(separated_list1(ws(char(',')), quoted_string)),
+                preceded(ws(tag("FROM")), variable),
+                parse_where_block,
+            ),
+        ),
+        |(keys, target, where_clauses)| DeleteStatement::DeleteMetadata {
+            keys,
             target,
             where_clauses,
         },

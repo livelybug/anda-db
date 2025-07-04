@@ -604,6 +604,15 @@ pub enum DeleteStatement {
         /// WHERE clauses containing graph patterns and filters
         where_clauses: Vec<WhereClause>,
     },
+    /// Syntax: `DELETE METADATA { "key_name", ... } FROM ?target WHERE { ... }`
+    DeleteMetadata {
+        /// List of keys to delete
+        keys: Vec<String>,
+        /// The target node or link to delete attributes from
+        target: String,
+        /// WHERE clauses containing graph patterns and filters
+        where_clauses: Vec<WhereClause>,
+    },
     /// Delete propositions where conditions match
     /// Syntax: `DELETE PROPOSITIONS ?target_link WHERE { ... }`
     DeletePropositions {
