@@ -6,6 +6,7 @@ use std::{fmt::Debug, hash::Hash};
 
 pub use anda_db_btree::{BTreeConfig, BTreeMetadata, BTreeStats, RangeQuery};
 
+use super::from_virtual_field_name;
 use crate::{
     error::DBError,
     schema::{DocumentId, Fe, Ft, Fv},
@@ -59,7 +60,7 @@ where
     FV: Eq + Ord + Hash + Debug + Clone + Serialize + DeserializeOwned,
 {
     name: String,
-    virtual_field: Vec<String>,
+    fields: Vec<String>,
     index: BTreeIndex<u64, FV>,
     storage: Storage, // 与 Collection 共享同一个 Storage 实例
     metadata_version: RwLock<ObjectVersion>,
@@ -72,10 +73,6 @@ impl BTree {
 
     fn posting_path(name: &str, bucket: u32) -> String {
         format!("btree_indexes/{name}/p_{bucket}.cbor")
-    }
-
-    pub fn virtual_field_name(fields: &[&str]) -> String {
-        fields.join("-")
     }
 
     pub async fn new(field: Fe, storage: Storage, now_ms: u64) -> Result<Self, DBError> {
@@ -186,10 +183,10 @@ impl BTree {
 
     pub fn virtual_field(&self) -> &[String] {
         match self {
-            BTree::I64(btree) => &btree.virtual_field,
-            BTree::U64(btree) => &btree.virtual_field,
-            BTree::String(btree) => &btree.virtual_field,
-            BTree::Bytes(btree) => &btree.virtual_field,
+            BTree::I64(btree) => &btree.fields,
+            BTree::U64(btree) => &btree.fields,
+            BTree::String(btree) => &btree.fields,
+            BTree::Bytes(btree) => &btree.fields,
         }
     }
 
@@ -416,6 +413,35 @@ impl BTree {
         }
     }
 
+    pub fn keys(&self, skip: usize, limit: Option<usize>) -> Vec<Fv> {
+        match self {
+            BTree::I64(btree) => btree
+                .index
+                .keys(skip, limit)
+                .into_iter()
+                .map(Fv::I64)
+                .collect(),
+            BTree::U64(btree) => btree
+                .index
+                .keys(skip, limit)
+                .into_iter()
+                .map(Fv::U64)
+                .collect(),
+            BTree::String(btree) => btree
+                .index
+                .keys(skip, limit)
+                .into_iter()
+                .map(Fv::Text)
+                .collect(),
+            BTree::Bytes(btree) => btree
+                .index
+                .keys(skip, limit)
+                .into_iter()
+                .map(Fv::Bytes)
+                .collect(),
+        }
+    }
+
     pub async fn flush(&self, now_ms: u64) -> Result<bool, DBError> {
         match self {
             BTree::I64(btree) => btree.flush(now_ms).await,
@@ -431,12 +457,12 @@ where
     FV: Eq + Ord + Hash + Debug + Clone + Serialize + DeserializeOwned,
 {
     async fn new(
-        virtual_field: Vec<String>,
+        fields: Vec<String>,
         config: BTreeConfig,
         storage: Storage,
         now_ms: u64,
     ) -> Result<Self, DBError> {
-        let name = virtual_field.join("-");
+        let name = fields.join("-");
         let index = BTreeIndex::new(name.clone(), Some(config));
         let mut data = Vec::new();
         index
@@ -447,7 +473,7 @@ where
             .await?;
         Ok(InnerBTree {
             name,
-            virtual_field,
+            fields,
             index,
             storage,
             metadata_version: RwLock::new(ver),
@@ -455,7 +481,7 @@ where
     }
 
     async fn bootstrap(name: String, storage: Storage) -> Result<Self, DBError> {
-        let virtual_field: Vec<String> = name.split('-').map(String::from).collect();
+        let fields: Vec<String> = from_virtual_field_name(&name);
         let path = BTree::metadata_path(&name);
         let (metadata, ver) = storage.fetch_bytes(&path).await?;
         let index = BTreeIndex::<DocumentId, FV>::load_all(&metadata[..], async |id: u32| {
@@ -470,7 +496,7 @@ where
 
         Ok(Self {
             name,
-            virtual_field,
+            fields,
             index,
             storage,
             metadata_version: RwLock::new(ver),

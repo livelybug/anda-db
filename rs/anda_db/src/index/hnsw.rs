@@ -7,7 +7,7 @@ pub use anda_db_hnsw::{HnswConfig, HnswMetadata, HnswStats};
 
 use crate::{
     error::DBError,
-    schema::{Fe, SegmentId, Vector},
+    schema::{Fe, Vector},
     storage::{ObjectVersion, PutMode, Storage},
 };
 
@@ -171,12 +171,12 @@ impl Hnsw {
         self.index.metadata()
     }
 
-    pub fn insert(&self, id: SegmentId, vector: Vector, now_ms: u64) -> Result<(), DBError> {
+    pub fn insert(&self, id: u64, vector: Vector, now_ms: u64) -> Result<(), DBError> {
         self.index.insert(id, vector, now_ms)?;
         Ok(())
     }
 
-    pub fn remove(&self, id: SegmentId, now_ms: u64) -> bool {
+    pub fn remove(&self, id: u64, now_ms: u64) -> bool {
         self.index.remove(id, now_ms)
     }
 

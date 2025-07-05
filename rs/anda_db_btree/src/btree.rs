@@ -1121,9 +1121,29 @@ where
         results
     }
 
-    ///  Returns all keys in the index.
-    pub fn keys(&self) -> Vec<FV> {
-        self.btree.read().iter().cloned().collect()
+    /// Returns a vector of keys in the index
+    /// This method is useful for iterating over all keys in the index.
+    /// It supports pagination with `skip` and `limit` parameters.
+    /// # Arguments
+    ///
+    /// * `skip` - Number of keys to skip
+    /// * `limit` - Maximum number of keys to return
+    /// # Returns
+    ///
+    /// * `Vec<FV>` - Vector of field values (keys) in the index
+    ///
+    pub fn keys(&self, skip: usize, limit: Option<usize>) -> Vec<FV> {
+        match limit {
+            Some(limit) => self
+                .btree
+                .read()
+                .iter()
+                .skip(skip)
+                .take(limit)
+                .cloned()
+                .collect(),
+            _ => self.btree.read().iter().skip(skip).cloned().collect(),
+        }
     }
 
     fn range_keys(&self, query: RangeQuery<FV>) -> Vec<FV> {

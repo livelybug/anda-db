@@ -1,7 +1,6 @@
 use ciborium::Value;
-use ic_auth_types::canonical_cbor_into_vec;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use std::{borrow::Cow, sync::Arc};
+use std::sync::Arc;
 
 use super::{Cbor, Fv, IndexedFieldValues, Schema, SchemaError};
 
@@ -47,17 +46,6 @@ impl From<Document> for DocumentOwned {
 }
 
 impl Document {
-    /// Creates a virtual field value by serializing the provided values in Canonical CBOR format.
-    /// It is used in BTree indexes to combine multiple field values into a single serialized value.
-    pub fn virtual_field_value(vals: &[Option<&Fv>]) -> Option<Fv> {
-        if vals.is_empty() {
-            return None;
-        }
-
-        let data = canonical_cbor_into_vec(vals).ok()?;
-        Some(Fv::Bytes(data))
-    }
-
     /// Creates a new Document with the specified schema and ID.
     ///
     /// # Arguments
@@ -194,33 +182,6 @@ impl Document {
             self.fields.get(&field.idx())
         } else {
             None
-        }
-    }
-
-    /// Gets a virtual field value by a list of field names.
-    ///
-    /// This combines the values of the specified fields into a single serialized value in FieldValue::Bytes.
-    /// # Arguments
-    /// * `fields` - A slice of field names to combine
-    /// # Returns
-    /// * `Option<Fv>` - The combined field value or None if any field is not found
-    pub fn get_virtual_field(&self, fields: &[String]) -> Option<Cow<Fv>> {
-        match fields {
-            [] => None,
-            [name] => self.get_field(name).map(Cow::Borrowed),
-            _ => {
-                let mut vals: Vec<Option<&Fv>> = Vec::with_capacity(fields.len());
-                for name in fields {
-                    if let Some(field) = self.schema.get_field(name) {
-                        vals.push(self.fields.get(&field.idx()));
-                    } else {
-                        return None; // If the field doesn't exist in the schema, return None
-                    }
-                }
-
-                let data = Self::virtual_field_value(&vals)?;
-                Some(Cow::Owned(data))
-            }
         }
     }
 

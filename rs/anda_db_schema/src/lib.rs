@@ -3,7 +3,6 @@ mod error;
 mod field;
 mod resource;
 mod schema;
-mod segment;
 mod value_serde;
 
 pub use anda_db_derive::{AndaDBSchema, FieldTyped};
@@ -13,7 +12,6 @@ pub use error::*;
 pub use field::*;
 pub use resource::*;
 pub use schema::*;
-pub use segment::*;
 
 /// Validate a field name
 ///

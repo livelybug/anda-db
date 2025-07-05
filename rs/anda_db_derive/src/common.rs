@@ -143,6 +143,7 @@ pub fn determine_field_type(ty: &Type) -> Result<TokenStream, String> {
                     Ok(quote! { FieldType::Bytes })
                 }
                 "Json" => Ok(quote! { FieldType::Json }),
+                "Vector" => Ok(quote! { FieldType::Vector }),
                 "HashMap" | "BTreeMap" | "Map" => {
                     // 处理 HashMap 和 BTreeMap 类型
                     if let PathArguments::AngleBracketed(args) = &segment.arguments {

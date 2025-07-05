@@ -146,7 +146,7 @@ impl FieldType {
             (FieldType::F32, FieldValue::F32(_)) => Ok(()),
             (FieldType::Bytes, FieldValue::Bytes(_)) => Ok(()),
             (FieldType::Text, FieldValue::Text(_)) => Ok(()),
-            (FieldType::Json, FieldValue::Json(_)) => Ok(()),
+            (FieldType::Json, _) => Ok(()),
             (FieldType::Vector, FieldValue::Vector(_)) => Ok(()),
             (FieldType::Vector, FieldValue::Array(values)) => {
                 if values.iter().all(|v| matches!(v, FieldValue::U64(_))) {
@@ -1290,6 +1290,16 @@ impl FieldEntry {
     }
 }
 
+/// Convert a Vec<f32> to Vector
+pub fn vector_from_f32(v: Vec<f32>) -> Vector {
+    v.into_iter().map(bf16::from_f32).collect()
+}
+
+/// Convert a Vec<f64> to Vector
+pub fn vector_from_f64(v: Vec<f64>) -> Vector {
+    v.into_iter().map(bf16::from_f64).collect()
+}
+
 fn as_wildcard_map(m: &BTreeMap<String, FieldType>) -> Option<&FieldType> {
     match m.len() {
         1 => m.get("*"),
@@ -1521,7 +1531,7 @@ mod tests {
         assert!(
             FieldType::Json
                 .validate(&FieldValue::Text("json".to_string()))
-                .is_err()
+                .is_ok()
         );
 
         // Vector

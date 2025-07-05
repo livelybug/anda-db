@@ -3,6 +3,7 @@ use bytes::Bytes;
 use parking_lot::RwLock;
 use std::{fmt::Debug, hash::Hash};
 
+use super::from_virtual_field_name;
 pub use anda_db_tfs::{
     BM25Config, BM25Error, BM25Metadata, BM25Params, BM25Stats, TokenizerChain, default_tokenizer,
     jieba_tokenizer,
@@ -10,12 +11,13 @@ pub use anda_db_tfs::{
 
 use crate::{
     error::DBError,
-    schema::{Fe, SegmentId},
+    schema::DocumentId,
     storage::{ObjectVersion, PutMode, Storage},
 };
 
 pub struct BM25 {
     name: String,
+    fields: Vec<String>,
     index: BM25Index<TokenizerChain>,
     storage: Storage, // 与 Collection 共享同一个 Storage 实例
     metadata_version: RwLock<ObjectVersion>,
@@ -54,12 +56,12 @@ impl BM25 {
     }
 
     pub async fn new(
-        field: &Fe,
+        fields: Vec<String>,
         tokenizer: TokenizerChain,
         storage: Storage,
         now_ms: u64,
     ) -> Result<Self, DBError> {
-        let name = field.name().to_string();
+        let name = fields.join("-");
         let config = BM25Config {
             bucket_overload_size: storage.object_chunk_size() as u32 * 2,
             ..Default::default()
@@ -79,6 +81,7 @@ impl BM25 {
             .await?;
         Ok(Self {
             name,
+            fields,
             index,
             storage,
             metadata_version: RwLock::new(ver),
@@ -90,6 +93,7 @@ impl BM25 {
         tokenizer: TokenizerChain,
         storage: Storage,
     ) -> Result<Self, DBError> {
+        let fields = from_virtual_field_name(&name);
         let (metadata, ver) = storage.fetch_bytes(&BM25::metadata_path(&name)).await?;
         let index = BM25Index::load_all(
             tokenizer,
@@ -115,6 +119,7 @@ impl BM25 {
 
         Ok(Self {
             name,
+            fields,
             index,
             storage,
             metadata_version: RwLock::new(ver),
@@ -165,8 +170,8 @@ impl BM25 {
         &self.name
     }
 
-    pub fn field_name(&self) -> &str {
-        &self.name
+    pub fn virtual_field(&self) -> &[String] {
+        &self.fields
     }
 
     pub fn stats(&self) -> BM25Stats {
@@ -177,7 +182,7 @@ impl BM25 {
         self.index.metadata()
     }
 
-    pub fn insert(&self, id: SegmentId, text: &str, now_ms: u64) -> Result<(), DBError> {
+    pub fn insert(&self, id: DocumentId, text: &str, now_ms: u64) -> Result<(), DBError> {
         match self.index.insert(id, text, now_ms) {
             Ok(()) => Ok(()),
             Err(BM25Error::TokenizeFailed { .. }) => Ok(()), // Ignore tokenize errors
@@ -185,7 +190,7 @@ impl BM25 {
         }
     }
 
-    pub fn remove(&self, id: SegmentId, text: &str, now_ms: u64) -> bool {
+    pub fn remove(&self, id: DocumentId, text: &str, now_ms: u64) -> bool {
         self.index.remove(id, text, now_ms)
     }
 

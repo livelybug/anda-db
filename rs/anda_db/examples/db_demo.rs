@@ -4,7 +4,10 @@ use anda_db::{
     error::DBError,
     index::HnswConfig,
     query::{Filter, Query, RangeQuery, Search},
-    schema::{Document, Fe, Ft, Fv, Json, Resource, Schema, Segment},
+    schema::{
+        AndaDBSchema, FieldEntry, FieldType, Fv, Json, Resource, Schema, SchemaError, Vector,
+        vector_from_f32,
+    },
     storage::StorageConfig,
 };
 use anda_db_tfs::jieba_tokenizer;
@@ -15,24 +18,28 @@ use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, sync::Arc};
 use structured_logger::unix_ms;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, AndaDBSchema)]
 pub struct Knowledge {
     pub _id: u64,
     // thread ID, thread is a conversation that multi agents can join.
+    #[field_type = "Bytes"]
     pub thread: Xid,
     // seconds since epoch
     pub created_at: u64,
     // knowledge authors
     pub authors: Vec<String>,
+    // knowledge description
+    pub description: String,
+    // knowledge embedding for vector search
+    pub embedding: Vector,
     // knowledge metadata
     pub metadata: BTreeMap<String, Json>,
-    // knowledge segments for text search and vector search
-    pub segments: Vec<Segment>,
     // Data source
     pub source: Option<Resource>,
     // confidence score
     pub score: Option<i64>,
     // verification hash
+    #[field_type = "Option<Bytes>"]
     pub hash: Option<[u8; 32]>,
 }
 
@@ -70,35 +77,9 @@ async fn main() -> Result<(), DBError> {
     );
 
     // knowledge schema
-    let mut schema = Schema::builder();
-    schema
-        .add_field(Fe::new("thread".to_string(), Ft::Bytes)?.with_description(
-            "thread id, thread is a conversation that multi agents can join.".to_string(),
-        ))?
-        .add_field(
-            Fe::new("created_at".to_string(), Ft::U64)?
-                .with_description("knowledge created at in seconds since epoch".to_string()),
-        )?
-        .add_field(
-            Fe::new("authors".to_string(), Ft::Array(vec![Ft::Text]))?
-                .with_description("knowledge authors".to_string()),
-        )?
-        .add_field(
-            Fe::new("metadata".to_string(), Ft::Map(BTreeMap::new()))?
-                .with_description("knowledge metadata".to_string()),
-        )?
-        .with_segments("segments", true)?
-        .with_resource("source", false)?
-        .add_field(
-            Fe::new("score".to_string(), Ft::Option(Box::new(Ft::I64)))?
-                .with_description("knowledge confidence score".to_string()),
-        )?
-        .add_field(
-            Fe::new("hash".to_string(), Ft::Option(Box::new(Ft::Bytes)))?
-                .with_description("verification hash".to_string()),
-        )?;
+    let schema = Knowledge::schema()?;
 
-    let schema = schema.build()?;
+    println!("-----> Schema: {:#?}", schema);
 
     let collection_config = CollectionConfig {
         name: "knowledges".to_string(),
@@ -118,8 +99,11 @@ async fn main() -> Result<(), DBError> {
 
             // create BM25 & HNSW indexes if not exists
             collection
-                .create_search_index_nx(
-                    "segments",
+                .create_bm25_index_nx(&["authors", "description", "metadata", "source"])
+                .await?;
+            collection
+                .create_hnsw_index_nx(
+                    "embedding",
                     HnswConfig {
                         dimension: 10,
                         ..Default::default()
@@ -152,18 +136,8 @@ async fn add_knowledges_and_query(collection: &Arc<Collection>) -> Result<(), DB
             created_at: unix_ms() / 1000,
             authors: vec!["Anda".to_string(), "Bill".to_string()],
             metadata: BTreeMap::new(),
-            segments: vec![
-                Segment::new(
-                    "Rust 是一门系统级编程语言，专注于安全性、并发性和性能。".to_string(),
-                    None,
-                )
-                .with_vec_f32(vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]),
-                Segment::new(
-                    "Rust 的所有权系统是其最独特的特性之一，它在编译时确保内存安全。".to_string(),
-                    None,
-                )
-                .with_vec_f32(vec![0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1]),
-            ],
+            description: "Rust 是一门系统级编程语言，专注于安全性、并发性和性能。Rust 的所有权系统是其最独特的特性之一，它在编译时确保内存安全。".to_string(),
+            embedding: vector_from_f32(vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]),
             source: None,
             score: None,
             hash: None,
@@ -174,18 +148,8 @@ async fn add_knowledges_and_query(collection: &Arc<Collection>) -> Result<(), DB
             created_at: unix_ms() / 1000,
             authors: vec!["Charlie".to_string()],
             metadata: BTreeMap::new(),
-            segments: vec![
-                Segment::new(
-                    "向量数据库是一种特殊类型的数据库，专门用于存储和检索向量嵌入。".to_string(),
-                    None,
-                )
-                .with_vec_f32(vec![0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2]),
-                Segment::new(
-                    "与传统数据库相比，向量数据库能够高效地进行相似性搜索。".to_string(),
-                    None,
-                )
-                .with_vec_f32(vec![0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3]),
-            ],
+            description: "向量数据库是一种特殊类型的数据库，专门用于存储和检索向量嵌入,与传统数据库相比，向量数据库能够高效地进行相似性搜索。".to_string(),
+            embedding: vector_from_f32(vec![0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2]),
             source: None,
             score: None,
             hash: None,
@@ -197,10 +161,8 @@ async fn add_knowledges_and_query(collection: &Arc<Collection>) -> Result<(), DB
 
     println!("-----> Add knowledges");
     if metadata.stats.num_documents == 0 {
-        for mut knowledge in knowledges {
-            collection.obtain_segment_ids(&mut knowledge.segments);
-            let doc = Document::try_from(collection.schema(), &knowledge)?;
-            let id = collection.add(doc).await?;
+        for knowledge in knowledges {
+            let id = collection.add_from(&knowledge).await?;
             println!("Knowledge id: {id}");
         }
         collection.flush(unix_ms()).await?;
@@ -242,7 +204,6 @@ async fn add_knowledges_and_query(collection: &Arc<Collection>) -> Result<(), DB
     let result: Vec<Knowledge> = collection
         .search_as(Query {
             search: Some(Search {
-                field: "segments".to_string(),
                 text: Some("rust".to_string()),
                 ..Default::default()
             }),
@@ -258,7 +219,6 @@ async fn add_knowledges_and_query(collection: &Arc<Collection>) -> Result<(), DB
     let result: Vec<Knowledge> = collection
         .search_as(Query {
             search: Some(Search {
-                field: "segments".to_string(),
                 vector: Some(vec![0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2]),
                 ..Default::default()
             }),
@@ -274,7 +234,6 @@ async fn add_knowledges_and_query(collection: &Arc<Collection>) -> Result<(), DB
     let result: Vec<Knowledge> = collection
         .search_as(Query {
             search: Some(Search {
-                field: "segments".to_string(),
                 text: Some("数据库".to_string()),
                 vector: Some(vec![0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2]),
                 ..Default::default()

@@ -2,10 +2,10 @@ use anda_db::{
     collection::{Collection, CollectionConfig},
     database::{AndaDB, DBMetadata},
     error::DBError,
-    index::BTree,
+    index::{virtual_field_name, virtual_field_value},
     query::{Filter, RangeQuery},
 };
-use anda_db_schema::{Document, Fv};
+use anda_db_schema::Fv;
 use anda_db_tfs::jieba_tokenizer;
 use anda_kip::*;
 use async_trait::async_trait;
@@ -56,7 +56,9 @@ impl CognitiveNexus {
                     collection.create_btree_index_nx(&["type", "name"]).await?;
                     collection.create_btree_index_nx(&["type"]).await?;
                     collection.create_btree_index_nx(&["name"]).await?;
-                    // TODO: TFS index
+                    collection
+                        .create_bm25_index_nx(&["name", "attributes", "metadata"])
+                        .await?;
 
                     Ok::<(), DBError>(())
                 },
@@ -81,7 +83,9 @@ impl CognitiveNexus {
                     collection.create_btree_index_nx(&["subject"]).await?;
                     collection.create_btree_index_nx(&["object"]).await?;
                     collection.create_btree_index_nx(&["predicates"]).await?;
-                    // TODO: TFS index
+                    collection
+                        .create_bm25_index_nx(&["predicates", "properties"])
+                        .await?;
 
                     Ok::<(), DBError>(())
                 },
@@ -145,8 +149,24 @@ impl CognitiveNexus {
         }
     }
 
-    async fn execute_meta(&self, _command: MetaCommand, _dry_run: bool) -> Result<Json, KipError> {
-        unimplemented!("execute_meta is not implemented yet");
+    async fn execute_meta(&self, command: MetaCommand, dry_run: bool) -> Result<Json, KipError> {
+        match command {
+            MetaCommand::Describe(DescribeTarget::Primer) => self.execute_describe_primer().await,
+            MetaCommand::Describe(DescribeTarget::Domains) => self.execute_describe_domains().await,
+            MetaCommand::Describe(DescribeTarget::ConceptTypes) => {
+                self.execute_describe_concept_types().await
+            }
+            MetaCommand::Describe(DescribeTarget::ConceptType(name)) => {
+                self.execute_describe_concept_type(name).await
+            }
+            MetaCommand::Describe(DescribeTarget::PropositionTypes) => {
+                self.execute_describe_proposition_types().await
+            }
+            MetaCommand::Describe(DescribeTarget::PropositionType(name)) => {
+                self.execute_describe_proposition_type(name).await
+            }
+            MetaCommand::Search(command) => self.execute_search(command).await,
+        }
     }
 
     async fn execute_where_clause(
@@ -395,6 +415,50 @@ impl CognitiveNexus {
         Ok(result)
     }
 
+    async fn execute_describe_primer(&self) -> Result<Json, KipError> {
+        unimplemented!("not implemented yet");
+    }
+
+    async fn execute_describe_domains(&self) -> Result<Json, KipError> {
+        unimplemented!("not implemented yet");
+    }
+
+    async fn execute_describe_concept_types(&self) -> Result<Json, KipError> {
+        let index = self.concepts.get_btree_index(&["type"]).map_err(|e| {
+            KipError::Execution(format!("Failed to get concept type index: {:?}", e))
+        })?;
+
+        let result = index.keys(0, None);
+        Ok(json!(result))
+    }
+
+    async fn execute_describe_concept_type(&self, name: String) -> Result<Json, KipError> {
+        unimplemented!("not implemented yet");
+    }
+
+    async fn execute_describe_proposition_types(&self) -> Result<Json, KipError> {
+        let index = self
+            .propositions
+            .get_btree_index(&["predicates"])
+            .map_err(|e| {
+                KipError::Execution(format!(
+                    "Failed to get proposition predicates index: {:?}",
+                    e
+                ))
+            })?;
+
+        let result = index.keys(0, None);
+        Ok(json!(result))
+    }
+
+    async fn execute_describe_proposition_type(&self, name: String) -> Result<Json, KipError> {
+        unimplemented!("not implemented yet");
+    }
+
+    async fn execute_search(&self, command: SearchCommand) -> Result<Json, KipError> {
+        unimplemented!("not implemented yet");
+    }
+
     async fn match_propositions(
         &self,
         ctx: &mut QueryContext,
@@ -564,8 +628,8 @@ impl CognitiveNexus {
 
         for subject_id in &subject_ids {
             for object_id in &object_ids {
-                let virtual_name = BTree::virtual_field_name(&["subject", "object"]);
-                let virtual_val = Document::virtual_field_value(&[
+                let virtual_name = virtual_field_name(&["subject", "object"]);
+                let virtual_val = virtual_field_value(&[
                     Some(&Fv::Text(subject_id.to_string())),
                     Some(&Fv::Text(object_id.to_string())),
                 ])
@@ -964,8 +1028,8 @@ impl CognitiveNexus {
                 Ok(ids)
             }
             ConceptMatcher::Object { r#type, name } => {
-                let virtual_name = BTree::virtual_field_name(&["type", "name"]);
-                let virtual_val = Document::virtual_field_value(&[
+                let virtual_name = virtual_field_name(&["type", "name"]);
+                let virtual_val = virtual_field_value(&[
                     Some(&Fv::Text(r#type.clone())),
                     Some(&Fv::Text(name.clone())),
                 ])
@@ -2101,8 +2165,8 @@ impl CognitiveNexus {
                 Ok(EntityID::Concept(id))
             }
             ConceptPK::Object { r#type, name } => {
-                let virtual_name = BTree::virtual_field_name(&["type", "name"]);
-                let virtual_val = Document::virtual_field_value(&[
+                let virtual_name = virtual_field_name(&["type", "name"]);
+                let virtual_val = virtual_field_value(&[
                     Some(&Fv::Text(r#type.clone())),
                     Some(&Fv::Text(name.clone())),
                 ])
@@ -2155,8 +2219,8 @@ impl CognitiveNexus {
                 let subject = self.resolve_entity_id(subject.as_ref(), cached_pks).await?;
                 let object = self.resolve_entity_id(object.as_ref(), cached_pks).await?;
 
-                let virtual_name = BTree::virtual_field_name(&["subject", "object"]);
-                let virtual_val = Document::virtual_field_value(&[
+                let virtual_name = virtual_field_name(&["subject", "object"]);
+                let virtual_val = virtual_field_value(&[
                     Some(&Fv::Text(subject.to_string())),
                     Some(&Fv::Text(object.to_string())),
                 ])
@@ -2346,8 +2410,8 @@ impl CognitiveNexus {
             EntityPK::Concept(concept_pk) => match concept_pk {
                 ConceptPK::ID(id) => Ok(EntityID::Concept(*id)),
                 ConceptPK::Object { r#type, name } => {
-                    let virtual_name = BTree::virtual_field_name(&["type", "name"]);
-                    let virtual_val = Document::virtual_field_value(&[
+                    let virtual_name = virtual_field_name(&["type", "name"]);
+                    let virtual_val = virtual_field_value(&[
                         Some(&Fv::Text(r#type.clone())),
                         Some(&Fv::Text(name.clone())),
                     ])
@@ -2388,8 +2452,8 @@ impl CognitiveNexus {
                     let object_id =
                         Box::pin(self.resolve_entity_id(object.as_ref(), cached_pks)).await?;
 
-                    let virtual_name = BTree::virtual_field_name(&["subject", "object"]);
-                    let virtual_val = Document::virtual_field_value(&[
+                    let virtual_name = virtual_field_name(&["subject", "object"]);
+                    let virtual_val = virtual_field_value(&[
                         Some(&Fv::Text(subject_id.to_string())),
                         Some(&Fv::Text(object_id.to_string())),
                     ])

@@ -1,9 +1,5 @@
 use croaring::{Portable, Treemap};
-use dashmap::DashMap;
-use futures::{
-    future::{try_join, try_join_all},
-    try_join as try_join_await,
-};
+use futures::{future::try_join_all, try_join as try_join_await};
 use object_store::path::Path;
 use parking_lot::RwLock;
 use serde::de::DeserializeOwned;
@@ -43,37 +39,26 @@ pub struct Collection {
     schema: Arc<Schema>,
     /// Storage backend for persisting collection data
     storage: Storage,
-    /// Maps document IDs to their segment IDs
-    doc_segments: RwLock<BTreeMap<DocumentId, Vec<SegmentId>>>,
-    /// Reverse mapping from segment IDs to document IDs for quick lookups
-    inverted_doc_segments: DashMap<SegmentId, DocumentId>,
     /// BTree indexes for efficient exact-match queries
     btree_indexes: Vec<BTree>,
-    /// Combined BM25 (text search) and HNSW (vector search) indexes
-    bm25_hnsw_indexes: Vec<(BM25, Hnsw)>,
+    /// BM25 (text search) indexes
+    bm25_indexes: Vec<BM25>,
+    /// HNSW (vector search) indexes
+    hnsw_indexes: Vec<Hnsw>,
     /// Collection metadata including statistics and configuration
     metadata: RwLock<CollectionMetadata>,
     /// Highest document ID assigned so far
     max_document_id: AtomicU64,
-    /// Highest segment ID assigned so far
-    max_segment_id: AtomicU64,
     /// Counter for search operations
     search_count: AtomicU64,
     /// Counter for get operations
     get_count: AtomicU64,
     /// Text tokenization chain for text analysis
     tokenizer: TokenizerChain,
+    /// BTree index for document IDs
+    doc_ids_index: RwLock<BTreeSet<DocumentId>>,
     /// Bitmap of document IDs for efficient membership tests
     doc_ids: RwLock<Treemap>,
-
-    /// Maximum size of a bucket before creating a new one
-    /// When a bucket's stored data exceeds this size,
-    /// a new bucket should be created for new data
-    bucket_overload_size: usize,
-    /// Current bucket ID and its size
-    current_bucket: RwLock<(BucketId, usize)>,
-    /// Buckets with pending changes that need to be persisted
-    dirty_buckets: RwLock<BTreeMap<BucketId, DocSegmentsBucket>>,
     /// Whether the collection is in read-only mode
     read_only: AtomicBool,
     /// Last saved version of the collection
@@ -81,13 +66,8 @@ pub struct Collection {
 
     metadata_version: RwLock<ObjectVersion>,
     ids_version: RwLock<ObjectVersion>,
+    index_hooks: Arc<dyn IndexHooks>,
 }
-
-/// Bucket identifier for document segments storage
-type BucketId = u32;
-
-/// Mapping of document IDs to their segment IDs within a bucket
-type DocSegmentsBucket = HashMap<DocumentId, Vec<SegmentId>>;
 
 /// Collection configuration parameters.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -111,8 +91,11 @@ pub struct CollectionMetadata {
     /// Map of BTree index names to their field entries
     pub btree_indexes: BTreeMap<String, FieldEntry>,
 
-    /// Map of BM25/HNSW index names to their field entries
-    pub bm25_hnsw_indexes: BTreeMap<String, FieldEntry>,
+    /// Map of BM25 index names to their field entries
+    pub bm25_indexes: BTreeMap<String, FieldEntry>,
+
+    /// Map of HNSW index names to their field entries
+    pub hnsw_indexes: BTreeMap<String, FieldEntry>,
 
     /// Collection statistics.
     pub stats: CollectionStats,
@@ -123,12 +106,6 @@ pub struct CollectionMetadata {
 pub struct CollectionStats {
     /// Highest document ID assigned so far
     pub max_document_id: u64,
-
-    /// Highest segment ID assigned so far
-    pub max_segment_id: u64,
-
-    /// Highest bucket ID used for document segments storage
-    pub max_bucket_id: u32,
 
     /// Last insertion timestamp (unix ms).
     pub last_inserted: u64,
@@ -185,11 +162,6 @@ impl Collection {
         format!("data/{id}.cbor")
     }
 
-    /// Generates the storage path for document segments in the given bucket
-    fn doc_segments_path(bucket: BucketId) -> String {
-        format!("segments/{bucket}.cbor")
-    }
-
     /// Creates a new collection with the given schema and configuration.
     ///
     /// # Arguments
@@ -230,7 +202,8 @@ impl Collection {
             config: config.clone(),
             schema: schema.clone(),
             btree_indexes: BTreeMap::new(),
-            bm25_hnsw_indexes: BTreeMap::new(),
+            bm25_indexes: BTreeMap::new(),
+            hnsw_indexes: BTreeMap::new(),
             stats,
         };
 
@@ -246,29 +219,25 @@ impl Collection {
         // created successfully, and store storage metadata
         storage.store_metadata(0, unix_ms()).await?;
 
-        let bucket_overload_size = storage.object_chunk_size();
         Ok(Self {
             name: config.name.clone(),
             schema: Arc::new(schema),
             storage,
-            doc_segments: RwLock::new(BTreeMap::new()),
-            inverted_doc_segments: DashMap::new(),
             btree_indexes: Vec::new(),
-            bm25_hnsw_indexes: Vec::new(),
+            bm25_indexes: Vec::new(),
+            hnsw_indexes: Vec::new(),
             max_document_id: AtomicU64::new(0),
-            max_segment_id: AtomicU64::new(0),
             search_count: AtomicU64::new(0),
             get_count: AtomicU64::new(0),
             tokenizer: default_tokenizer(),
+            doc_ids_index: RwLock::new(BTreeSet::new()),
             doc_ids: RwLock::new(Treemap::new()),
-            bucket_overload_size,
-            current_bucket: RwLock::new((0, 0)),
-            dirty_buckets: RwLock::new(BTreeMap::new()),
             metadata: RwLock::new(metadata),
             read_only: AtomicBool::new(false),
             last_saved_version: AtomicU64::new(0),
             metadata_version: RwLock::new(metadata_version),
             ids_version: RwLock::new(ids_version),
+            index_hooks: Arc::new(DefaultIndexHooks),
         })
     }
 
@@ -305,34 +274,30 @@ impl Collection {
                 name: name.clone(),
                 source: "Failed to deserialize ids".into(),
             })?;
+        let doc_ids_index = BTreeSet::from_iter(doc_ids.iter());
 
-        let bucket_overload_size = storage.object_chunk_size();
         let mut collection = Self {
             name,
             schema: Arc::new(metadata.schema.clone()),
             storage,
-            doc_segments: RwLock::new(BTreeMap::new()),
-            inverted_doc_segments: DashMap::new(),
             btree_indexes: Vec::new(),
-            bm25_hnsw_indexes: Vec::new(),
+            bm25_indexes: Vec::new(),
+            hnsw_indexes: Vec::new(),
             max_document_id: AtomicU64::new(metadata.stats.max_document_id),
-            max_segment_id: AtomicU64::new(metadata.stats.max_segment_id),
             search_count: AtomicU64::new(metadata.stats.search_count),
             get_count: AtomicU64::new(metadata.stats.get_count),
             last_saved_version: AtomicU64::new(metadata.stats.version),
             tokenizer: default_tokenizer(),
+            doc_ids_index: RwLock::new(doc_ids_index),
             doc_ids: RwLock::new(doc_ids),
-            bucket_overload_size,
-            current_bucket: RwLock::new((metadata.stats.max_bucket_id, 0)),
-            dirty_buckets: RwLock::new(BTreeMap::new()),
             metadata: RwLock::new(metadata),
             read_only: AtomicBool::new(false),
             metadata_version: RwLock::new(metadata_version),
             ids_version: RwLock::new(ids_version),
+            index_hooks: Arc::new(DefaultIndexHooks),
         };
 
         f(&mut collection).await?;
-        collection.load_doc_segments().await?;
         collection.load_indexes().await?;
         let fixed = collection.auto_repair_indexes().await?;
         if fixed > 0 {
@@ -346,32 +311,6 @@ impl Collection {
             collection.flush(unix_ms()).await?;
         }
         Ok(collection)
-    }
-
-    /// Loads document segments from storage.
-    ///
-    /// # Returns
-    /// Ok(()) if successful, or an error if loading fails
-    async fn load_doc_segments(&mut self) -> Result<(), DBError> {
-        let mut doc_segments: BTreeMap<DocumentId, Vec<SegmentId>> = BTreeMap::new();
-        let max_bucket_id = self.metadata.read().stats.max_bucket_id;
-
-        for i in 0..=max_bucket_id {
-            let path = Self::doc_segments_path(i);
-            let (bucket, _) = self.storage.fetch::<DocSegmentsBucket>(&path).await?;
-            let doc_ids = self.doc_ids.read();
-            for (id, segments) in bucket {
-                if doc_ids.contains(id) {
-                    for sid in &segments {
-                        self.inverted_doc_segments.insert(*sid, id);
-                    }
-                    doc_segments.insert(id, segments);
-                }
-            }
-        }
-
-        self.doc_segments = RwLock::new(doc_segments);
-        Ok(())
     }
 
     /// Loads all indexes from storage.
@@ -397,7 +336,7 @@ impl Collection {
             },
             async {
                 let mut bm25_indexes = Vec::new();
-                for (name, _) in meta.bm25_hnsw_indexes.iter() {
+                for (name, _) in meta.bm25_indexes.iter() {
                     let index =
                         BM25::bootstrap(name.clone(), self.tokenizer.clone(), self.storage.clone())
                             .await?;
@@ -408,7 +347,7 @@ impl Collection {
             },
             async {
                 let mut hnsw_indexes = Vec::new();
-                for (name, _) in meta.bm25_hnsw_indexes.iter() {
+                for (name, _) in meta.hnsw_indexes.iter() {
                     let index = Hnsw::bootstrap(name.clone(), self.storage.clone()).await?;
 
                     hnsw_indexes.push(index);
@@ -418,7 +357,8 @@ impl Collection {
         )?;
 
         self.btree_indexes = btree_indexes;
-        self.bm25_hnsw_indexes = bm25_indexes.into_iter().zip(hnsw_indexes).collect();
+        self.bm25_indexes = bm25_indexes;
+        self.hnsw_indexes = hnsw_indexes;
         Ok(())
     }
 
@@ -447,62 +387,30 @@ impl Collection {
                     // dirty document exists
                     fixed += 1;
                     let doc = Document::try_from_doc(self.schema(), doc)?;
-                    let mut segment_ids = BTreeSet::new();
                     // try to repair indexes
                     for index in &self.btree_indexes {
-                        if let Some(fv) = doc.get_virtual_field(index.virtual_field()) {
+                        if let Some(fv) = self.index_hooks.btree_index_value(index, &doc) {
                             if fv.as_ref() == &FieldValue::Null {
                                 continue;
                             }
-                            let _ = index.insert(id, fv.into_owned(), now_ms); // ignore errors
+                            // ignore errors
+                            let _ = index.insert(id, fv.into_owned(), now_ms);
                         }
                     }
 
-                    for (bm25, hnsw) in &self.bm25_hnsw_indexes {
-                        if let Some(Fv::Array(segments)) = doc.get_field(bm25.field_name()) {
-                            for seg in segments {
-                                if let Some(sid) = Segment::id_from(seg) {
-                                    if let Some(text) = Segment::text_from(seg) {
-                                        // ignore errors
-                                        let _ = bm25.insert(*sid, text, now_ms);
-                                    }
-                                    if let Some(vector) = Segment::vec_from(seg) {
-                                        // ignore errors
-                                        let _ = hnsw.insert(*sid, vector.clone(), now_ms);
-                                    }
-                                    segment_ids.insert(*sid);
-                                }
-                            }
+                    for index in &self.bm25_indexes {
+                        if let Some(text) = self.index_hooks.bm25_index_value(index, &doc) {
+                            // ignore errors
+                            let _ = index.insert(id, &text, now_ms);
                         }
                     }
 
-                    let segment_ids: Vec<u64> = segment_ids.into_iter().collect();
-                    let max_bucket_id = {
-                        let mut current_bucket = self.current_bucket.write();
-                        let size_increase = CountingWriter::count_cbor(&(&id, &segment_ids)) + 2;
-                        if current_bucket.1 == 0
-                            || current_bucket.1 + size_increase < self.bucket_overload_size
-                        {
-                            current_bucket.1 += size_increase;
-                        } else {
-                            current_bucket.0 += 1;
-                            current_bucket.1 = size_increase;
+                    for index in &self.hnsw_indexes {
+                        if let Some(vector) = self.index_hooks.hnsw_index_value(index, &doc) {
+                            // ignore errors
+                            let _ = index.insert(id, vector.into_owned(), now_ms);
                         }
-                        current_bucket.0
-                    };
-
-                    for sid in &segment_ids {
-                        self.inverted_doc_segments.insert(*sid, id);
                     }
-                    self.doc_ids.write().add(id);
-                    self.doc_segments.write().insert(id, segment_ids.clone());
-
-                    let mut dirty_buckets = self.dirty_buckets.write();
-                    dirty_buckets
-                        .entry(max_bucket_id)
-                        .or_default()
-                        .insert(id, segment_ids);
-                    self.max_document_id.fetch_max(id, Ordering::Release);
 
                     self.update_metadata(|meta| {
                         meta.stats.version += 1;
@@ -571,7 +479,7 @@ impl Collection {
             None => return Ok(false),
         };
 
-        try_join_await!(self.store_ids(), self.store_dirty_segments())?;
+        self.store_ids().await?;
         self.store_indexes(now_ms).await?;
 
         // check_point is the last persisted document ID
@@ -626,34 +534,6 @@ impl Collection {
         Ok(())
     }
 
-    /// Stores dirty document segments to storage.
-    ///
-    /// # Returns
-    /// Ok(()) if successful, or an error if storing fails
-    async fn store_dirty_segments(&self) -> Result<(), DBError> {
-        let mut dirty_buckets = BTreeMap::new();
-        {
-            // move the dirty nodes into a temporary variable
-            // and release the lock
-            dirty_buckets.append(&mut self.dirty_buckets.write());
-        }
-
-        while let Some((bucket_id, bucket)) = dirty_buckets.pop_first() {
-            let path = Self::doc_segments_path(bucket_id);
-            match self.storage.put(&path, &bucket, None).await {
-                Ok(_) => {}
-                Err(err) => {
-                    // refund the unprocessed dirty buckets
-                    dirty_buckets.insert(bucket_id, bucket);
-                    self.dirty_buckets.write().append(&mut dirty_buckets);
-                    return Err(err);
-                }
-            }
-        }
-
-        Ok(())
-    }
-
     /// Stores all indexes to storage.
     ///
     /// # Arguments
@@ -672,11 +552,8 @@ impl Collection {
 
         let _ = try_join_await!(
             try_join_all(self.btree_indexes.iter().map(|index| index.flush(now_ms))),
-            try_join_all(
-                self.bm25_hnsw_indexes
-                    .iter()
-                    .map(|(bm25, hnsw)| try_join(bm25.flush(now_ms), hnsw.flush(now_ms))),
-            )
+            try_join_all(self.bm25_indexes.iter().map(|index| index.flush(now_ms))),
+            try_join_all(self.hnsw_indexes.iter().map(|index| index.flush(now_ms))),
         );
 
         Ok(())
@@ -688,6 +565,10 @@ impl Collection {
     /// * `tokenizer` - The tokenizer chain to use
     pub fn set_tokenizer(&mut self, tokenizer: TokenizerChain) {
         self.tokenizer = tokenizer;
+    }
+
+    pub fn set_index_hooks(&mut self, hooks: Arc<dyn IndexHooks>) {
+        self.index_hooks = hooks;
     }
 
     /// Returns the collection name.
@@ -705,9 +586,7 @@ impl Collection {
     pub fn metadata(&self) -> CollectionMetadata {
         let mut metadata = self.metadata.read().clone();
         metadata.stats.max_document_id = self.max_document_id.load(Ordering::Relaxed);
-        metadata.stats.max_segment_id = self.max_segment_id.load(Ordering::Relaxed);
-        metadata.stats.num_documents = self.doc_segments.read().len() as u64;
-        metadata.stats.max_bucket_id = self.current_bucket.read().0;
+        metadata.stats.num_documents = self.doc_ids_index.read().len() as u64;
         metadata.stats.search_count = self.search_count.load(Ordering::Relaxed);
         metadata.stats.get_count = self.get_count.load(Ordering::Relaxed);
         metadata.stats.read_only = self.read_only.load(Ordering::Relaxed);
@@ -718,9 +597,7 @@ impl Collection {
     pub fn stats(&self) -> CollectionStats {
         let mut stats = { self.metadata.read().stats.clone() };
         stats.max_document_id = self.max_document_id.load(Ordering::Relaxed);
-        stats.max_segment_id = self.max_segment_id.load(Ordering::Relaxed);
-        stats.max_bucket_id = self.current_bucket.read().0;
-        stats.num_documents = self.doc_segments.read().len() as u64;
+        stats.num_documents = self.doc_ids_index.read().len() as u64;
         stats.search_count = self.search_count.load(Ordering::Relaxed);
         stats.get_count = self.get_count.load(Ordering::Relaxed);
         stats.read_only = self.read_only.load(Ordering::Relaxed);
@@ -744,7 +621,7 @@ impl Collection {
     /// # Returns
     /// The number of documents in the collection
     pub fn len(&self) -> usize {
-        self.doc_segments.read().len()
+        self.doc_ids_index.read().len()
     }
 
     /// Checks if the collection is empty.
@@ -752,30 +629,12 @@ impl Collection {
     /// # Returns
     /// `true` if the collection contains no documents, `false` otherwise
     pub fn is_empty(&self) -> bool {
-        self.doc_segments.read().is_empty()
+        self.doc_ids_index.read().is_empty()
     }
 
     /// Creates a new empty document with the collection's schema.
     pub fn new_document(&self) -> Document {
         Document::new(self.schema.clone())
-    }
-
-    /// Assigns unique IDs to segments.
-    ///
-    /// # Arguments
-    /// * `segments` - Mutable slice of segments to assign IDs to
-    pub fn obtain_segment_ids(&self, segments: &mut [Segment]) {
-        let count = segments.len();
-        if count == 0 {
-            return;
-        }
-        let start = self
-            .max_segment_id
-            .fetch_add(count as u64, Ordering::Relaxed)
-            + 1;
-        for (i, seg) in segments.iter_mut().enumerate() {
-            seg.id = start + i as u64;
-        }
     }
 
     /// Creates a BTree index on the specified field.
@@ -794,7 +653,7 @@ impl Collection {
         }
 
         let now_ms = unix_ms();
-        let name = BTree::virtual_field_name(fields);
+        let name = virtual_field_name(fields);
 
         {
             if self.metadata.read().btree_indexes.contains_key(&name) {
@@ -859,7 +718,77 @@ impl Collection {
         }
     }
 
-    /// Creates a combined BM25 (text) and HNSW (vector) search index.
+    /// Creates a BM25 text search index.
+    ///
+    /// # Arguments
+    /// * `field` - Name of the field to index
+    ///
+    /// # Returns
+    /// Ok(()) if successful, or an error if creation fails
+    pub async fn create_bm25_index(&mut self, fields: &[&str]) -> Result<(), DBError> {
+        if fields.is_empty() {
+            return Err(DBError::Schema {
+                name: self.name.clone(),
+                source: "BM25 index requires at least one field".into(),
+            });
+        }
+
+        let now_ms = unix_ms();
+        let name = virtual_field_name(fields);
+
+        {
+            if self.metadata.read().bm25_indexes.contains_key(&name) {
+                return Err(DBError::AlreadyExists {
+                    name: name.clone(),
+                    path: self.name.clone(),
+                    source: "BM25 index already exists".into(),
+                });
+            }
+        }
+
+        for field in fields {
+            self.schema.get_field_or_err(field)?;
+        }
+
+        let index = BM25::new(
+            fields.iter().map(|s| s.to_string()).collect(),
+            self.tokenizer.clone(),
+            self.storage.clone(),
+            now_ms,
+        )
+        .await?;
+
+        {
+            let mut meta = self.metadata.write();
+            meta.stats.version += 1;
+            let field = FieldEntry::new("_virtual_field_".to_string(), FieldType::Text)?
+                .with_description(name.clone());
+            meta.bm25_indexes.insert(name, field);
+        }
+
+        self.bm25_indexes.push(index);
+        Ok(())
+    }
+
+    /// Creates a BM25 index if it doesn't already exist.
+    ///
+    /// # Arguments
+    /// * `fields` - Fields to index
+    ///
+    /// # Returns
+    /// Ok(()) if successful, or an error if creation fails
+    pub async fn create_bm25_index_nx(&mut self, fields: &[&str]) -> Result<(), DBError> {
+        match self.create_bm25_index(fields).await {
+            Ok(_) => Ok(()),
+            Err(DBError::AlreadyExists { .. }) => {
+                // Ignore the error if the index already exists
+                Ok(())
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Creates a HNSW (vector) search index.
     ///
     /// # Arguments
     /// * `field` - Name of the field to index
@@ -867,7 +796,7 @@ impl Collection {
     ///
     /// # Returns
     /// Ok(()) if successful, or an error if creation fails
-    pub async fn create_search_index(
+    pub async fn create_hnsw_index(
         &mut self,
         field: &str,
         config: HnswConfig,
@@ -878,11 +807,11 @@ impl Collection {
         let now_ms = unix_ms();
 
         {
-            if self.metadata.read().bm25_hnsw_indexes.contains_key(&name) {
+            if self.metadata.read().hnsw_indexes.contains_key(&name) {
                 return Err(DBError::AlreadyExists {
                     name: name.clone(),
                     path: self.name.clone(),
-                    source: "Search (BM25 & HNSW) index already exists".into(),
+                    source: "HNSW index already exists".into(),
                 });
             }
         }
@@ -895,29 +824,26 @@ impl Collection {
                 path: self.name.clone(),
                 source: "field not found".into(),
             })?;
-        if field.r#type() != &FieldType::Array(vec![Segment::field_type()]) {
+        if field.r#type() != &FieldType::Vector {
             return Err(DBError::Schema {
-                    name: self.name.clone(),
-                    source: "The type of field for search (BM25 & HNSW) index should be FieldType::Array(Vec<Segment>)".into(),
-                });
+                name: self.name.clone(),
+                source: "The type of field for HNSW index should be FieldType::Vector".into(),
+            });
         }
 
-        let (bm25, hnsw) = try_join_await!(
-            BM25::new(field, self.tokenizer.clone(), self.storage.clone(), now_ms,),
-            Hnsw::new(field, config, self.storage.clone(), now_ms,)
-        )?;
+        let index = Hnsw::new(field, config, self.storage.clone(), now_ms).await?;
 
         {
             let mut meta = self.metadata.write();
             meta.stats.version += 1;
-            meta.bm25_hnsw_indexes.insert(name, field.clone());
+            meta.hnsw_indexes.insert(name, field.clone());
         }
 
-        self.bm25_hnsw_indexes.push((bm25, hnsw));
+        self.hnsw_indexes.push(index);
         Ok(())
     }
 
-    /// Creates a search index if it doesn't already exist.
+    /// Creates a HNSW index if it doesn't already exist.
     ///
     /// # Arguments
     /// * `field` - Name of the field to index
@@ -925,12 +851,12 @@ impl Collection {
     ///
     /// # Returns
     /// Ok(()) if successful, or an error if creation fails
-    pub async fn create_search_index_nx(
+    pub async fn create_hnsw_index_nx(
         &mut self,
         field: &str,
         config: HnswConfig,
     ) -> Result<(), DBError> {
-        match self.create_search_index(field, config).await {
+        match self.create_hnsw_index(field, config).await {
             Ok(_) => Ok(()),
             Err(DBError::AlreadyExists { .. }) => {
                 // Ignore the error if the index already exists
@@ -938,6 +864,41 @@ impl Collection {
             }
             Err(err) => Err(err),
         }
+    }
+
+    pub fn get_btree_index(&self, fields: &[&str]) -> Result<&BTree, DBError> {
+        let name = virtual_field_name(fields);
+        if let Some(index) = self.btree_indexes.iter().find(|i| i.name() == name) {
+            return Ok(index);
+        }
+
+        Err(DBError::Index {
+            name,
+            source: "BTree index not found".into(),
+        })
+    }
+
+    pub fn get_bm25_index(&self, fields: &[&str]) -> Result<&BM25, DBError> {
+        let name = virtual_field_name(fields);
+        if let Some(index) = self.bm25_indexes.iter().find(|i| i.name() == name) {
+            return Ok(index);
+        }
+
+        Err(DBError::Index {
+            name,
+            source: "BM25 index not found".into(),
+        })
+    }
+
+    pub fn get_hnsw_index(&self, field: &str) -> Result<&Hnsw, DBError> {
+        if let Some(index) = self.hnsw_indexes.iter().find(|i| i.field_name() == field) {
+            return Ok(index);
+        }
+
+        Err(DBError::Index {
+            name: field.to_string(),
+            source: "HNSW index not found".into(),
+        })
     }
 
     /// Adds a new document to the collection.
@@ -973,18 +934,16 @@ impl Collection {
         self.schema.validate(doc.fields())?;
 
         let now_ms = unix_ms();
-        let mut segment_ids = BTreeSet::new();
-
         #[allow(clippy::mutable_key_type)]
         let mut btree_inserted: HashMap<&BTree, Cow<FieldValue>> = HashMap::new();
         #[allow(clippy::mutable_key_type)]
-        let mut bm25_inserted: HashMap<&BM25, (&u64, &str)> = HashMap::new();
+        let mut bm25_inserted: HashMap<&BM25, (u64, Cow<str>)> = HashMap::new();
         #[allow(clippy::mutable_key_type)]
-        let mut hnsw_inserted: HashMap<&Hnsw, &u64> = HashMap::new();
+        let mut hnsw_inserted: HashMap<&Hnsw, u64> = HashMap::new();
 
         let rt: Result<(), DBError> = (|| {
             for index in &self.btree_indexes {
-                if let Some(fv) = doc.get_virtual_field(index.virtual_field()) {
+                if let Some(fv) = self.index_hooks.btree_index_value(index, &doc) {
                     if fv.as_ref() == &FieldValue::Null {
                         continue;
                     }
@@ -994,24 +953,20 @@ impl Collection {
                 }
             }
 
-            for (bm25, hnsw) in &self.bm25_hnsw_indexes {
-                if let Some(Fv::Array(segments)) = doc.get_field(bm25.field_name()) {
-                    for seg in segments {
-                        if let Some(sid) = Segment::id_from(seg) {
-                            if let Some(text) = Segment::text_from(seg) {
-                                bm25_inserted.insert(bm25, (sid, text));
-                                bm25.insert(*sid, text, now_ms)?;
-                            }
-
-                            if let Some(vector) = Segment::vec_from(seg) {
-                                hnsw_inserted.insert(hnsw, sid);
-                                hnsw.insert(*sid, vector.clone(), now_ms)?;
-                            }
-                            segment_ids.insert(*sid);
-                        }
-                    }
+            for index in &self.bm25_indexes {
+                if let Some(text) = self.index_hooks.bm25_index_value(index, &doc) {
+                    index.insert(id, &text, now_ms)?;
+                    bm25_inserted.insert(index, (id, text));
                 }
             }
+
+            for index in &self.hnsw_indexes {
+                if let Some(vector) = self.index_hooks.hnsw_index_value(index, &doc) {
+                    hnsw_inserted.insert(index, id);
+                    index.insert(id, vector.into_owned(), now_ms)?;
+                }
+            }
+
             Ok(())
         })();
 
@@ -1020,10 +975,10 @@ impl Collection {
                 k.remove(id, &v, now_ms);
             }
             for (k, v) in bm25_inserted {
-                k.remove(*v.0, v.1, now_ms);
+                k.remove(v.0, &v.1, now_ms);
             }
             for (k, v) in hnsw_inserted {
-                k.remove(*v, now_ms);
+                k.remove(v, now_ms);
             }
         };
 
@@ -1038,31 +993,8 @@ impl Collection {
             return Err(err);
         }
 
-        let segment_ids: Vec<u64> = segment_ids.into_iter().collect();
-        let max_bucket_id = {
-            let mut current_bucket = self.current_bucket.write();
-            let size_increase = CountingWriter::count_cbor(&(&id, &segment_ids)) + 2;
-            if current_bucket.1 == 0 || current_bucket.1 + size_increase < self.bucket_overload_size
-            {
-                current_bucket.1 += size_increase;
-            } else {
-                current_bucket.0 += 1;
-                current_bucket.1 = size_increase;
-            }
-            current_bucket.0
-        };
-
-        for sid in &segment_ids {
-            self.inverted_doc_segments.insert(*sid, id);
-        }
         self.doc_ids.write().add(id);
-        self.doc_segments.write().insert(id, segment_ids.clone());
-
-        let mut dirty_buckets = self.dirty_buckets.write();
-        dirty_buckets
-            .entry(max_bucket_id)
-            .or_default()
-            .insert(id, segment_ids);
+        self.doc_ids_index.write().insert(id);
 
         self.update_metadata(|meta| {
             meta.stats.last_inserted = now_ms;
@@ -1153,36 +1085,34 @@ impl Collection {
         self.schema.validate(doc.fields())?;
 
         let now_ms = unix_ms();
-        let mut updated_segment_ids = BTreeSet::new();
-        let mut removed_segment_ids = BTreeSet::new();
 
         // record the updated and removed indexes for rollback
         #[allow(clippy::mutable_key_type)]
         let mut btree_inserted: HashMap<&BTree, Cow<FieldValue>> = HashMap::new();
         #[allow(clippy::mutable_key_type)]
-        let mut bm25_inserted: HashMap<&BM25, (&u64, &str)> = HashMap::new();
+        let mut bm25_inserted: HashMap<&BM25, (u64, Cow<str>)> = HashMap::new();
         #[allow(clippy::mutable_key_type)]
-        let mut hnsw_inserted: HashMap<&Hnsw, &u64> = HashMap::new();
+        let mut hnsw_inserted: HashMap<&Hnsw, u64> = HashMap::new();
         #[allow(clippy::mutable_key_type)]
         let mut btree_removed: HashMap<&BTree, Cow<FieldValue>> = HashMap::new();
         #[allow(clippy::mutable_key_type)]
-        let mut bm25_removed: HashMap<&BM25, (&u64, &str)> = HashMap::new();
+        let mut bm25_removed: HashMap<&BM25, (u64, Cow<str>)> = HashMap::new();
         #[allow(clippy::mutable_key_type)]
-        let mut hnsw_removed: HashMap<&Hnsw, (&u64, &Vector)> = HashMap::new();
+        let mut hnsw_removed: HashMap<&Hnsw, (u64, Cow<Vector>)> = HashMap::new();
 
         // update the indexes
         let rt: Result<(), DBError> = (|| {
             for index in &self.btree_indexes {
                 let fields = index.virtual_field();
                 if fields_keys.iter().any(|v| fields.contains(v)) {
-                    if let Some(fv) = old_doc.get_virtual_field(index.virtual_field()) {
+                    if let Some(fv) = self.index_hooks.btree_index_value(index, &old_doc) {
                         if fv.as_ref() != &FieldValue::Null {
                             index.remove(id, &fv, now_ms);
                             btree_removed.insert(index, fv);
                         }
                     }
 
-                    if let Some(fv) = doc.get_virtual_field(index.virtual_field()) {
+                    if let Some(fv) = self.index_hooks.btree_index_value(index, &doc) {
                         if fv.as_ref() != &FieldValue::Null {
                             index.insert(id, fv.clone().into_owned(), now_ms)?;
                             btree_inserted.insert(index, fv);
@@ -1191,47 +1121,36 @@ impl Collection {
                 }
             }
 
-            for (bm25, hnsw) in &self.bm25_hnsw_indexes {
-                let field_name = bm25.field_name();
-
-                if fields_keys.contains(field_name) {
-                    if let Some(Fv::Array(old_segments)) = old_doc.get_field(field_name) {
-                        for seg in old_segments {
-                            if let Some(sid) = Segment::id_from(seg) {
-                                removed_segment_ids.insert(*sid);
-
-                                if let Some(text) = Segment::text_from(seg) {
-                                    bm25.remove(*sid, text, now_ms);
-                                    bm25_removed.insert(bm25, (sid, text));
-                                }
-
-                                if let Some(vector) = Segment::vec_from(seg) {
-                                    hnsw.remove(*sid, now_ms);
-                                    hnsw_removed.insert(hnsw, (sid, vector));
-                                }
-                            }
-                        }
+            for index in &self.bm25_indexes {
+                let fields = index.virtual_field();
+                if fields_keys.iter().any(|v| fields.contains(v)) {
+                    if let Some(text) = self.index_hooks.bm25_index_value(index, &old_doc) {
+                        index.remove(id, &text, now_ms);
+                        bm25_removed.insert(index, (id, text));
                     }
 
-                    if let Some(Fv::Array(new_segments)) = doc.get_field(field_name) {
-                        for seg in new_segments {
-                            if let Some(sid) = Segment::id_from(seg) {
-                                updated_segment_ids.insert(*sid);
-
-                                if let Some(text) = Segment::text_from(seg) {
-                                    bm25.insert(*sid, text, now_ms)?;
-                                    bm25_inserted.insert(bm25, (sid, text));
-                                }
-
-                                if let Some(vector) = Segment::vec_from(seg) {
-                                    hnsw.insert(*sid, vector.clone(), now_ms)?;
-                                    hnsw_inserted.insert(hnsw, sid);
-                                }
-                            }
-                        }
+                    if let Some(text) = self.index_hooks.bm25_index_value(index, &doc) {
+                        index.insert(id, &text, now_ms)?;
+                        bm25_inserted.insert(index, (id, text));
                     }
                 }
             }
+
+            for index in &self.hnsw_indexes {
+                let field_name = index.field_name();
+                if fields_keys.contains(field_name) {
+                    if let Some(vector) = self.index_hooks.hnsw_index_value(index, &old_doc) {
+                        index.remove(id, now_ms);
+                        hnsw_removed.insert(index, (id, vector));
+                    }
+
+                    if let Some(vector) = self.index_hooks.hnsw_index_value(index, &doc) {
+                        hnsw_inserted.insert(index, id);
+                        index.insert(id, vector.into_owned(), now_ms)?;
+                    }
+                }
+            }
+
             Ok(())
         })();
 
@@ -1240,19 +1159,19 @@ impl Collection {
                 k.remove(id, &v, now_ms);
             }
             for (k, v) in bm25_inserted {
-                k.remove(*v.0, v.1, now_ms);
+                k.remove(v.0, &v.1, now_ms);
             }
             for (k, v) in hnsw_inserted {
-                k.remove(*v, now_ms);
+                k.remove(v, now_ms);
             }
             for (k, v) in btree_removed {
                 let _ = k.insert(id, v.into_owned(), now_ms);
             }
             for (k, v) in bm25_removed {
-                let _ = k.insert(*v.0, v.1, now_ms);
+                let _ = k.insert(v.0, &v.1, now_ms);
             }
             for (k, v) in hnsw_removed {
-                let _ = k.insert(*v.0, v.1.to_vec(), now_ms);
+                let _ = k.insert(v.0, v.1.to_vec(), now_ms);
             }
         };
 
@@ -1266,42 +1185,6 @@ impl Collection {
         if let Err(err) = self.storage.put(&path, &doc, Some(ver)).await {
             rollback_indexes();
             return Err(err);
-        }
-
-        if !removed_segment_ids.is_empty() || !updated_segment_ids.is_empty() {
-            let mut doc_segments_write = self.doc_segments.write();
-            if let Some(segments) = doc_segments_write.get_mut(&id) {
-                segments.retain(|sid| !removed_segment_ids.contains(sid));
-
-                let mut seen: HashSet<u64> = HashSet::from_iter(segments.iter().cloned());
-                for sid in &updated_segment_ids {
-                    if seen.insert(*sid) {
-                        segments.push(*sid);
-                    }
-                    self.inverted_doc_segments.insert(*sid, id);
-                }
-
-                let max_bucket_id = {
-                    let mut current_bucket = self.current_bucket.write();
-                    let size_increase = CountingWriter::count_cbor(&(&id, &segments)) + 2;
-
-                    if current_bucket.1 == 0
-                        || current_bucket.1 + size_increase < self.bucket_overload_size
-                    {
-                        current_bucket.1 += size_increase;
-                    } else {
-                        current_bucket.0 += 1;
-                        current_bucket.1 = size_increase;
-                    }
-                    current_bucket.0
-                };
-
-                let mut dirty_buckets = self.dirty_buckets.write();
-                dirty_buckets
-                    .entry(max_bucket_id)
-                    .or_default()
-                    .insert(id, segments.clone());
-            }
         }
 
         self.update_metadata(|meta| {
@@ -1342,19 +1225,11 @@ impl Collection {
 
         let now_ms = unix_ms();
         {
-            if !self.doc_ids.write().remove_checked(id) {
+            if !self.doc_ids_index.write().remove(&id) {
                 return Ok(());
             }
 
-            for bucket in self.dirty_buckets.write().values_mut() {
-                bucket.remove(&id);
-            }
-
-            if let Some(segments) = self.doc_segments.write().remove(&id) {
-                for sid in segments {
-                    self.inverted_doc_segments.remove(&sid);
-                }
-            }
+            self.doc_ids.write().remove(id);
         }
 
         self.update_metadata(|meta| {
@@ -1366,24 +1241,22 @@ impl Collection {
         if let Ok((doc, _)) = self.storage.get::<DocumentOwned>(&Self::doc_path(id)).await {
             let doc = Document::try_from_doc(self.schema(), doc)?;
             for index in &self.btree_indexes {
-                if let Some(fv) = doc.get_virtual_field(index.virtual_field()) {
-                    index.remove(id, &fv, now_ms);
+                if let Some(fv) = self.index_hooks.btree_index_value(index, &doc) {
+                    if fv.as_ref() != &FieldValue::Null {
+                        index.remove(id, &fv, now_ms);
+                    }
                 }
             }
 
-            for (bm25, hnsw) in &self.bm25_hnsw_indexes {
-                if let Some(Fv::Array(segments)) = doc.get_field(bm25.field_name()) {
-                    for seg in segments {
-                        if let Some(sid) = Segment::id_from(seg) {
-                            if let Some(text) = Segment::text_from(seg) {
-                                bm25.remove(*sid, text, now_ms);
-                            }
+            for index in &self.bm25_indexes {
+                if let Some(text) = self.index_hooks.bm25_index_value(index, &doc) {
+                    index.remove(id, &text, now_ms);
+                }
+            }
 
-                            if Segment::vec_from(seg).is_some() {
-                                hnsw.remove(*sid, now_ms);
-                            }
-                        }
-                    }
+            for index in &self.hnsw_indexes {
+                if self.index_hooks.hnsw_index_value(index, &doc).is_some() {
+                    index.remove(id, now_ms);
                 }
             }
             let _ = self.storage.delete(&Self::doc_path(id)).await;
@@ -1449,40 +1322,30 @@ impl Collection {
         let mut result = Vec::new();
 
         self.search_count.fetch_add(1, Ordering::Relaxed);
-
         if let Some(params) = query.search {
-            if let Some((bm25, hnsw)) = self
-                .bm25_hnsw_indexes
-                .iter()
-                .find(|i| i.0.field_name() == params.field)
-            {
-                let mut results: Vec<Vec<u64>> = Vec::new();
-                if let Some(ref text) = params.text {
+            let mut results: Vec<Vec<u64>> = Vec::new();
+
+            if let Some(ref text) = params.text {
+                for index in self.bm25_indexes.iter() {
                     let rt = if params.logical_search {
-                        bm25.search_advanced(text, top_k, params.bm25_params)
+                        index.search_advanced(text, top_k, params.bm25_params.clone())
                     } else {
-                        bm25.search(text, top_k, params.bm25_params)
+                        index.search(text, top_k, params.bm25_params.clone())
                     };
                     results.push(rt.into_iter().map(|r| r.0).collect());
                 }
+            }
 
-                if let Some(ref vector) = params.vector {
-                    let rt = hnsw.search(vector, top_k);
+            if let Some(ref vector) = params.vector {
+                for index in self.hnsw_indexes.iter() {
+                    let rt = index.search(vector, top_k);
                     results.push(rt.into_iter().map(|r| r.0).collect());
                 }
-
-                let reranker = params.reranker.unwrap_or_default();
-                let reranked = reranker.rerank(&results);
-                let mut seen = HashSet::new();
-                for (sid, _) in reranked {
-                    if let Some(entry) = self.inverted_doc_segments.get(&sid) {
-                        let id = *entry;
-                        if seen.insert(id) {
-                            candidates.push(id);
-                        }
-                    }
-                }
             }
+
+            let reranker = params.reranker.unwrap_or_default();
+            let reranked = reranker.rerank(&results);
+            candidates.extend(reranked.into_iter().map(|(id, _)| id));
 
             if candidates.is_empty() {
                 return Ok(result);
@@ -1598,7 +1461,9 @@ impl Collection {
                 {
                     let _: Vec<()> = index.range_query_with(filter, |_, ids| {
                         for id in ids {
-                            if (candidates.is_empty() || candidates.contains(id)) && seen.insert(*id) {
+                            if (candidates.is_empty() || candidates.contains(id))
+                                && seen.insert(*id)
+                            {
                                 result.push(*id);
                                 if limit > 0 && result.len() >= limit {
                                     return (false, vec![]);
@@ -1647,8 +1512,11 @@ impl Collection {
             }
             Filter::Not(query) => {
                 let exclude: Vec<u64> = self.filter_by_field(*query, &[], 0)?;
-                for id in self.doc_segments.read().keys() {
-                    if !exclude.contains(id) && (candidates.is_empty() || candidates.contains(id)) && seen.insert(*id) {
+                for id in self.doc_ids_index.read().iter() {
+                    if !exclude.contains(id)
+                        && (candidates.is_empty() || candidates.contains(id))
+                        && seen.insert(*id)
+                    {
                         result.push(*id);
                         if limit > 0 && result.len() >= limit {
                             return Ok(result);
@@ -1673,23 +1541,23 @@ impl Collection {
 
         match query {
             RangeQuery::Eq(key) => {
-                if self.doc_segments.read().contains_key(&key) {
+                if self.doc_ids_index.read().contains(&key) {
                     results.push(key);
                 }
             }
             RangeQuery::Gt(start_key) => {
-                for (id, _) in self
-                    .doc_segments
+                for id in self
+                    .doc_ids_index
                     .read()
                     .range(std::ops::RangeFrom { start: start_key })
-                    .filter(|&(id, _)| *id > start_key)
+                    .filter(|&id| *id > start_key)
                 {
                     results.push(*id);
                 }
             }
             RangeQuery::Ge(start_key) => {
-                for (id, _) in self
-                    .doc_segments
+                for id in self
+                    .doc_ids_index
                     .read()
                     .range(std::ops::RangeFrom { start: start_key })
                 {
@@ -1697,8 +1565,8 @@ impl Collection {
                 }
             }
             RangeQuery::Lt(end_key) => {
-                for (id, _) in self
-                    .doc_segments
+                for id in self
+                    .doc_ids_index
                     .read()
                     .range(std::ops::RangeTo { end: end_key })
                     .rev()
@@ -1707,8 +1575,8 @@ impl Collection {
                 }
             }
             RangeQuery::Le(end_key) => {
-                for (id, _) in self
-                    .doc_segments
+                for id in self
+                    .doc_ids_index
                     .read()
                     .range(std::ops::RangeToInclusive { end: end_key })
                     .rev()
@@ -1717,14 +1585,14 @@ impl Collection {
                 }
             }
             RangeQuery::Between(start_key, end_key) => {
-                for (id, _) in self.doc_segments.read().range(start_key..=end_key) {
+                for id in self.doc_ids_index.read().range(start_key..=end_key) {
                     results.push(*id);
                 }
             }
             RangeQuery::Include(keys) => {
-                let doc_segments = self.doc_segments.read();
+                let doc_ids_index = self.doc_ids_index.read();
                 for k in keys.into_iter() {
-                    if doc_segments.contains_key(&k) {
+                    if doc_ids_index.contains(&k) {
                         results.push(k);
                     }
                 }
@@ -1763,7 +1631,7 @@ impl Collection {
             RangeQuery::Not(query) => {
                 // 先收集要排除的 key，再遍历全集差集
                 let exclude: Vec<u64> = self.filter_by_id(*query);
-                for (id, _) in self.doc_segments.read().iter() {
+                for id in self.doc_ids_index.read().iter() {
                     if !exclude.contains(id) {
                         results.push(*id);
                     }
@@ -1839,7 +1707,7 @@ mod tests {
         error::DBError,
         index::HnswConfig,
         query::{Filter, Query, RangeQuery, Search},
-        schema::{Document, Fe, Ft, Fv, Json, Schema, Segment},
+        schema::{AndaDBSchema, Document, Fv, Json, Schema, Vector},
         storage::StorageConfig,
     };
     use object_store::memory::InMemory;
@@ -1847,14 +1715,14 @@ mod tests {
     use std::{collections::BTreeMap, sync::Arc};
 
     // 测试用的文档结构
-    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, AndaDBSchema)]
     struct TestDoc {
         pub _id: u64,
         pub name: String,
         pub age: u32,
         pub tags: Vec<String>,
         pub metadata: BTreeMap<String, Json>,
-        pub segments: Vec<Segment>,
+        pub vector: Vector,
     }
 
     // 创建测试数据库和集合的辅助函数
@@ -1880,26 +1748,7 @@ mod tests {
         F: AsyncFnOnce(&mut Collection) -> Result<(), DBError>,
     {
         // 创建测试文档的模式
-        let mut schema = Schema::builder();
-        schema
-            .add_field(
-                Fe::new("name".to_string(), Ft::Text)?.with_description("Person name".to_string()),
-            )?
-            .add_field(
-                Fe::new("age".to_string(), Ft::U64)?.with_description("Person age".to_string()),
-            )?
-            .add_field(
-                Fe::new("tags".to_string(), Ft::Array(vec![Ft::Text]))?
-                    .with_description("Person tags".to_string()),
-            )?
-            .add_field(
-                Fe::new("metadata".to_string(), Ft::Map(BTreeMap::new()))?
-                    .with_description("Additional metadata".to_string()),
-            )?
-            .with_segments("segments", true)?;
-
-        let schema = schema.build()?;
-
+        let schema = TestDoc::schema()?;
         let collection_config = CollectionConfig {
             name: "test_collection".to_string(),
             description: "Test collection".to_string(),
@@ -1920,10 +1769,10 @@ mod tests {
             age,
             tags: tags.iter().map(|s| s.to_string()).collect(),
             metadata: BTreeMap::new(),
-            segments: vec![
-                Segment::new(format!("This is a segment for {name}"), None)
-                    .with_vec_f32(vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]),
-            ],
+            vector: vec![0.1f32, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+                .into_iter()
+                .map(bf16::from_f32)
+                .collect(),
         }
     }
 
@@ -1931,7 +1780,14 @@ mod tests {
     async fn test_collection_create() -> Result<(), DBError> {
         let db = setup_test_db().await?;
 
-        let collection = create_test_collection(&db, async |_| Ok(())).await?;
+        let collection = create_test_collection(&db, async |c| {
+            c.create_bm25_index_nx(&["name", "tags", "metadata"])
+                .await?;
+            c.create_hnsw_index_nx("vector", HnswConfig::default())
+                .await?;
+            Ok(())
+        })
+        .await?;
 
         assert_eq!(collection.name(), "test_collection");
         assert_eq!(collection.metadata().config.description, "Test collection");
@@ -1950,8 +1806,7 @@ mod tests {
             assert_eq!(collection.name(), "test_collection");
 
             // 添加一个文档以确保有数据可以在重新打开时加载
-            let mut doc = create_test_doc(0, "Alice", 30, vec!["smart", "friendly"]);
-            collection.obtain_segment_ids(&mut doc.segments);
+            let doc = create_test_doc(0, "Alice", 30, vec!["smart", "friendly"]);
             let doc_obj = Document::try_from(collection.schema(), &doc)?;
             let id = collection.add(doc_obj).await?;
             assert_eq!(id, 1);
@@ -2007,14 +1862,12 @@ mod tests {
         let collection = create_test_collection(&db, async |_| Ok(())).await?;
 
         // 添加文档
-        let mut doc1 = create_test_doc(0, "Alice", 30, vec!["smart", "friendly"]);
-        collection.obtain_segment_ids(&mut doc1.segments);
+        let doc1 = create_test_doc(0, "Alice", 30, vec!["smart", "friendly"]);
         let doc_obj1 = Document::try_from(collection.schema(), &doc1)?;
         let id1 = collection.add(doc_obj1).await?;
         assert_eq!(id1, 1);
 
-        let mut doc2 = create_test_doc(0, "Bob", 25, vec!["tall", "quiet"]);
-        collection.obtain_segment_ids(&mut doc2.segments);
+        let doc2 = create_test_doc(0, "Bob", 25, vec!["tall", "quiet"]);
         let doc_obj2 = Document::try_from(collection.schema(), &doc2)?;
         let id2 = collection.add(doc_obj2).await?;
         assert_eq!(id2, 2);
@@ -2050,8 +1903,11 @@ mod tests {
 
             // 创建搜索索引
             collection
-                .create_search_index_nx(
-                    "segments",
+                .create_bm25_index_nx(&["name", "tags", "metadata"])
+                .await?;
+            collection
+                .create_hnsw_index_nx(
+                    "vector",
                     HnswConfig {
                         dimension: 10,
                         ..Default::default()
@@ -2069,8 +1925,7 @@ mod tests {
             ("Charlie", 35, vec!["smart", "tall"]),
             ("David", 40, vec!["friendly", "quiet"]),
         ] {
-            let mut doc = create_test_doc(0, name, age, tags);
-            collection.obtain_segment_ids(&mut doc.segments);
+            let doc = create_test_doc(0, name, age, tags);
             let doc_obj = Document::try_from(collection.schema(), &doc)?;
             collection.add(doc_obj).await?;
         }
@@ -2126,7 +1981,6 @@ mod tests {
         let result: Vec<TestDoc> = collection
             .search_as(Query {
                 search: Some(Search {
-                    field: "segments".to_string(),
                     text: Some("Alice".to_string()),
                     ..Default::default()
                 }),
@@ -2141,7 +1995,6 @@ mod tests {
         let result: Vec<TestDoc> = collection
             .search_as(Query {
                 search: Some(Search {
-                    field: "segments".to_string(),
                     vector: Some(vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]),
                     ..Default::default()
                 }),
@@ -2155,8 +2008,7 @@ mod tests {
         let result: Vec<TestDoc> = collection
             .search_as(Query {
                 search: Some(Search {
-                    field: "segments".to_string(),
-                    text: Some("segment".to_string()),
+                    text: Some("tall".to_string()),
                     ..Default::default()
                 }),
                 filter: Some(Filter::Field((
@@ -2189,8 +2041,11 @@ mod tests {
 
                 // 创建搜索索引
                 collection
-                    .create_search_index_nx(
-                        "segments",
+                    .create_bm25_index_nx(&["name", "tags", "metadata"])
+                    .await?;
+                collection
+                    .create_hnsw_index_nx(
+                        "vector",
                         HnswConfig {
                             dimension: 10,
                             ..Default::default()
@@ -2202,8 +2057,7 @@ mod tests {
             .await?;
 
             // 添加文档
-            let mut doc = create_test_doc(0, "Alice", 30, vec!["smart", "friendly"]);
-            collection.obtain_segment_ids(&mut doc.segments);
+            let doc = create_test_doc(0, "Alice", 30, vec!["smart", "friendly"]);
             let doc_obj = Document::try_from(collection.schema(), &doc)?;
             collection.add(doc_obj).await?;
 
@@ -2260,8 +2114,7 @@ mod tests {
         let collection = create_test_collection(&db, async |_| Ok(())).await?;
 
         // 添加一个文档
-        let mut doc = create_test_doc(0, "Alice", 30, vec!["smart", "friendly"]);
-        collection.obtain_segment_ids(&mut doc.segments);
+        let doc = create_test_doc(0, "Alice", 30, vec!["smart", "friendly"]);
         let doc_obj = Document::try_from(collection.schema(), &doc)?;
         collection.add(doc_obj).await?;
 
@@ -2269,8 +2122,7 @@ mod tests {
         collection.set_read_only(true);
 
         // 尝试添加另一个文档，应该失败
-        let mut doc2 = create_test_doc(0, "Bob", 25, vec!["tall", "quiet"]);
-        collection.obtain_segment_ids(&mut doc2.segments);
+        let doc2 = create_test_doc(0, "Bob", 25, vec!["tall", "quiet"]);
         let doc_obj2 = Document::try_from(collection.schema(), &doc2)?;
         let result = collection.add(doc_obj2).await;
 
@@ -2284,8 +2136,7 @@ mod tests {
         collection.set_read_only(false);
 
         // 现在应该可以添加文档
-        let mut doc3 = create_test_doc(0, "Charlie", 35, vec!["smart", "tall"]);
-        collection.obtain_segment_ids(&mut doc3.segments);
+        let doc3 = create_test_doc(0, "Charlie", 35, vec!["smart", "tall"]);
         let doc_obj3 = Document::try_from(collection.schema(), &doc3)?;
         let id = collection.add(doc_obj3).await?;
         assert_eq!(id, 2);
@@ -2346,8 +2197,7 @@ mod tests {
         for i in 0..10 {
             let collection_clone = collection.clone();
             let handle = tokio::spawn(async move {
-                let mut doc = create_test_doc(0, &format!("Person{i}"), 20 + i, vec!["tag"]);
-                collection_clone.obtain_segment_ids(&mut doc.segments);
+                let doc = create_test_doc(0, &format!("Person{i}"), 20 + i, vec!["tag"]);
                 let doc_obj = Document::try_from(collection_clone.schema(), &doc).unwrap();
                 collection_clone.add(doc_obj).await
             });
@@ -2394,8 +2244,7 @@ mod tests {
         let initial_version = collection.metadata().stats.version;
 
         // 添加文档应该更新元数据
-        let mut doc = create_test_doc(0, "Alice", 30, vec!["smart", "friendly"]);
-        collection.obtain_segment_ids(&mut doc.segments);
+        let doc = create_test_doc(0, "Alice", 30, vec!["smart", "friendly"]);
         let doc_obj = Document::try_from(collection.schema(), &doc)?;
         collection.add(doc_obj).await?;
 
@@ -2433,8 +2282,7 @@ mod tests {
         .await?;
 
         // 添加文档
-        let mut doc = create_test_doc(0, "Alice", 30, vec!["smart", "friendly"]);
-        collection.obtain_segment_ids(&mut doc.segments);
+        let doc = create_test_doc(0, "Alice", 30, vec!["smart", "friendly"]);
         let doc_obj = Document::try_from(collection.schema(), &doc)?;
         let id = collection.add(doc_obj).await?;
 

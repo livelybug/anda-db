@@ -34,15 +34,12 @@ pub struct Query {
 /// Supports both text-based and vector-based search with optional reranking.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Search {
-    /// The field name to search against.
-    pub field: String,
-
     /// The text query to search for.
     ///
     /// Used for full-text search operations.
     pub text: Option<String>,
 
-    /// The vector query to search for.
+    /// The vector query (field, vector) to search for.
     ///
     /// Used for vector similarity search operations.
     pub vector: Option<Vec<f32>>,
