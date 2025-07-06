@@ -5,8 +5,8 @@ use std::{fmt::Debug, hash::Hash};
 
 use super::from_virtual_field_name;
 pub use anda_db_tfs::{
-    BM25Config, BM25Error, BM25Metadata, BM25Params, BM25Stats, TokenizerChain, default_tokenizer,
-    jieba_tokenizer,
+    BM25Config, BM25Error, BM25Metadata, BM25Params, BM25Stats, TokenizerChain, collect_tokens,
+    default_tokenizer, jieba_tokenizer,
 };
 
 use crate::{
@@ -53,6 +53,12 @@ impl BM25 {
 
     fn posting_path(name: &str, bucket: u32) -> String {
         format!("bm25_indexes/{name}/p_{bucket}.cbor")
+    }
+
+    pub fn collect_tokens(tokenizer: &TokenizerChain, text: &str) -> Vec<String> {
+        let mut tokenizer = tokenizer.clone();
+        let token_freqs = collect_tokens(&mut tokenizer, text, None);
+        token_freqs.into_keys().collect()
     }
 
     pub async fn new(

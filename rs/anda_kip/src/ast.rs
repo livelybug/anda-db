@@ -13,6 +13,7 @@
 //! - **META**: For knowledge exploration and grounding
 
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 pub use serde_json::{Map, Number};
 
@@ -219,6 +220,22 @@ pub enum ConceptMatcher {
     Object { r#type: String, name: String },
 }
 
+impl fmt::Display for ConceptMatcher {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ConceptMatcher::ID(val) => write!(f, "{{id: {val:?}}}"),
+            ConceptMatcher::Type(val) => write!(f, "{{type: {val:?}}}"),
+            ConceptMatcher::Name(val) => write!(f, "{{name: {val:?}}}"),
+            ConceptMatcher::Object {
+                r#type: val_type,
+                name: val_name,
+            } => {
+                write!(f, "{{type: {val_type:?}, name: {val_name:?}}}")
+            }
+        }
+    }
+}
+
 /// Implements conversion from a vector of KeyValue pairs to a ConceptMatcher.
 impl TryFrom<Vec<KeyValue>> for ConceptMatcher {
     type Error = String;
@@ -335,9 +352,9 @@ pub struct KqlQuery {
     /// Optional ORDER BY conditions for result sorting
     pub order_by: Option<Vec<OrderByCondition>>,
     /// Optional LIMIT for result count restriction
-    pub limit: Option<u64>,
+    pub limit: Option<usize>,
     /// Optional OFFSET for result pagination
-    pub offset: Option<u64>,
+    pub offset: Option<usize>,
 }
 
 /// Represents the FIND clause of a KQL query.
@@ -653,11 +670,21 @@ pub enum DescribeTarget {
     /// DESCRIBE DOMAINS - lists all knowledge domains
     Domains,
     /// DESCRIBE CONCEPT_TYPES - lists all concept types
-    ConceptTypes,
+    ConceptTypes {
+        /// Optional LIMIT for result count restriction
+        limit: Option<usize>,
+        /// Optional OFFSET for result pagination
+        offset: Option<usize>,
+    },
     /// DESCRIBE CONCEPT_TYPE "TypeName" - details about a specific concept type
     ConceptType(String),
     /// DESCRIBE PROPOSITION_TYPES - lists all proposition types
-    PropositionTypes,
+    PropositionTypes {
+        /// Optional LIMIT for result count restriction
+        limit: Option<usize>,
+        /// Optional OFFSET for result pagination
+        offset: Option<usize>,
+    },
     /// DESCRIBE PROPOSITION_TYPE "TypeName" - details about a specific proposition type
     PropositionType(String),
 }
@@ -673,7 +700,7 @@ pub struct SearchCommand {
     /// Optional type constraint for the search
     pub in_type: Option<String>,
     /// Optional limit on the number of results
-    pub limit: Option<u64>,
+    pub limit: Option<usize>,
 }
 
 /// Represents the target of a search command.

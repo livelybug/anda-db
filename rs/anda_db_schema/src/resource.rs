@@ -60,7 +60,7 @@ mod tests {
                     ("d".to_string(), Ft::Option(Box::new(Ft::Text)),),
                     ("m".to_string(), Ft::Option(Box::new(Ft::Text)),),
                     ("b".to_string(), Ft::Option(Box::new(Ft::Bytes)),),
-                    ("s".to_string(), FieldType::Option(Box::new(Ft::U64))),
+                    ("s".to_string(), Ft::Option(Box::new(Ft::U64))),
                     ("h".to_string(), Ft::Option(Box::new(Ft::Bytes)),),
                 ]
                 .into_iter()

@@ -39,7 +39,6 @@ pub struct Knowledge {
     // confidence score
     pub score: Option<i64>,
     // verification hash
-    #[field_type = "Option<Bytes>"]
     pub hash: Option<[u8; 32]>,
 }
 

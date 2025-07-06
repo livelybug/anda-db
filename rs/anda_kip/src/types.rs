@@ -2,15 +2,31 @@ use serde::{Deserialize, Serialize};
 
 use crate::ast::{DotPathVar, Json, Map};
 
+/// The absolute root type of all knowledge concepts.
+pub static META_CONCEPT_TYPE: &str = "$ConceptType";
+
+/// The absolute root type of all knowledge propositions.
+pub static META_PROPOSITION_TYPE: &str = "$PropositionType";
+
+/// The agent itself: {type: "Person", name: "$self"}
+pub static META_SELF_NAME: &str = "$self";
+
+/// The system itself: {type: "System", name: "$system"}
+pub static META_SYSTEM_NAME: &str = "$system";
+
+pub static DOMAIN_TYPE: &str = "Domain";
+
+pub static PERSON_TYPE: &str = "Person";
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(tag = "$type")]
+#[serde(tag = "_type")]
 pub enum Entity {
     ConceptNode(ConceptNode),
     PropositionLink(PropositionLink),
 }
 
 #[derive(Debug, Serialize)]
-#[serde(tag = "$type")]
+#[serde(tag = "_type")]
 pub enum EntityRef<'a> {
     ConceptNode(ConceptNodeRef<'a>),
     PropositionLink(PropositionLinkRef<'a>),

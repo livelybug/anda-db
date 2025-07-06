@@ -93,7 +93,7 @@ fn extract_text<'a>(texts: &mut Vec<&'a str>, val: &'a Fv) {
     }
 }
 
-fn extract_json_text<'a>(texts: &mut Vec<&'a str>, val: &'a Json) {
+pub fn extract_json_text<'a>(texts: &mut Vec<&'a str>, val: &'a Json) {
     match val {
         Json::String(s) => texts.push(s),
         Json::Object(obj) => {

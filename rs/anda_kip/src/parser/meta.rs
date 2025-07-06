@@ -7,6 +7,7 @@ use nom::{
 };
 
 use super::common::*;
+use super::kql::{parse_limit_clause, parse_offset_clause};
 use crate::ast::*;
 
 // --- Top Level META Parser ---
@@ -25,13 +26,25 @@ fn parse_describe_command(input: &str) -> IResult<&str, DescribeTarget> {
     preceded(
         ws(tag("DESCRIBE ")),
         ws(alt((
-            value(DescribeTarget::Primer, tag("PRIMER")),
-            value(DescribeTarget::Domains, tag("DOMAINS")),
-            value(DescribeTarget::ConceptTypes, tag("CONCEPT TYPES")),
-            value(DescribeTarget::PropositionTypes, tag("PROPOSITION TYPES")),
+            value(DescribeTarget::Primer, ws(tag("PRIMER"))),
+            value(DescribeTarget::Domains, ws(tag("DOMAINS"))),
+            map(
+                preceded(
+                    ws(tag("CONCEPT TYPES")),
+                    (opt(ws(parse_limit_clause)), opt(ws(parse_offset_clause))),
+                ),
+                |(limit, offset)| DescribeTarget::ConceptTypes { limit, offset },
+            ),
             map(
                 preceded(tag("CONCEPT TYPE "), ws(quoted_string)),
                 DescribeTarget::ConceptType,
+            ),
+            map(
+                preceded(
+                    ws(tag("PROPOSITION TYPES")),
+                    (opt(ws(parse_limit_clause)), opt(ws(parse_offset_clause))),
+                ),
+                |(limit, offset)| DescribeTarget::PropositionTypes { limit, offset },
             ),
             map(
                 preceded(tag("PROPOSITION TYPE "), ws(quoted_string)),
@@ -54,7 +67,7 @@ fn parse_search_command(input: &str) -> IResult<&str, SearchCommand> {
                 ))),
                 ws(quoted_string),
                 opt(preceded(tag("WITH TYPE "), ws(quoted_string))),
-                opt(preceded(tag("LIMIT "), ws(nom::character::complete::u64))),
+                opt(preceded(tag("LIMIT "), ws(nom::character::complete::usize))),
             ),
         ),
         |(target, term, in_type, limit)| SearchCommand {
@@ -120,11 +133,63 @@ mod tests {
         );
         assert_eq!(
             parse_describe_command("DESCRIBE CONCEPT TYPES"),
-            Ok(("", DescribeTarget::ConceptTypes))
+            Ok((
+                "",
+                DescribeTarget::ConceptTypes {
+                    limit: None,
+                    offset: None
+                }
+            ))
+        );
+        assert_eq!(
+            parse_describe_command("DESCRIBE CONCEPT TYPES LIMIT 5"),
+            Ok((
+                "",
+                DescribeTarget::ConceptTypes {
+                    limit: Some(5),
+                    offset: None
+                }
+            ))
+        );
+        assert_eq!(
+            parse_describe_command("DESCRIBE CONCEPT TYPES LIMIT 5 OFFSET 10"),
+            Ok((
+                "",
+                DescribeTarget::ConceptTypes {
+                    limit: Some(5),
+                    offset: Some(10)
+                }
+            ))
         );
         assert_eq!(
             parse_describe_command("DESCRIBE PROPOSITION TYPES"),
-            Ok(("", DescribeTarget::PropositionTypes))
+            Ok((
+                "",
+                DescribeTarget::PropositionTypes {
+                    limit: None,
+                    offset: None
+                }
+            ))
+        );
+        assert_eq!(
+            parse_describe_command("DESCRIBE PROPOSITION TYPES LIMIT 5"),
+            Ok((
+                "",
+                DescribeTarget::PropositionTypes {
+                    limit: Some(5),
+                    offset: None
+                }
+            ))
+        );
+        assert_eq!(
+            parse_describe_command("DESCRIBE PROPOSITION TYPES LIMIT 5 OFFSET 10"),
+            Ok((
+                "",
+                DescribeTarget::PropositionTypes {
+                    limit: Some(5),
+                    offset: Some(10)
+                }
+            ))
         );
         assert_eq!(
             parse_describe_command("DESCRIBE CONCEPT TYPE \"Drug\""),

@@ -61,6 +61,8 @@ struct TestAllTypes {
 
     // 字节数组
     data: Vec<u8>,
+    array: [u8; 32],
+    opt_array: Option<[u8; 32]>,
 
     // 数组类型
     numbers: Vec<i32>,
@@ -239,6 +241,14 @@ mod tests {
         assert_eq!(
             schema.get_field("data").unwrap().r#type(),
             &FieldType::Bytes
+        );
+        assert_eq!(
+            schema.get_field("array").unwrap().r#type(),
+            &FieldType::Bytes
+        );
+        assert_eq!(
+            schema.get_field("opt_array").unwrap().r#type(),
+            &FieldType::Option(Box::new(FieldType::Bytes))
         );
 
         // 验证数组类型

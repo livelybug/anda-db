@@ -637,6 +637,11 @@ impl Collection {
         Document::new(self.schema.clone())
     }
 
+    /// Tokenizes the given text using the collection's tokenizer.
+    pub fn tokenize(&self, text: &str) -> Vec<String> {
+        BM25::collect_tokens(&self.tokenizer, text)
+    }
+
     /// Creates a BTree index on the specified field.
     ///
     /// # Arguments

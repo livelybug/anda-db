@@ -1,8 +1,11 @@
 use anda_db_schema::{
     AndaDBSchema, FieldEntry, FieldType, FieldTyped, FieldValue, Json, Map, Schema, SchemaError,
 };
+use anda_kip::{ConceptNode, ConceptNodeRef, EntityRef, PropositionLinkRef};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, BTreeSet},
     fmt,
     str::FromStr,
@@ -21,6 +24,26 @@ impl Concept {
     pub fn entity_id(&self) -> EntityID {
         EntityID::Concept(self._id)
     }
+
+    pub fn to_concept_node(&self) -> Json {
+        json!(EntityRef::ConceptNode(ConceptNodeRef {
+            id: self.entity_id().to_string().as_str(),
+            r#type: &self.r#type,
+            name: &self.name,
+            attributes: &self.attributes,
+            metadata: &self.metadata,
+        }))
+    }
+
+    pub fn into_concept_node(self) -> ConceptNode {
+        ConceptNode {
+            id: self.entity_id().to_string(),
+            r#type: self.r#type,
+            name: self.name,
+            attributes: self.attributes,
+            metadata: self.metadata,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, AndaDBSchema)]
@@ -36,6 +59,39 @@ pub struct Proposition {
     pub predicates: BTreeSet<String>,
 
     pub properties: BTreeMap<String, Properties>,
+}
+
+impl Proposition {
+    pub fn entity_id(&self, predicate: String) -> EntityID {
+        EntityID::Proposition(self._id, predicate)
+    }
+
+    pub fn to_proposition_link(&self, predicate: &str) -> Option<Json> {
+        match self.predicates.get(predicate) {
+            Some(predicate) => {
+                let prop = self
+                    .properties
+                    .get(predicate)
+                    .map(Cow::Borrowed)
+                    .unwrap_or_else(|| {
+                        Cow::Owned(Properties {
+                            attributes: Map::new(),
+                            metadata: Map::new(),
+                        })
+                    });
+
+                Some(json!(EntityRef::PropositionLink(PropositionLinkRef {
+                    id: self.entity_id(predicate.to_string()).to_string().as_str(),
+                    subject: self.subject.to_string().as_str(),
+                    predicate,
+                    object: self.object.to_string().as_str(),
+                    attributes: &prop.attributes,
+                    metadata: &prop.metadata,
+                })))
+            }
+            None => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, FieldTyped)]
@@ -139,6 +195,27 @@ impl<'de> Deserialize<'de> for EntityID {
     {
         deserializer.deserialize_str(EntityIDVisitor)
     }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct DomainInfo {
+    pub domain_name: String,
+    pub description: String,
+    pub key_concept_types: Vec<ConceptTypeInfo>,
+    pub key_proposition_types: Vec<PropositionTypeInfo>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ConceptTypeInfo {
+    pub type_name: String,
+    pub description: String,
+    pub key_instances: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PropositionTypeInfo {
+    pub predicate_name: String,
+    pub description: String,
 }
 
 #[cfg(test)]

@@ -419,14 +419,18 @@ fn parse_order_by_condition(input: &str) -> IResult<&str, OrderByCondition> {
     .parse(input)
 }
 
-fn parse_limit_clause(input: &str) -> IResult<&str, u64> {
-    preceded(ws(tag("LIMIT ")), map(nom::character::complete::u64, |n| n)).parse(input)
+pub fn parse_limit_clause(input: &str) -> IResult<&str, usize> {
+    preceded(
+        ws(tag("LIMIT ")),
+        map(nom::character::complete::usize, |n| n),
+    )
+    .parse(input)
 }
 
-fn parse_offset_clause(input: &str) -> IResult<&str, u64> {
+pub fn parse_offset_clause(input: &str) -> IResult<&str, usize> {
     preceded(
         ws(tag("OFFSET ")),
-        map(nom::character::complete::u64, |n| n),
+        map(nom::character::complete::usize, |n| n),
     )
     .parse(input)
 }

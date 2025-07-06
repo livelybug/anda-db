@@ -2,8 +2,8 @@ use anda_db::{
     collection::{Collection, CollectionConfig},
     database::{AndaDB, DBMetadata},
     error::DBError,
-    index::{virtual_field_name, virtual_field_value},
-    query::{Filter, RangeQuery},
+    index::{extract_json_text, virtual_field_name, virtual_field_value},
+    query::{Filter, Query, RangeQuery, Search},
 };
 use anda_db_schema::Fv;
 use anda_db_tfs::jieba_tokenizer;
@@ -34,7 +34,7 @@ impl Executor for CognitiveNexus {
         match command {
             Command::Kql(command) => self.execute_kql(command, dry_run).await,
             Command::Kml(command) => self.execute_kml(command, dry_run).await,
-            Command::Meta(command) => self.execute_meta(command, dry_run).await,
+            Command::Meta(command) => self.execute_meta(command).await,
         }
     }
 }
@@ -149,18 +149,18 @@ impl CognitiveNexus {
         }
     }
 
-    async fn execute_meta(&self, command: MetaCommand, dry_run: bool) -> Result<Json, KipError> {
+    async fn execute_meta(&self, command: MetaCommand) -> Result<Json, KipError> {
         match command {
             MetaCommand::Describe(DescribeTarget::Primer) => self.execute_describe_primer().await,
             MetaCommand::Describe(DescribeTarget::Domains) => self.execute_describe_domains().await,
-            MetaCommand::Describe(DescribeTarget::ConceptTypes) => {
-                self.execute_describe_concept_types().await
+            MetaCommand::Describe(DescribeTarget::ConceptTypes { limit, offset }) => {
+                self.execute_describe_concept_types(limit, offset).await
             }
             MetaCommand::Describe(DescribeTarget::ConceptType(name)) => {
                 self.execute_describe_concept_type(name).await
             }
-            MetaCommand::Describe(DescribeTarget::PropositionTypes) => {
-                self.execute_describe_proposition_types().await
+            MetaCommand::Describe(DescribeTarget::PropositionTypes { limit, offset }) => {
+                self.execute_describe_proposition_types(limit, offset).await
             }
             MetaCommand::Describe(DescribeTarget::PropositionType(name)) => {
                 self.execute_describe_proposition_type(name).await
@@ -367,8 +367,8 @@ impl CognitiveNexus {
         ctx: &mut QueryContext,
         clause: FindClause,
         order_by: Option<Vec<OrderByCondition>>,
-        offset: Option<u64>,
-        limit: Option<u64>,
+        offset: Option<usize>,
+        limit: Option<usize>,
     ) -> Result<Vec<Json>, KipError> {
         let mut result: Vec<Json> = Vec::with_capacity(clause.expressions.len());
         let bindings: HashMap<String, Vec<EntityID>> = ctx
@@ -378,8 +378,8 @@ impl CognitiveNexus {
             .collect();
 
         let order_by = order_by.unwrap_or_default();
-        let offset = offset.unwrap_or(0) as usize;
-        let limit = limit.unwrap_or(0) as usize;
+        let offset = offset.unwrap_or(0);
+        let limit = limit.unwrap_or(0);
 
         for expr in clause.expressions {
             match expr {
@@ -416,27 +416,104 @@ impl CognitiveNexus {
     }
 
     async fn execute_describe_primer(&self) -> Result<Json, KipError> {
-        unimplemented!("not implemented yet");
+        let matcher = ConceptMatcher::Object {
+            r#type: PERSON_TYPE.to_string(),
+            name: META_SELF_NAME.to_string(),
+        };
+        let id = self.query_concept_ids(&matcher).await?;
+
+        let id = id
+            .first()
+            .ok_or_else(|| KipError::Execution(format!("Concept {matcher} not found")))?;
+        let me = self
+            .try_get_concept_with(&QueryCache::default(), *id, |concept| {
+                Self::extract_concept_field_value(concept, &["attributes".to_string()])
+            })
+            .await?;
+
+        let ids = self
+            .query_concept_ids(&ConceptMatcher::Type(DOMAIN_TYPE.to_string()))
+            .await?;
+        let cache = QueryCache::default();
+        let mut domain_map: Vec<DomainInfo> = Vec::with_capacity(ids.len());
+        for id in ids {
+            let info = self
+                .try_get_concept_with(&cache, id, |concept| {
+                    Ok(DomainInfo {
+                        domain_name: concept.name.clone(),
+                        description: concept
+                            .attributes
+                            .get("description")
+                            .map(|v| v.as_str().unwrap_or_default().to_string())
+                            .unwrap_or_default(),
+                        key_concept_types: Vec::new(),     // TODO
+                        key_proposition_types: Vec::new(), // TODO
+                    })
+                })
+                .await?;
+            domain_map.push(info);
+        }
+
+        Ok(json!({
+            "identity": me,
+            "domain_map": domain_map,
+        }))
     }
 
     async fn execute_describe_domains(&self) -> Result<Json, KipError> {
-        unimplemented!("not implemented yet");
+        let ids = self
+            .query_concept_ids(&ConceptMatcher::Type(DOMAIN_TYPE.to_string()))
+            .await?;
+        let cache = QueryCache::default();
+        let mut result: Vec<Json> = Vec::with_capacity(ids.len());
+        for id in ids {
+            let concept = self
+                .try_get_concept_with(&cache, id, |concept| {
+                    Self::extract_concept_field_value(concept, &[])
+                })
+                .await?;
+            result.push(concept);
+        }
+        Ok(json!(result))
     }
 
-    async fn execute_describe_concept_types(&self) -> Result<Json, KipError> {
+    async fn execute_describe_concept_types(
+        &self,
+        limit: Option<usize>,
+        offset: Option<usize>,
+    ) -> Result<Json, KipError> {
         let index = self.concepts.get_btree_index(&["type"]).map_err(|e| {
             KipError::Execution(format!("Failed to get concept type index: {:?}", e))
         })?;
 
-        let result = index.keys(0, None);
+        let result = index.keys(offset.unwrap_or(0), limit);
         Ok(json!(result))
     }
 
     async fn execute_describe_concept_type(&self, name: String) -> Result<Json, KipError> {
-        unimplemented!("not implemented yet");
+        let id = self
+            .query_concept_ids(&ConceptMatcher::Object {
+                r#type: META_CONCEPT_TYPE.to_string(),
+                name: name.clone(),
+            })
+            .await?;
+
+        let id = id
+            .first()
+            .ok_or_else(|| KipError::Execution(format!("Concept type {name:?} not found")))?;
+        let result = self
+            .try_get_concept_with(&QueryCache::default(), *id, |concept| {
+                Self::extract_concept_field_value(concept, &[])
+            })
+            .await?;
+        Ok(result)
     }
 
-    async fn execute_describe_proposition_types(&self) -> Result<Json, KipError> {
+    async fn execute_describe_proposition_types(
+        &self,
+        limit: Option<usize>,
+        offset: Option<usize>,
+    ) -> Result<Json, KipError> {
         let index = self
             .propositions
             .get_btree_index(&["predicates"])
@@ -447,16 +524,106 @@ impl CognitiveNexus {
                 ))
             })?;
 
-        let result = index.keys(0, None);
+        let result = index.keys(offset.unwrap_or(0), limit);
         Ok(json!(result))
     }
 
     async fn execute_describe_proposition_type(&self, name: String) -> Result<Json, KipError> {
-        unimplemented!("not implemented yet");
+        let id = self
+            .query_concept_ids(&ConceptMatcher::Object {
+                r#type: META_PROPOSITION_TYPE.to_string(),
+                name: name.clone(),
+            })
+            .await?;
+
+        let id = id
+            .first()
+            .ok_or_else(|| KipError::Execution(format!("Proposition type {name:?} not found")))?;
+        let result = self
+            .try_get_concept_with(&QueryCache::default(), *id, |concept| {
+                Self::extract_concept_field_value(concept, &[])
+            })
+            .await?;
+        Ok(result)
     }
 
     async fn execute_search(&self, command: SearchCommand) -> Result<Json, KipError> {
-        unimplemented!("not implemented yet");
+        match command.target {
+            SearchTarget::Concept => {
+                let result: Vec<Concept> = self
+                    .concepts
+                    .search_as(Query {
+                        search: Some(Search {
+                            text: Some(command.term),
+                            logical_search: true,
+                            ..Default::default()
+                        }),
+                        filter: None,
+                        limit: command.limit,
+                    })
+                    .await
+                    .map_err(|err| {
+                        KipError::Execution(format!("Failed to search concept: {:?}", err))
+                    })?;
+                Ok(json!(
+                    result
+                        .into_iter()
+                        .map(|c| c.into_concept_node())
+                        .collect::<Vec<_>>()
+                ))
+            }
+            SearchTarget::Proposition => {
+                let tokens = self.propositions.tokenize(&command.term);
+                let ids = self
+                    .propositions
+                    .search_ids(Query {
+                        search: Some(Search {
+                            text: Some(command.term),
+                            logical_search: true,
+                            ..Default::default()
+                        }),
+                        filter: None,
+                        limit: command.limit,
+                    })
+                    .await
+                    .map_err(|err| {
+                        KipError::Execution(format!("Failed to search proposition: {:?}", err))
+                    })?;
+                let cache = QueryCache::default();
+                let mut result: Vec<Json> = Vec::with_capacity(ids.len());
+                for id in ids {
+                    let rt = self
+                        .try_get_proposition_with(&cache, id, |proposition| {
+                            let mut rt: Vec<Json> = Vec::new();
+                            for (predicate, prop) in &proposition.properties {
+                                // collect searchable texts
+                                let mut texts: Vec<&str> = vec![predicate];
+                                for (_, val) in &prop.attributes {
+                                    extract_json_text(&mut texts, val);
+                                }
+                                for (_, val) in &prop.metadata {
+                                    extract_json_text(&mut texts, val);
+                                }
+
+                                if tokens.iter().any(|t| texts.contains(&t.as_str())) {
+                                    if let Ok(val) = Self::extract_proposition_field_value(
+                                        proposition,
+                                        predicate,
+                                        &[],
+                                    ) {
+                                        rt.push(val);
+                                    }
+                                }
+                            }
+
+                            Ok(rt)
+                        })
+                        .await?;
+                    result.extend(rt);
+                }
+                Ok(json!(result))
+            }
+        }
     }
 
     async fn match_propositions(
@@ -1346,17 +1513,11 @@ impl CognitiveNexus {
     // 从概念中提取字段值
     fn extract_concept_field_value(concept: &Concept, path: &[String]) -> Result<Json, KipError> {
         if path.is_empty() {
-            return Ok(json!(EntityRef::ConceptNode(ConceptNodeRef {
-                id: EntityID::Concept(concept._id).to_string().as_str(),
-                r#type: &concept.r#type,
-                name: &concept.name,
-                attributes: &concept.attributes,
-                metadata: &concept.metadata
-            })));
+            return Ok(concept.to_concept_node());
         }
 
         match path[0].as_str() {
-            "id" if path.len() == 1 => Ok(EntityID::Concept(concept._id).to_string().into()),
+            "id" if path.len() == 1 => Ok(concept.entity_id().to_string().into()),
             "type" if path.len() == 1 => Ok(concept.r#type.clone().into()),
             "name" if path.len() == 1 => Ok(concept.name.clone().into()),
             "attributes" if path.len() <= 2 => {
@@ -1396,6 +1557,19 @@ impl CognitiveNexus {
         predicate: &str,
         path: &[String],
     ) -> Result<Json, KipError> {
+        if !proposition.predicates.contains(predicate) {
+            return Err(KipError::Execution(format!(
+                "Invalid predicate: {}",
+                predicate
+            )));
+        }
+
+        if path.is_empty() {
+            return proposition.to_proposition_link(predicate).ok_or_else(|| {
+                KipError::InvalidCommand(format!("Invalid predicate: {}", predicate))
+            });
+        }
+
         let prop = proposition
             .properties
             .get(predicate)
@@ -1407,26 +1581,11 @@ impl CognitiveNexus {
                 })
             });
 
-        if path.is_empty() {
-            return Ok(json!(EntityRef::PropositionLink(PropositionLinkRef {
-                id: EntityID::Proposition(proposition._id, predicate.to_string())
-                    .to_string()
-                    .as_str(),
-                subject: proposition.subject.to_string().as_str(),
-                predicate,
-                object: proposition.object.to_string().as_str(),
-                attributes: &prop.attributes,
-                metadata: &prop.metadata,
-            })));
-        }
-
         match path[0].as_str() {
-            "id" if path.len() == 1 => Ok(EntityID::Proposition(
-                proposition._id,
-                predicate.to_string(),
-            )
-            .to_string()
-            .into()),
+            "id" if path.len() == 1 => Ok(proposition
+                .entity_id(predicate.to_string())
+                .to_string()
+                .into()),
             "subject" if path.len() == 1 => Ok(proposition.subject.to_string().into()),
             "object" if path.len() == 1 => Ok(proposition.object.to_string().into()),
             "predicate" if path.len() == 1 => Ok(predicate.into()),
