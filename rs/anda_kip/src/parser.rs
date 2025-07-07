@@ -306,7 +306,9 @@ WITH METADATA {
 
         // 验证这是一个 UPSERT 语句
         match kml_statement {
-            KmlStatement::Upsert(ast::UpsertBlock { items, metadata }) => {
+            KmlStatement::Upsert(blocks) => {
+                assert_eq!(blocks.len(), 1);
+                let ast::UpsertBlock { items, metadata } = &blocks[0];
                 // 验证有两个概念操作
                 assert_eq!(items.len(), 2);
 
@@ -544,5 +546,265 @@ WITH METADATA {
         assert_eq!(unquote_str("\"\\b\""), Some("\x08".to_string()));
         assert_eq!(unquote_str("\"\\f\""), Some("\x0C".to_string()));
         assert_eq!(unquote_str("\"\\u4f60\\u597d\""), Some("你好".to_string()));
+    }
+
+    #[test]
+    fn test_parse_genesis() {
+        let input = r#"
+// # KIP Genesis Capsule v1.0
+// The foundational knowledge that bootstraps the entire Cognitive Nexus.
+// It defines what a "Concept Type" and a "Proposition Type" are,
+// by creating instances of them that describe themselves.
+//
+UPSERT {
+    // --- STEP 1: THE PRIME MOVER - DEFINE "$ConceptType" ---
+    // The absolute root of all knowledge. This node defines what it means to be a "type"
+    // of concept. It defines itself, creating the first logical anchor.
+    CONCEPT ?concept_type_def {
+        {type: "$ConceptType", name: "$ConceptType"}
+        SET ATTRIBUTES {
+            description: "Defines a class or category of Concept Nodes. It acts as a template for creating new concept instances. Every concept node in the graph must have a 'type' that points to a concept of this type.",
+            display_hint: "📦",
+            instance_schema: {
+                "description": {
+                    type: "string",
+                    is_required: true,
+                    description: "A human-readable explanation of what this concept type represents."
+                },
+                "display_hint": {
+                    type: "string",
+                    is_required: false,
+                    description: "A suggested icon or visual cue for user interfaces (e.g., an emoji or icon name)."
+                },
+                "instance_schema": {
+                    type: "object",
+                    is_required: false,
+                    description: "A recommended schema defining the common and core attributes for instances of this concept type. It serves as a 'best practice' guideline for knowledge creation, not a rigid constraint. Keys are attribute names, values are objects defining 'type', 'is_required', and 'description'. Instances SHOULD include required attributes but MAY also include any other attribute not defined in this schema, allowing for knowledge to emerge and evolve freely."
+                },
+                "key_instances": {
+                    type: "array",
+                    item_type: "string",
+                    is_required: false,
+                    description: "A list of names of the most important or representative instances of this type, to help LLMs ground their queries."
+                }
+            },
+            key_instances: [ "$ConceptType", "$PropositionType", "Domain" ]
+        }
+    }
+
+    // --- STEP 2: DEFINE "$PropositionType" USING "$ConceptType" ---
+    // With the ability to define concepts, we now define the concept of a "relation" or "predicate".
+    CONCEPT ?proposition_type_def {
+        {type: "$ConceptType", name: "$PropositionType"}
+        SET ATTRIBUTES {
+            description: "Defines a class of Proposition Links (a predicate). It specifies the nature of the relationship between a subject and an object.",
+            display_hint: "🔗",
+            instance_schema: {
+                "description": {
+                    type: "string",
+                    is_required: true,
+                    description: "A human-readable explanation of what this relationship represents."
+                },
+                "subject_types": {
+                    type: "array",
+                    item_type: "string",
+                    is_required: true,
+                    description: "A list of allowed '$ConceptType' names for the subject. Use '*' for any type."
+                },
+                "object_types": {
+                    type: "array",
+                    item_type: "string",
+                    is_required: true,
+                    description: "A list of allowed '$ConceptType' names for the object. Use '*' for any type."
+                },
+                "is_symmetric": { type: "boolean", is_required: false, default_value: false },
+                "is_transitive": { type: "boolean", is_required: false, default_value: false }
+            },
+            key_instances: [ "belongs_to_domain" ]
+        }
+    }
+
+    // --- STEP 3: DEFINE THE TOOLS FOR ORGANIZATION ---
+    // Now that we can define concepts and propositions, we create the specific
+    // concepts needed for organizing the knowledge graph itself.
+
+    // 3a. Define the "Domain" concept type.
+    CONCEPT ?domain_type_def {
+        {type: "$ConceptType", name: "Domain"}
+        SET ATTRIBUTES {
+            description: "Defines a high-level container for organizing knowledge. It acts as a primary category for concepts and propositions, enabling modularity and contextual understanding.",
+            display_hint: "🗺️",
+            instance_schema: {
+                "description": {
+                    type: "string",
+                    is_required: true,
+                    description: "A clear, human-readable explanation of what knowledge this domain encompasses."
+                },
+                "display_hint": {
+                    type: "string",
+                    is_required: false,
+                    description: "A suggested icon or visual cue for this specific domain (e.g., a specific emoji)."
+                },
+                "scope_note": {
+                    type: "string",
+                    is_required: false,
+                    description: "A more detailed note defining the precise boundaries of the domain, specifying what is included and what is excluded."
+                },
+                "aliases": {
+                    type: "array",
+                    item_type: "string",
+                    is_required: false,
+                    description: "A list of alternative names or synonyms for the domain, to aid in search and natural language understanding."
+                },
+                "steward": {
+                    type: "string",
+                    is_required: false,
+                    description: "The name of the 'Person' (human or AI) primarily responsible for curating and maintaining the quality of knowledge within this domain."
+                }
+
+            },
+            key_instances: ["CoreSchema"]
+        }
+    }
+
+    // 3b. Define the "belongs_to_domain" proposition type.
+    CONCEPT ?belongs_to_domain_prop {
+        {type: "$PropositionType", name: "belongs_to_domain"}
+        SET ATTRIBUTES {
+            description: "A fundamental proposition that asserts a concept's membership in a specific knowledge domain.",
+            subject_types: ["*"], // Any concept can belong to a domain.
+            object_types: ["Domain"] // The object must be a Domain.
+        }
+    }
+
+    // 3c. Create a dedicated domain "CoreSchema" for meta-definitions.
+    // This domain will contain the definitions of all concept types and proposition types.
+    CONCEPT ?core_domain {
+        {type: "Domain", name: "CoreSchema"}
+        SET ATTRIBUTES {
+            description: "The foundational domain containing the meta-definitions of the KIP system itself.",
+            display_hint: "🧩"
+        }
+    }
+}
+WITH METADATA {
+    source: "KIP Genesis Capsule v1.0",
+    author: "System Architect",
+    confidence: 1.0,
+    status: "active"
+}
+
+// Post-Genesis Housekeeping
+UPSERT {
+    // Assign all meta-definition concepts to the "CoreSchema" domain.
+    CONCEPT ?core_domain {
+        {type: "Domain", name: "CoreSchema"}
+    }
+
+    CONCEPT ?concept_type_def {
+        {type: "$ConceptType", name: "$ConceptType"}
+        SET PROPOSITIONS { ("belongs_to_domain", ?core_domain) }
+    }
+    CONCEPT ?proposition_type_def {
+        {type: "$ConceptType", name: "$PropositionType"}
+        SET PROPOSITIONS { ("belongs_to_domain", ?core_domain) }
+    }
+    CONCEPT ?domain_type_def {
+        {type: "$ConceptType", name: "Domain"}
+        SET PROPOSITIONS { ("belongs_to_domain", ?core_domain) }
+    }
+    CONCEPT ?belongs_to_domain_prop {
+        {type: "$PropositionType", name: "belongs_to_domain"}
+        SET PROPOSITIONS { ("belongs_to_domain", ?core_domain) }
+    }
+}
+WITH METADATA {
+    source: "System Maintenance",
+    author: "System Architect",
+    confidence: 1.0,
+}
+
+// DEFINE the "Person" concept type ---
+UPSERT {
+    // The agent itself is a person: `{type: "Person", name: "$self"}`.
+    CONCEPT ?person_type_def {
+        {type: "$ConceptType", name: "Person"}
+        SET ATTRIBUTES {
+            description: "Represents an individual actor within the system, which can be an AI, a human, or a group entity. All actors, including the agent itself, are instances of this type.",
+            display_hint: "👤",
+            instance_schema: {
+                "id": {
+                    type: "string",
+                    is_required: true,
+                    description: "A unique identifier for the person, typically a UUID or similar."
+                },
+                "person_class": {
+                    type: "string",
+                    is_required: true,
+                    description: "The classification of the person, e.g., 'AI', 'Human', 'Organization'."
+                },
+                "name": {
+                    type: "string",
+                    is_required: false, // No name for $self at genesis
+                    description: "The given or chosen name of the person."
+                },
+                "handle": {
+                    type: "string",
+                    is_required: false,
+                    description: "A unique handle or username for the person, often used in digital contexts."
+                },
+                "avatar": {
+                    type: "string",
+                    is_required: false,
+                    description: "A URL or emoji identifier for the person's avatar image, used in user interfaces."
+                },
+                "persona": {
+                    type: "string",
+                    is_required: false,
+                    description: "For AIs, a self-description of their identity. For humans, it could be a summary of their observed personality or role."
+                },
+                "core_mission": {
+                    type: "string",
+                    is_required: false,
+                    description: "Primarily for AIs, describing their main objective."
+                },
+                "capabilities": {
+                    type: "array",
+                    item_type: "string",
+                    is_required: false,
+                    description: "Primarily for AIs, a list of key functions they can perform."
+                },
+                "relationship_to_self": {
+                    type: "string",
+                    is_required: false,
+                    description: "For persons other than '$self', their relationship to the agent (e.g., 'user', 'creator', 'collaborator')."
+                },
+                "interaction_summary": {
+                    type: "object",
+                    is_required: false,
+                    description: "A dynamically updated summary of interactions, like last_seen, interaction_count, key_topics."
+                }
+            }
+        }
+
+        SET PROPOSITIONS { ("belongs_to_domain", {type: "Domain", name: "CoreSchema"}) }
+    }
+}
+WITH METADATA {
+    source: "KIP Capsule Design",
+    author: "System Architect",
+    confidence: 1.0,
+    status: "active"
+}
+        "#;
+
+        let result = parse_kml(input).unwrap();
+        println!("{:?}", result);
+        match result {
+            KmlStatement::Upsert(upserts) => {
+                assert_eq!(upserts.len(), 3);
+            }
+            _ => panic!("Expected Upsert"),
+        }
     }
 }

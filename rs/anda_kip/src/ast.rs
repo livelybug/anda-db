@@ -12,8 +12,9 @@
 //! - **KML (Knowledge Manipulation Language)**: For knowledge evolution and updates
 //! - **META**: For knowledge exploration and grounding
 
+use chrono::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::fmt;
+use std::{cmp::Ordering, collections::HashSet, fmt, str::FromStr};
 
 pub use serde_json::{Map, Number};
 
@@ -409,6 +410,46 @@ pub enum AggregationFunction {
     Max,
 }
 
+impl AggregationFunction {
+    pub fn calculate(&self, values: &Vec<Json>, distinct: bool) -> Json {
+        match self {
+            AggregationFunction::Count => {
+                if distinct {
+                    let vals: HashSet<&Json> = HashSet::from_iter(values);
+                    vals.len().into()
+                } else {
+                    values.len().into()
+                }
+            }
+            AggregationFunction::Sum => {
+                let sum: f64 = values.iter().filter_map(|v| v.as_f64()).sum();
+                Number::from_f64(sum).map(|v| v.into()).unwrap_or_default()
+            }
+            AggregationFunction::Avg => {
+                let nums: Vec<f64> = values.iter().filter_map(|v| v.as_f64()).collect();
+                if nums.is_empty() {
+                    Json::Null
+                } else {
+                    let avg = nums.iter().sum::<f64>() / nums.len() as f64;
+                    Number::from_f64(avg).map(|v| v.into()).unwrap_or_default()
+                }
+            }
+            AggregationFunction::Min => values
+                .iter()
+                .filter_map(|v| v.as_f64())
+                .min_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal))
+                .map(|min| Number::from_f64(min).map(|v| v.into()).unwrap_or_default())
+                .unwrap_or(Json::Null),
+            AggregationFunction::Max => values
+                .iter()
+                .filter_map(|v| v.as_f64())
+                .max_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal))
+                .map(|max| Number::from_f64(max).map(|v| v.into()).unwrap_or_default())
+                .unwrap_or(Json::Null),
+        }
+    }
+}
+
 /// Represents different types of clauses in the WHERE section of a KQL query.
 /// All clauses are combined with logical AND by default.
 /// Syntax: `WHERE { ... }`
@@ -490,6 +531,27 @@ pub enum ComparisonOperator {
     GreaterEqual,
 }
 
+impl ComparisonOperator {
+    pub fn compare(&self, left: &Json, right: &Json) -> bool {
+        match self {
+            ComparisonOperator::Equal => left == right,
+            ComparisonOperator::NotEqual => left != right,
+            ComparisonOperator::LessThan => compare_json(left, right)
+                .map(|o| o == Ordering::Less)
+                .unwrap_or(false),
+            ComparisonOperator::GreaterThan => compare_json(left, right)
+                .map(|o| o == Ordering::Greater)
+                .unwrap_or(false),
+            ComparisonOperator::LessEqual => compare_json(left, right)
+                .map(|o| o != Ordering::Greater)
+                .unwrap_or(false),
+            ComparisonOperator::GreaterEqual => compare_json(left, right)
+                .map(|o| o != Ordering::Less)
+                .unwrap_or(false),
+        }
+    }
+}
+
 /// Logical operators for combining filter expressions.
 #[derive(Debug, PartialEq, Clone)]
 pub enum LogicalOperator {
@@ -537,7 +599,7 @@ pub enum OrderDirection {
 #[derive(Debug, PartialEq, Clone)]
 pub enum KmlStatement {
     /// UPSERT statement for atomic knowledge creation/updates
-    Upsert(UpsertBlock),
+    Upsert(Vec<UpsertBlock>),
     /// DELETE statement for knowledge removal
     Delete(DeleteStatement),
 }
@@ -711,4 +773,40 @@ pub enum SearchTarget {
     Concept,
     /// Searching for propositions
     Proposition,
+}
+
+pub fn compare_json(left: &Json, right: &Json) -> Option<Ordering> {
+    match (left, right) {
+        (Json::Number(a), Json::Number(b)) => a
+            .as_f64()
+            .unwrap_or(0.0)
+            .partial_cmp(&b.as_f64().unwrap_or(0.0)),
+        (Json::Bool(a), Json::Bool(b)) => Some(a.cmp(b)),
+        (Json::Null, Json::Null) => Some(Ordering::Equal),
+        (Json::String(a), Json::String(b)) => {
+            // try to compare as number
+            if let Ok(a) = Number::from_str(a) {
+                if let Ok(b) = Number::from_str(b) {
+                    return a
+                        .as_f64()
+                        .unwrap_or(0.0)
+                        .partial_cmp(&b.as_f64().unwrap_or(0.0));
+                }
+            }
+            // try to compare as datetime
+            if let Ok(a) = DateTime::parse_from_rfc3339(a) {
+                if let Ok(b) = DateTime::parse_from_rfc3339(b) {
+                    return Some(a.cmp(&b));
+                }
+            }
+            if let Ok(a) = DateTime::parse_from_rfc2822(a) {
+                if let Ok(b) = DateTime::parse_from_rfc2822(b) {
+                    return Some(a.cmp(&b));
+                }
+            }
+
+            Some(a.cmp(b))
+        }
+        _ => None,
+    }
 }

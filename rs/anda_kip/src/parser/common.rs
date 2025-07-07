@@ -2,7 +2,7 @@ use nom::{
     IResult, Parser,
     branch::alt,
     bytes::complete::{tag, tag_no_case},
-    character::complete::{alpha1, alphanumeric1, char, multispace0},
+    character::complete::{alpha1, alphanumeric1, char},
     combinator::{map, opt, recognize, value},
     error::ParseError,
     multi::{many0, separated_list1},
@@ -12,50 +12,7 @@ use nom::{
 use super::json::{json_value, parse_number};
 use crate::ast::{DotPathVar, Json, KeyValue, Map, Value};
 
-pub use super::json::quoted_string;
-
-/// Skips whitespace and line comments (starting with //).
-pub fn ws<'a, O, E, F>(f: F) -> impl Parser<&'a str, Output = O, Error = E>
-where
-    E: ParseError<&'a str>,
-    F: Parser<&'a str, Output = O, Error = E>,
-{
-    delimited(skip_ws_and_comments, f, skip_ws_and_comments)
-}
-
-/// Skips whitespace and line comments.
-fn skip_ws_and_comments<'a, E>(input: &'a str) -> IResult<&'a str, (), E>
-where
-    E: ParseError<&'a str>,
-{
-    let mut remaining = input;
-
-    loop {
-        let start_len = remaining.len();
-
-        // 跳过空白字符
-        if let Ok((rest, _)) = multispace0::<&str, E>(remaining) {
-            remaining = rest;
-        }
-
-        // 跳过行注释
-        if remaining.starts_with("//") {
-            if let Some(newline_pos) = remaining.find('\n') {
-                remaining = &remaining[newline_pos + 1..];
-            } else {
-                // 注释到文件末尾
-                remaining = "";
-            }
-        }
-
-        // 如果没有更多内容被跳过，退出循环
-        if remaining.len() == start_len {
-            break;
-        }
-    }
-
-    Ok((remaining, ()))
-}
+pub use super::json::{quoted_string, ws};
 
 /// Parses the contents of a block enclosed in curly braces.
 pub fn braced_block<'a, O, E, F>(f: F) -> impl Parser<&'a str, Output = O, Error = E>

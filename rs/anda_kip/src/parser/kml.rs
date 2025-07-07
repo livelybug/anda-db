@@ -16,7 +16,7 @@ use crate::ast::*;
 
 pub fn parse_kml_statement(input: &str) -> IResult<&str, KmlStatement> {
     alt((
-        map(parse_upsert_block, KmlStatement::Upsert),
+        map(parse_upsert_blocks, KmlStatement::Upsert),
         map(parse_delete_statement, KmlStatement::Delete),
     ))
     .parse(input)
@@ -28,8 +28,8 @@ fn parse_with_metadata(input: &str) -> IResult<&str, Map<String, Json>> {
     preceded(ws(tag("WITH METADATA")), json_value_map).parse(input)
 }
 
-fn parse_upsert_block(input: &str) -> IResult<&str, UpsertBlock> {
-    map(
+fn parse_upsert_blocks(input: &str) -> IResult<&str, Vec<UpsertBlock>> {
+    many1(map(
         preceded(
             ws(tag("UPSERT")),
             (
@@ -38,7 +38,7 @@ fn parse_upsert_block(input: &str) -> IResult<&str, UpsertBlock> {
             ),
         ),
         |(items, metadata)| UpsertBlock { items, metadata },
-    )
+    ))
     .parse(input)
 }
 
@@ -216,7 +216,9 @@ mod tests {
 
         let (_, statement) = result.unwrap();
         match statement {
-            KmlStatement::Upsert(upsert) => {
+            KmlStatement::Upsert(upserts) => {
+                assert_eq!(upserts.len(), 1);
+                let upsert = &upserts[0];
                 assert_eq!(upsert.items.len(), 1);
                 assert!(upsert.metadata.is_none());
 
@@ -264,7 +266,9 @@ mod tests {
         assert!(result.is_ok());
         let (_, statement) = result.unwrap();
         match statement {
-            KmlStatement::Upsert(upsert) => {
+            KmlStatement::Upsert(upserts) => {
+                assert_eq!(upserts.len(), 1);
+                let upsert = &upserts[0];
                 assert_eq!(upsert.items.len(), 1);
                 assert!(upsert.metadata.is_none());
 
@@ -328,6 +332,17 @@ mod tests {
             author: "LDC Labs",
             confidence: 0.95
         }
+
+        // Test with multiple upsert blocks
+        UPSERT {
+            CONCEPT ?drug {
+                {type: "Drug", name: "TestDrug"}
+            }
+            WITH METADATA {
+                "confidence":0.95,
+                "source":"clinical_trial"
+            }
+        }
         "#;
 
         let result = parse_kml_statement(input);
@@ -335,7 +350,9 @@ mod tests {
 
         let (_, statement) = result.unwrap();
         match statement {
-            KmlStatement::Upsert(upsert) => {
+            KmlStatement::Upsert(upserts) => {
+                assert_eq!(upserts.len(), 2);
+                let upsert = &upserts[0];
                 assert_eq!(upsert.items.len(), 2);
                 assert!(upsert.metadata.is_some());
 
@@ -396,6 +413,34 @@ mod tests {
                     }
                     _ => panic!("Expected ConceptBlock"),
                 }
+
+                let upsert = &upserts[1];
+                assert_eq!(upsert.items.len(), 1);
+                assert!(upsert.metadata.is_none());
+
+                match &upsert.items[0] {
+                    UpsertItem::Concept(concept) => {
+                        assert_eq!(concept.handle, "drug");
+                        assert_eq!(
+                            concept.concept,
+                            ConceptMatcher::Object {
+                                r#type: "Drug".to_string(),
+                                name: "TestDrug".to_string(),
+                            }
+                        );
+
+                        let metadata = concept.metadata.as_ref().unwrap();
+                        assert_eq!(
+                            metadata["confidence"],
+                            Json::Number(Number::from_f64(0.95).unwrap())
+                        );
+                        assert_eq!(
+                            metadata["source"],
+                            Json::String("clinical_trial".to_string())
+                        );
+                    }
+                    _ => panic!("Expected ConceptBlock"),
+                }
             }
             _ => panic!("Expected UpsertBlock"),
         }
@@ -423,7 +468,9 @@ mod tests {
 
         let (_, statement) = result.unwrap();
         match statement {
-            KmlStatement::Upsert(upsert) => {
+            KmlStatement::Upsert(upserts) => {
+                assert_eq!(upserts.len(), 1);
+                let upsert = &upserts[0];
                 assert_eq!(upsert.items.len(), 1);
 
                 match &upsert.items[0] {
@@ -624,7 +671,9 @@ mod tests {
 
         let (_, statement) = result.unwrap();
         match statement {
-            KmlStatement::Upsert(upsert) => {
+            KmlStatement::Upsert(upserts) => {
+                assert_eq!(upserts.len(), 1);
+                let upsert = &upserts[0];
                 assert_eq!(upsert.items.len(), 3);
                 assert!(upsert.metadata.is_some());
 
@@ -715,7 +764,9 @@ mod tests {
 
         let (_, statement) = result.unwrap();
         match statement {
-            KmlStatement::Upsert(upsert) => {
+            KmlStatement::Upsert(upserts) => {
+                assert_eq!(upserts.len(), 1);
+                let upsert = &upserts[0];
                 assert_eq!(upsert.items.len(), 1);
                 match &upsert.items[0] {
                     UpsertItem::Concept(concept) => {

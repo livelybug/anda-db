@@ -205,6 +205,21 @@ pub struct DomainInfo {
     pub key_proposition_types: Vec<PropositionTypeInfo>,
 }
 
+impl DomainInfo {
+    pub fn from(domain: &Concept) -> Self {
+        Self {
+            domain_name: domain.name.clone(),
+            description: domain
+                .attributes
+                .get("description")
+                .map(|v| v.as_str().unwrap_or_default().to_string())
+                .unwrap_or_default(),
+            key_concept_types: Vec::new(),
+            key_proposition_types: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ConceptTypeInfo {
     pub type_name: String,
@@ -212,10 +227,49 @@ pub struct ConceptTypeInfo {
     pub key_instances: Vec<String>,
 }
 
+impl ConceptTypeInfo {
+    pub fn from(concept: &Concept) -> Self {
+        Self {
+            type_name: concept.name.clone(),
+            description: concept
+                .attributes
+                .get("description")
+                .map(|v| v.as_str().unwrap_or_default().to_string())
+                .unwrap_or_default(),
+            key_instances: concept
+                .attributes
+                .get("key_instances")
+                .map(|v| {
+                    v.as_array()
+                        .map(|v| {
+                            v.iter()
+                                .map(|v| v.as_str().unwrap_or_default().to_string())
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                })
+                .unwrap_or_default(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PropositionTypeInfo {
     pub predicate_name: String,
     pub description: String,
+}
+
+impl PropositionTypeInfo {
+    pub fn from(concept: &Concept) -> Self {
+        Self {
+            predicate_name: concept.name.clone(),
+            description: concept
+                .attributes
+                .get("description")
+                .map(|v| v.as_str().unwrap_or_default().to_string())
+                .unwrap_or_default(),
+        }
+    }
 }
 
 #[cfg(test)]

@@ -34,6 +34,7 @@ bytes = "1"
 base64 = "0.22"
 hex = "0.4"
 croaring = "2.3"
+chrono = "0.4"
 futures = { version = "0.3" }
 tokio = { version = "1" }
 tokio-util = { version = "0.7" }

@@ -1,25 +1,24 @@
 use anda_db::{
     collection::{Collection, CollectionConfig},
-    database::{AndaDB, DBMetadata},
+    database::AndaDB,
     error::DBError,
     index::{extract_json_text, virtual_field_name, virtual_field_value},
     query::{Filter, Query, RangeQuery, Search},
+    unix_ms,
 };
 use anda_db_schema::Fv;
 use anda_db_tfs::jieba_tokenizer;
 use anda_kip::*;
 use async_trait::async_trait;
+use futures::try_join as try_join_await;
 use serde_json::json;
 use std::{
-    borrow::Cow,
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     str::FromStr,
     sync::Arc,
-    time::Duration,
 };
-use tokio_util::sync::CancellationToken;
 
-use crate::{entity::*, types::*};
+use crate::{entity::*, helper::*, types::*};
 
 #[derive(Clone, Debug)]
 pub struct CognitiveNexus {
@@ -28,7 +27,7 @@ pub struct CognitiveNexus {
     propositions: Arc<Collection>,
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 impl Executor for CognitiveNexus {
     async fn execute(&self, command: Command, dry_run: bool) -> Result<Json, KipError> {
         match command {
@@ -98,20 +97,12 @@ impl CognitiveNexus {
         })
     }
 
-    pub fn name(&self) -> &str {
-        self.db.name()
-    }
-
-    pub fn metadata(&self) -> DBMetadata {
-        self.db.metadata()
-    }
-
     pub async fn close(&self) -> Result<(), DBError> {
         self.db.close().await
     }
 
-    pub async fn auto_flush(&self, cancel_token: CancellationToken, interval: Duration) {
-        self.db.auto_flush(cancel_token, interval).await;
+    pub fn name(&self) -> &str {
+        self.db.name()
     }
 
     async fn execute_kql(&self, command: KqlQuery, _dry_run: bool) -> Result<Json, KipError> {
@@ -142,7 +133,9 @@ impl CognitiveNexus {
 
     async fn execute_kml(&self, command: KmlStatement, dry_run: bool) -> Result<Json, KipError> {
         match command {
-            KmlStatement::Upsert(upsert_block) => self.execute_upsert(upsert_block, dry_run).await,
+            KmlStatement::Upsert(upsert_blocks) => {
+                self.execute_upsert(upsert_blocks, dry_run).await
+            }
             KmlStatement::Delete(delete_statement) => {
                 self.execute_delete(delete_statement, dry_run).await
             }
@@ -406,8 +399,7 @@ impl CognitiveNexus {
                         .resolve_result(&ctx.cache, &bindings, &var, &[])
                         .await?;
 
-                    let agg_result = self.calculate_aggregation(&func, distinct, &col).await?;
-                    result.push(agg_result);
+                    result.push(func.calculate(&col, distinct));
                 }
             }
         }
@@ -416,41 +408,50 @@ impl CognitiveNexus {
     }
 
     async fn execute_describe_primer(&self) -> Result<Json, KipError> {
+        let cache = QueryCache::default();
         let matcher = ConceptMatcher::Object {
             r#type: PERSON_TYPE.to_string(),
             name: META_SELF_NAME.to_string(),
         };
-        let id = self.query_concept_ids(&matcher).await?;
+        let me = self.query_concept_ids(&matcher).await?;
 
-        let id = id
+        let me = me
             .first()
             .ok_or_else(|| KipError::Execution(format!("Concept {matcher} not found")))?;
         let me = self
-            .try_get_concept_with(&QueryCache::default(), *id, |concept| {
-                Self::extract_concept_field_value(concept, &["attributes".to_string()])
+            .try_get_concept_with(&cache, *me, |concept| {
+                extract_concept_field_value(concept, &["attributes".to_string()])
             })
             .await?;
 
-        let ids = self
+        let domains = self
             .query_concept_ids(&ConceptMatcher::Type(DOMAIN_TYPE.to_string()))
             .await?;
-        let cache = QueryCache::default();
-        let mut domain_map: Vec<DomainInfo> = Vec::with_capacity(ids.len());
-        for id in ids {
-            let info = self
-                .try_get_concept_with(&cache, id, |concept| {
-                    Ok(DomainInfo {
-                        domain_name: concept.name.clone(),
-                        description: concept
-                            .attributes
-                            .get("description")
-                            .map(|v| v.as_str().unwrap_or_default().to_string())
-                            .unwrap_or_default(),
-                        key_concept_types: Vec::new(),     // TODO
-                        key_proposition_types: Vec::new(), // TODO
-                    })
-                })
+        let mut domain_map: Vec<DomainInfo> = Vec::with_capacity(domains.len());
+        for id in domains {
+            let mut info = self
+                .try_get_concept_with(&cache, id, |concept| Ok(DomainInfo::from(concept)))
                 .await?;
+            let subjects = self
+                .find_propositions(&cache, &EntityID::Concept(id), BELONGS_TO_DOMAIN_TYPE, true)
+                .await?;
+            let subjects = subjects.into_iter().map(|(_, id)| id).collect::<Vec<_>>();
+            for sub in subjects {
+                if let EntityID::Concept(id) = sub {
+                    let _ = self
+                        .try_get_concept_with(&cache, id, |concept| {
+                            if concept.r#type == META_CONCEPT_TYPE {
+                                info.key_concept_types.push(ConceptTypeInfo::from(concept));
+                            } else if concept.r#type == META_PROPOSITION_TYPE {
+                                info.key_proposition_types
+                                    .push(PropositionTypeInfo::from(concept));
+                            }
+                            Ok(())
+                        })
+                        .await;
+                }
+            }
+
             domain_map.push(info);
         }
 
@@ -469,7 +470,7 @@ impl CognitiveNexus {
         for id in ids {
             let concept = self
                 .try_get_concept_with(&cache, id, |concept| {
-                    Self::extract_concept_field_value(concept, &[])
+                    extract_concept_field_value(concept, &[])
                 })
                 .await?;
             result.push(concept);
@@ -503,7 +504,7 @@ impl CognitiveNexus {
             .ok_or_else(|| KipError::Execution(format!("Concept type {name:?} not found")))?;
         let result = self
             .try_get_concept_with(&QueryCache::default(), *id, |concept| {
-                Self::extract_concept_field_value(concept, &[])
+                extract_concept_field_value(concept, &[])
             })
             .await?;
         Ok(result)
@@ -541,7 +542,7 @@ impl CognitiveNexus {
             .ok_or_else(|| KipError::Execution(format!("Proposition type {name:?} not found")))?;
         let result = self
             .try_get_concept_with(&QueryCache::default(), *id, |concept| {
-                Self::extract_concept_field_value(concept, &[])
+                extract_concept_field_value(concept, &[])
             })
             .await?;
         Ok(result)
@@ -606,11 +607,9 @@ impl CognitiveNexus {
                                 }
 
                                 if tokens.iter().any(|t| texts.contains(&t.as_str())) {
-                                    if let Ok(val) = Self::extract_proposition_field_value(
-                                        proposition,
-                                        predicate,
-                                        &[],
-                                    ) {
+                                    if let Ok(val) =
+                                        extract_proposition_field_value(proposition, predicate, &[])
+                                    {
                                         rt.push(val);
                                     }
                                 }
@@ -624,87 +623,6 @@ impl CognitiveNexus {
                 Ok(json!(result))
             }
         }
-    }
-
-    async fn match_propositions(
-        &self,
-        ctx: &mut QueryContext,
-        subject: TargetTerm,
-        predicate: PredTerm,
-        object: TargetTerm,
-    ) -> Result<TargetEntities, KipError> {
-        let subject_var = match &subject {
-            TargetTerm::Variable(var) => Some(var.clone()),
-            _ => None,
-        };
-        let predicate_var = match &predicate {
-            PredTerm::Variable(var) => Some(var.clone()),
-            _ => None,
-        };
-        let object_var = match &object {
-            TargetTerm::Variable(var) => Some(var.clone()),
-            _ => None,
-        };
-
-        let subjects = self.resolve_target_term_ids(ctx, subject).await?;
-        let objects = self.resolve_target_term_ids(ctx, object).await?;
-
-        let result = match (subjects, predicate, objects) {
-            (
-                subjects,
-                PredTerm::MultiHop {
-                    predicate,
-                    min,
-                    max,
-                },
-                objects,
-            ) => {
-                self.handle_multi_hop_matching(ctx, subjects, predicate, min, max, objects)
-                    .await?
-            }
-            (TargetEntities::IDs(subject_ids), predicate, TargetEntities::IDs(object_ids)) => {
-                self.handle_subject_object_ids_matching(ctx, subject_ids, object_ids, predicate)
-                    .await?
-            }
-            (TargetEntities::IDs(subject_ids), predicate, TargetEntities::AnyPropositions) => {
-                self.handle_subject_ids_any_matching(ctx, subject_ids, predicate, true)
-                    .await?
-            }
-            (TargetEntities::IDs(subject_ids), predicate, TargetEntities::Any(_)) => {
-                self.handle_subject_ids_any_matching(ctx, subject_ids, predicate, false)
-                    .await?
-            }
-            (TargetEntities::AnyPropositions, predicate, TargetEntities::IDs(object_ids)) => {
-                self.handle_any_to_object_ids_matching(ctx, object_ids, predicate, true)
-                    .await?
-            }
-            (TargetEntities::Any(_), predicate, TargetEntities::IDs(object_ids)) => {
-                self.handle_any_to_object_ids_matching(ctx, object_ids, predicate, false)
-                    .await?
-            }
-            (_, predicate, _) => {
-                if matches!(&predicate, PredTerm::Variable(_)) {
-                    return Ok(TargetEntities::AnyPropositions);
-                }
-
-                self.handle_predicate_matching(ctx, predicate).await?
-            }
-        };
-
-        if let Some(var) = subject_var {
-            ctx.entities.insert(var, result.matched_subjects.clone());
-        }
-        if let Some(var) = predicate_var {
-            ctx.predicates
-                .insert(var, result.matched_predicates.clone());
-        }
-        if let Some(var) = object_var {
-            ctx.entities.insert(var, result.matched_objects.clone());
-        }
-
-        Ok(TargetEntities::IDs(
-            result.matched_propositions.into_iter().collect(),
-        ))
     }
 
     // 处理多跳匹配
@@ -816,7 +734,7 @@ impl CognitiveNexus {
                 for id in ids {
                     if let Some((subj, preds, obj)) = self
                         .try_get_proposition_with(&ctx.cache, id, |proposition| {
-                            self.match_predicate_against_proposition(proposition, &predicate)
+                            match_predicate_against_proposition(proposition, &predicate)
                         })
                         .await?
                     {
@@ -860,7 +778,7 @@ impl CognitiveNexus {
                         if any_propositions && matches!(proposition.object, EntityID::Concept(_)) {
                             return Ok(None);
                         }
-                        self.match_predicate_against_proposition(proposition, &predicate)
+                        match_predicate_against_proposition(proposition, &predicate)
                     })
                     .await?
                 {
@@ -903,7 +821,7 @@ impl CognitiveNexus {
                         if any_propositions && matches!(proposition.subject, EntityID::Concept(_)) {
                             return Ok(None);
                         }
-                        self.match_predicate_against_proposition(proposition, &predicate)
+                        match_predicate_against_proposition(proposition, &predicate)
                     })
                     .await?
                 {
@@ -952,7 +870,7 @@ impl CognitiveNexus {
         for id in ids {
             if let Some((subj, preds, obj)) = self
                 .try_get_proposition_with(&ctx.cache, id, |proposition| {
-                    self.match_predicate_against_proposition(proposition, &predicate)
+                    match_predicate_against_proposition(proposition, &predicate)
                 })
                 .await?
             {
@@ -961,52 +879,6 @@ impl CognitiveNexus {
         }
 
         Ok(result)
-    }
-
-    // 处理谓词匹配逻辑
-    fn match_predicate_against_proposition(
-        &self,
-        proposition: &Proposition,
-        predicate: &PredTerm,
-    ) -> Result<Option<(EntityID, Vec<String>, EntityID)>, KipError> {
-        match predicate {
-            PredTerm::Literal(pred) => {
-                if proposition.predicates.contains(pred) {
-                    Ok(Some((
-                        proposition.subject.clone(),
-                        vec![pred.clone()],
-                        proposition.object.clone(),
-                    )))
-                } else {
-                    Ok(None)
-                }
-            }
-            PredTerm::Variable(_) => Ok(Some((
-                proposition.subject.clone(),
-                proposition.predicates.iter().cloned().collect(),
-                proposition.object.clone(),
-            ))),
-            PredTerm::Alternative(preds) => {
-                let matched_preds = proposition
-                    .predicates
-                    .iter()
-                    .filter(|p| preds.contains(p))
-                    .cloned()
-                    .collect::<Vec<_>>();
-                if !matched_preds.is_empty() {
-                    Ok(Some((
-                        proposition.subject.clone(),
-                        matched_preds,
-                        proposition.object.clone(),
-                    )))
-                } else {
-                    Ok(None)
-                }
-            }
-            _ => Err(KipError::InvalidCommand(format!(
-                "Predicate must be either Literal or Variable, got: {predicate:?}"
-            ))),
-        }
     }
 
     // BFS 路径查找实现
@@ -1057,7 +929,7 @@ impl CognitiveNexus {
                                 results.push(current_path);
                             }
                         }
-                        TargetEntities::Any(_) => {
+                        TargetEntities::Any => {
                             results.push(current_path);
                         }
                     }
@@ -1089,7 +961,7 @@ impl CognitiveNexus {
                                 results.push(new_path.clone());
                             }
                         }
-                        TargetEntities::Any(_) => {
+                        TargetEntities::Any => {
                             results.push(new_path.clone());
                         }
                     }
@@ -1105,741 +977,59 @@ impl CognitiveNexus {
         Ok(results)
     }
 
-    async fn find_propositions(
-        &self,
-        cache: &QueryCache,
-        node: &EntityID,
-        predicate: &str,
-        reverse: bool,
-    ) -> Result<Vec<(EntityID, EntityID)>, KipError> {
-        let ids = self
-            .propositions
-            .query_ids(
-                Filter::Field((
-                    if reverse {
-                        "object".to_string()
-                    } else {
-                        "subject".to_string()
-                    },
-                    RangeQuery::Eq(Fv::Text(node.to_string())),
-                )),
-                None,
-            )
-            .await
-            .map_err(|e| KipError::Execution(format!("Failed to query propositions: {:?}", e)))?;
-
-        let mut results = Vec::with_capacity(ids.len());
-        for id in ids {
-            let rt = self
-                .try_get_proposition_with(cache, id, |proposition| {
-                    if proposition.predicates.contains(predicate) {
-                        Ok(Some((
-                            EntityID::Proposition(id, predicate.to_string()),
-                            if reverse {
-                                proposition.subject.clone()
-                            } else {
-                                proposition.object.clone()
-                            },
-                        )))
-                    } else {
-                        Ok(None)
-                    }
-                })
-                .await?;
-
-            if let Some(rt) = rt {
-                results.push(rt)
-            }
-        }
-
-        Ok(results)
-    }
-
-    // 查询概念节点ID
-    async fn query_concept_ids(&self, matcher: &ConceptMatcher) -> Result<Vec<u64>, KipError> {
-        match matcher {
-            ConceptMatcher::ID(id) => {
-                let entity_id = EntityID::from_str(id).map_err(KipError::Parse)?;
-                if let EntityID::Concept(concept_id) = entity_id {
-                    Ok(vec![concept_id])
-                } else {
-                    Err(KipError::InvalidCommand(format!(
-                        "Invalid concept node ID: {}",
-                        id
-                    )))
-                }
-            }
-            ConceptMatcher::Type(type_name) => {
-                let ids = self
-                    .concepts
-                    .query_ids(
-                        Filter::Field((
-                            "type".to_string(),
-                            RangeQuery::Eq(Fv::Text(type_name.clone())),
-                        )),
-                        None,
-                    )
-                    .await
-                    .map_err(|e| KipError::Execution(format!("{:?}", e)))?;
-                Ok(ids)
-            }
-            ConceptMatcher::Name(name) => {
-                let ids = self
-                    .concepts
-                    .query_ids(
-                        Filter::Field(("name".to_string(), RangeQuery::Eq(Fv::Text(name.clone())))),
-                        None,
-                    )
-                    .await
-                    .map_err(|e| KipError::Execution(format!("{:?}", e)))?;
-                Ok(ids)
-            }
-            ConceptMatcher::Object { r#type, name } => {
-                let virtual_name = virtual_field_name(&["type", "name"]);
-                let virtual_val = virtual_field_value(&[
-                    Some(&Fv::Text(r#type.clone())),
-                    Some(&Fv::Text(name.clone())),
-                ])
-                .unwrap();
-
-                let ids = self
-                    .concepts
-                    .query_ids(
-                        Filter::Field((virtual_name, RangeQuery::Eq(virtual_val))),
-                        None,
-                    )
-                    .await
-                    .map_err(|e| KipError::Execution(format!("{:?}", e)))?;
-                Ok(ids)
-            }
-        }
-    }
-
-    // 解析目标项为实体ID列表
-    async fn resolve_target_term_ids(
-        &self,
-        ctx: &mut QueryContext,
-        target: TargetTerm,
-    ) -> Result<TargetEntities, KipError> {
-        match target {
-            TargetTerm::Variable(var) => {
-                if let Some(ids) = ctx.entities.get(&var) {
-                    Ok(TargetEntities::IDs(ids.iter().cloned().collect()))
-                } else {
-                    Ok(TargetEntities::Any(var))
-                }
-            }
-            TargetTerm::Concept(concept_matcher) => {
-                let ids = self.query_concept_ids(&concept_matcher).await?;
-                Ok(TargetEntities::IDs(
-                    ids.into_iter().map(EntityID::Concept).collect(),
-                ))
-            }
-            TargetTerm::Proposition(proposition_matcher) => {
-                match *proposition_matcher {
-                    PropositionMatcher::ID(id) => {
-                        let entity_id = EntityID::from_str(&id).map_err(KipError::Parse)?;
-                        if !matches!(entity_id, EntityID::Proposition(_, _)) {
-                            return Err(KipError::InvalidCommand(format!(
-                                "Invalid proposition link ID: {id:?}"
-                            )));
-                        }
-                        Ok(TargetEntities::IDs(vec![entity_id]))
-                    }
-                    PropositionMatcher::Object {
-                        subject: TargetTerm::Variable(_),
-                        predicate: PredTerm::Variable(_),
-                        object: TargetTerm::Variable(_),
-                    } => Ok(TargetEntities::AnyPropositions),
-                    PropositionMatcher::Object {
-                        subject,
-                        predicate,
-                        object,
-                    } => {
-                        // 递归查询命题
-                        let result =
-                            Box::pin(self.match_propositions(ctx, subject, predicate, object))
-                                .await?;
-                        Ok(result)
-                    }
-                }
-            }
-        }
-    }
-
-    // 评估过滤表达式
-    async fn evaluate_filter_expression(
-        &self,
-        ctx: &mut QueryContext,
-        expr: FilterExpression,
-        bindings_snapshot: &mut HashMap<String, Vec<EntityID>>,
-        bindings_cursor: &mut HashMap<String, EntityID>,
-    ) -> Result<Option<bool>, KipError> {
-        match expr {
-            FilterExpression::Comparison {
-                left,
-                operator,
-                right,
-            } => {
-                let left_val = match self
-                    .evaluate_filter_operand(ctx, left, bindings_snapshot, bindings_cursor)
-                    .await?
-                {
-                    Some(val) => val,
-                    None => return Ok(None),
-                };
-                let right_val = match self
-                    .evaluate_filter_operand(ctx, right, bindings_snapshot, bindings_cursor)
-                    .await?
-                {
-                    Some(val) => val,
-                    None => return Ok(None),
-                };
-
-                Ok(Some(Self::compare_values(
-                    &left_val, &operator, &right_val,
-                )?))
-            }
-            FilterExpression::Logical {
-                left,
-                operator,
-                right,
-            } => {
-                let left_result = match Box::pin(self.evaluate_filter_expression(
-                    ctx,
-                    *left,
-                    bindings_snapshot,
-                    bindings_cursor,
-                ))
-                .await?
-                {
-                    Some(result) => result,
-                    None => return Ok(None),
-                };
-                let right_result = match Box::pin(self.evaluate_filter_expression(
-                    ctx,
-                    *right,
-                    bindings_snapshot,
-                    bindings_cursor,
-                ))
-                .await?
-                {
-                    Some(result) => result,
-                    None => return Ok(None),
-                };
-
-                Ok(match operator {
-                    LogicalOperator::And => Some(left_result && right_result),
-                    LogicalOperator::Or => Some(left_result || right_result),
-                })
-            }
-            FilterExpression::Not(expr) => {
-                let result = Box::pin(self.evaluate_filter_expression(
-                    ctx,
-                    *expr,
-                    bindings_snapshot,
-                    bindings_cursor,
-                ))
-                .await?;
-                Ok(result.map(|r| !r))
-            }
-            FilterExpression::Function { func, args } => {
-                self.evaluate_filter_function(ctx, func, args, bindings_snapshot, bindings_cursor)
-                    .await
-            }
-        }
-    }
-
-    // 评估过滤操作数
-    async fn evaluate_filter_operand(
-        &self,
-        ctx: &mut QueryContext,
-        operand: FilterOperand,
-        bindings_snapshot: &mut HashMap<String, Vec<EntityID>>,
-        bindings_cursor: &mut HashMap<String, EntityID>,
-    ) -> Result<Option<Json>, KipError> {
-        match operand {
-            FilterOperand::Variable(dot_path) => {
-                self.consume_bindings(&ctx.cache, dot_path, bindings_snapshot, bindings_cursor)
-                    .await
-            }
-            FilterOperand::Literal(value) => Ok(Some(value.into())),
-        }
-    }
-
-    async fn resolve_result(
-        &self,
-        cache: &QueryCache,
-        bindings: &HashMap<String, Vec<EntityID>>,
-        dot_path: &DotPathVar,
-        order_by: &[OrderByCondition],
-    ) -> Result<Vec<Json>, KipError> {
-        let ids = bindings.get(&dot_path.var).ok_or_else(|| {
-            KipError::InvalidCommand(format!("Unbound variable: '{}'", dot_path.var))
-        })?;
-
-        let mut result = Vec::with_capacity(ids.len());
-        for id in ids {
-            match id {
-                EntityID::Concept(id) => {
-                    let rt = self
-                        .try_get_concept_with(cache, *id, |concept| {
-                            Self::extract_concept_field_value(concept, &[])
-                        })
-                        .await?;
-                    result.push(rt);
-                }
-                EntityID::Proposition(id, predicate) => {
-                    let rt = self
-                        .try_get_proposition_with(cache, *id, |prop| {
-                            Self::extract_proposition_field_value(prop, predicate, &[])
-                        })
-                        .await?;
-                    result.push(rt);
-                }
-            };
-        }
-
-        result = Self::apply_order_by(&dot_path.var, result, order_by);
-        if dot_path.path.is_empty() {
-            return Ok(result);
-        }
-
-        let path = format!("/{}", dot_path.path.join("/"));
-        Ok(result
-            .into_iter()
-            .map(|val| val.pointer(&path).cloned().unwrap_or(Json::Null))
-            .collect())
-    }
-
-    async fn consume_bindings(
-        &self,
-        cache: &QueryCache,
-        dot_path: DotPathVar,
-        bindings_snapshot: &mut HashMap<String, Vec<EntityID>>,
-        bindings_cursor: &mut HashMap<String, EntityID>,
-    ) -> Result<Option<Json>, KipError> {
-        let entity_id = match bindings_cursor.get(&dot_path.var) {
-            Some(id) => id.clone(),
-            None => {
-                // 如果当前游标没有绑定，尝试从快照中获取
-                let ids = bindings_snapshot.get_mut(&dot_path.var).ok_or_else(|| {
-                    KipError::InvalidCommand(format!("Unbound variable: '{}'", dot_path.var))
-                })?;
-                let id = match ids.pop() {
-                    Some(id) => id,
-                    None => return Ok(None), // 如果没有更多ID，返回None
-                };
-
-                if ids.is_empty() {
-                    bindings_snapshot.remove(&dot_path.var);
-                }
-
-                bindings_cursor.insert(dot_path.var.clone(), id.clone());
-                id
-            }
-        };
-
-        match entity_id {
-            EntityID::Concept(id) => {
-                let rt = self
-                    .try_get_concept_with(cache, id, |concept| {
-                        Self::extract_concept_field_value(concept, &dot_path.path)
-                    })
-                    .await?;
-
-                Ok(Some(rt))
-            }
-            EntityID::Proposition(id, predicate) => {
-                let rt = self
-                    .try_get_proposition_with(cache, id, |proposition| {
-                        Self::extract_proposition_field_value(
-                            proposition,
-                            &predicate,
-                            &dot_path.path,
-                        )
-                    })
-                    .await?;
-
-                Ok(Some(rt))
-            }
-        }
-    }
-
-    async fn try_get_concept_with<F, R>(
-        &self,
-        cache: &QueryCache,
-        id: u64,
-        f: F,
-    ) -> Result<R, KipError>
-    where
-        F: FnOnce(&Concept) -> Result<R, KipError>,
-    {
-        if let Some(concept) = cache.concepts.read().get(&id) {
-            return f(concept);
-        }
-        let concept: Concept = self
-            .concepts
-            .get_as(id)
-            .await
-            .map_err(|e| KipError::Execution(format!("{:?}", e)))?;
-        let rt = f(&concept)?;
-        cache.concepts.write().insert(id, concept);
-        Ok(rt)
-    }
-
-    async fn try_get_proposition_with<F, R>(
-        &self,
-        cache: &QueryCache,
-        id: u64,
-        f: F,
-    ) -> Result<R, KipError>
-    where
-        F: FnOnce(&Proposition) -> Result<R, KipError>,
-    {
-        if let Some(proposition) = cache.propositions.read().get(&id) {
-            return f(proposition);
-        }
-        let proposition: Proposition = self
-            .propositions
-            .get_as(id)
-            .await
-            .map_err(|e| KipError::Execution(format!("{:?}", e)))?;
-        let rt = f(&proposition)?;
-        cache.propositions.write().insert(id, proposition);
-        Ok(rt)
-    }
-
-    // 从概念中提取字段值
-    fn extract_concept_field_value(concept: &Concept, path: &[String]) -> Result<Json, KipError> {
-        if path.is_empty() {
-            return Ok(concept.to_concept_node());
-        }
-
-        match path[0].as_str() {
-            "id" if path.len() == 1 => Ok(concept.entity_id().to_string().into()),
-            "type" if path.len() == 1 => Ok(concept.r#type.clone().into()),
-            "name" if path.len() == 1 => Ok(concept.name.clone().into()),
-            "attributes" if path.len() <= 2 => {
-                if path.len() == 1 {
-                    Ok(concept.attributes.clone().into())
-                } else {
-                    concept
-                        .attributes
-                        .get(&path[1])
-                        .cloned()
-                        .unwrap_or(Json::Null)
-                        .pipe(Ok)
-                }
-            }
-            "metadata" if path.len() <= 2 => {
-                if path.len() == 1 {
-                    Ok(concept.metadata.clone().into())
-                } else {
-                    concept
-                        .metadata
-                        .get(&path[1])
-                        .cloned()
-                        .unwrap_or(Json::Null)
-                        .pipe(Ok)
-                }
-            }
-            _ => Err(KipError::InvalidCommand(format!(
-                "Invalid field path: {}",
-                path.join(".")
-            ))),
-        }
-    }
-
-    // 从命题中提取字段值
-    fn extract_proposition_field_value(
-        proposition: &Proposition,
-        predicate: &str,
-        path: &[String],
-    ) -> Result<Json, KipError> {
-        if !proposition.predicates.contains(predicate) {
-            return Err(KipError::Execution(format!(
-                "Invalid predicate: {}",
-                predicate
-            )));
-        }
-
-        if path.is_empty() {
-            return proposition.to_proposition_link(predicate).ok_or_else(|| {
-                KipError::InvalidCommand(format!("Invalid predicate: {}", predicate))
-            });
-        }
-
-        let prop = proposition
-            .properties
-            .get(predicate)
-            .map(Cow::Borrowed)
-            .unwrap_or_else(|| {
-                Cow::Owned(Properties {
-                    attributes: Map::new(),
-                    metadata: Map::new(),
-                })
-            });
-
-        match path[0].as_str() {
-            "id" if path.len() == 1 => Ok(proposition
-                .entity_id(predicate.to_string())
-                .to_string()
-                .into()),
-            "subject" if path.len() == 1 => Ok(proposition.subject.to_string().into()),
-            "object" if path.len() == 1 => Ok(proposition.object.to_string().into()),
-            "predicate" if path.len() == 1 => Ok(predicate.into()),
-            "attributes" if path.len() <= 2 => {
-                if path.len() == 1 {
-                    Ok(prop.attributes.clone().into())
-                } else {
-                    prop.attributes
-                        .get(&path[1])
-                        .cloned()
-                        .unwrap_or(Json::Null)
-                        .pipe(Ok)
-                }
-            }
-            "metadata" if path.len() <= 2 => {
-                if path.len() == 1 {
-                    Ok(prop.metadata.clone().into())
-                } else {
-                    prop.metadata
-                        .get(&path[1])
-                        .cloned()
-                        .unwrap_or(Json::Null)
-                        .pipe(Ok)
-                }
-            }
-            _ => Err(KipError::InvalidCommand(format!(
-                "Invalid field path: {}",
-                path.join(".")
-            ))),
-        }
-    }
-
-    // 比较值
-    fn compare_values(
-        left: &Json,
-        operator: &ComparisonOperator,
-        right: &Json,
-    ) -> Result<bool, KipError> {
-        use std::cmp::Ordering;
-
-        let ordering = match (left, right) {
-            (Json::Number(a), Json::Number(b)) => a
-                .as_f64()
-                .unwrap_or(0.0)
-                .partial_cmp(&b.as_f64().unwrap_or(0.0)),
-            (Json::String(a), Json::String(b)) => Some(a.cmp(b)),
-            (Json::Bool(a), Json::Bool(b)) => Some(a.cmp(b)),
-            (Json::Null, Json::Null) => Some(Ordering::Equal),
-            _ => None,
-        };
-
-        match operator {
-            ComparisonOperator::Equal => Ok(left == right),
-            ComparisonOperator::NotEqual => Ok(left != right),
-            ComparisonOperator::LessThan => ordering
-                .map(|o| o == Ordering::Less)
-                .unwrap_or(false)
-                .pipe(Ok),
-            ComparisonOperator::GreaterThan => ordering
-                .map(|o| o == Ordering::Greater)
-                .unwrap_or(false)
-                .pipe(Ok),
-            ComparisonOperator::LessEqual => ordering
-                .map(|o| o != Ordering::Greater)
-                .unwrap_or(false)
-                .pipe(Ok),
-            ComparisonOperator::GreaterEqual => ordering
-                .map(|o| o != Ordering::Less)
-                .unwrap_or(false)
-                .pipe(Ok),
-        }
-    }
-
-    // 评估过滤函数
-    async fn evaluate_filter_function(
-        &self,
-        ctx: &mut QueryContext,
-        func: FilterFunction,
-        mut args: Vec<FilterOperand>,
-        bindings_snapshot: &mut HashMap<String, Vec<EntityID>>,
-        bindings_cursor: &mut HashMap<String, EntityID>,
-    ) -> Result<Option<bool>, KipError> {
-        if args.len() != 2 {
-            return Err(KipError::InvalidCommand(
-                "Filter functions require exactly 2 arguments".to_string(),
-            ));
-        }
-
-        let pattern_arg = args.pop().unwrap();
-        let str_arg = args.pop().unwrap();
-        let str_val = match self
-            .evaluate_filter_operand(ctx, str_arg, bindings_snapshot, bindings_cursor)
-            .await?
-        {
-            Some(val) => val,
-            None => return Ok(None),
-        };
-        let pattern_val = match self
-            .evaluate_filter_operand(ctx, pattern_arg, bindings_snapshot, bindings_cursor)
-            .await?
-        {
-            Some(val) => val,
-            None => return Ok(None),
-        };
-
-        let string = str_val.as_str().unwrap_or("");
-        let pattern = pattern_val.as_str().unwrap_or("");
-
-        match func {
-            FilterFunction::Contains => Ok(Some(string.contains(pattern))),
-            FilterFunction::StartsWith => Ok(Some(string.starts_with(pattern))),
-            FilterFunction::EndsWith => Ok(Some(string.ends_with(pattern))),
-            FilterFunction::Regex => {
-                // 简单的正则表达式匹配
-                let rt = regex::Regex::new(pattern)
-                    .map_err(|e| KipError::InvalidCommand(format!("Invalid regex: {}", e)))?
-                    .is_match(string);
-                Ok(Some(rt))
-            }
-        }
-    }
-
-    // 应用排序
-    fn apply_order_by(
-        variable: &str,
-        mut values: Vec<Json>,
-        order_by: &[OrderByCondition],
-    ) -> Vec<Json> {
-        values.sort_by(|a, b| {
-            for cond in order_by {
-                if cond.variable.var != variable {
-                    continue; // 只处理与当前变量相关的排序条件
-                }
-                let path = format!("/{}", cond.variable.path.join("/"));
-
-                let a_val = a.pointer(&path);
-                let b_val = b.pointer(&path);
-
-                let ordering = match (a_val, b_val) {
-                    (Some(Json::Number(a)), Some(Json::Number(b))) => a
-                        .as_f64()
-                        .unwrap_or(0.0)
-                        .partial_cmp(&b.as_f64().unwrap_or(0.0)),
-                    (Some(Json::String(a)), Some(Json::String(b))) => Some(a.cmp(b)),
-                    (Some(Json::Bool(a)), Some(Json::Bool(b))) => Some(a.cmp(b)),
-                    _ => None,
-                };
-
-                if let Some(ord) = ordering {
-                    let result = match cond.direction {
-                        OrderDirection::Asc => ord,
-                        OrderDirection::Desc => ord.reverse(),
-                    };
-
-                    if result != std::cmp::Ordering::Equal {
-                        return result;
-                    }
-                }
-            }
-            std::cmp::Ordering::Equal
-        });
-
-        values
-    }
-
-    // 计算聚合函数
-    async fn calculate_aggregation(
-        &self,
-        func: &AggregationFunction,
-        distinct: bool,
-        values: &Vec<Json>,
-    ) -> Result<Json, KipError> {
-        match func {
-            AggregationFunction::Count => Ok(if distinct {
-                let vals: HashSet<&Json> = HashSet::from_iter(values);
-                vals.len().into()
-            } else {
-                values.len().into()
-            }),
-            AggregationFunction::Sum => {
-                let sum: f64 = values.iter().filter_map(|v| v.as_f64()).sum();
-                Ok(Number::from_f64(sum).map(|v| v.into()).unwrap_or_default())
-            }
-            AggregationFunction::Avg => {
-                let nums: Vec<f64> = values.iter().filter_map(|v| v.as_f64()).collect();
-                if nums.is_empty() {
-                    Ok(Json::Null)
-                } else {
-                    let avg = nums.iter().sum::<f64>() / nums.len() as f64;
-                    Ok(Number::from_f64(avg).map(|v| v.into()).unwrap_or_default())
-                }
-            }
-            AggregationFunction::Min => values
-                .iter()
-                .filter_map(|v| v.as_f64())
-                .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                .map(|min| Number::from_f64(min).map(|v| v.into()).unwrap_or_default())
-                .unwrap_or(Json::Null)
-                .pipe(Ok),
-            AggregationFunction::Max => values
-                .iter()
-                .filter_map(|v| v.as_f64())
-                .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                .map(|max| Number::from_f64(max).map(|v| v.into()).unwrap_or_default())
-                .unwrap_or(Json::Null)
-                .pipe(Ok),
-        }
-    }
-
     async fn execute_upsert(
         &self,
-        upsert_block: UpsertBlock,
+        upsert_blocks: Vec<UpsertBlock>,
         dry_run: bool,
     ) -> Result<Json, KipError> {
-        let mut handle_map: HashMap<String, EntityID> = HashMap::new();
-        let mut cached_pks: HashMap<EntityPK, EntityID> = HashMap::new();
+        let blocks = upsert_blocks.len();
         let mut concept_nodes: Vec<EntityID> = Vec::new();
         let mut proposition_links: Vec<EntityID> = Vec::new();
-        let default_metadata: Map<String, Json> = upsert_block.metadata.unwrap_or_default();
+        for block in upsert_blocks {
+            let mut handle_map: HashMap<String, EntityID> = HashMap::new();
+            let mut cached_pks: HashMap<EntityPK, EntityID> = HashMap::new();
+            let default_metadata: Map<String, Json> = block.metadata.unwrap_or_default();
 
-        for item in upsert_block.items {
-            match item {
-                UpsertItem::Concept(concept_block) => {
-                    if let Some(entity_id) = self
-                        .execute_concept_block(
-                            concept_block,
-                            &default_metadata,
-                            &mut handle_map,
-                            &mut cached_pks,
-                            dry_run,
-                        )
-                        .await?
-                    {
-                        concept_nodes.push(entity_id);
+            for item in block.items {
+                match item {
+                    UpsertItem::Concept(concept_block) => {
+                        if let Some(entity_id) = self
+                            .execute_concept_block(
+                                concept_block,
+                                &default_metadata,
+                                &mut handle_map,
+                                &mut cached_pks,
+                                dry_run,
+                            )
+                            .await?
+                        {
+                            concept_nodes.push(entity_id);
+                        }
                     }
-                }
-                UpsertItem::Proposition(proposition_block) => {
-                    if let Some(entity_id) = self
-                        .execute_proposition_block(
-                            proposition_block,
-                            &default_metadata,
-                            &mut handle_map,
-                            &mut cached_pks,
-                            dry_run,
-                        )
-                        .await?
-                    {
-                        proposition_links.push(entity_id);
+                    UpsertItem::Proposition(proposition_block) => {
+                        if let Some(entity_id) = self
+                            .execute_proposition_block(
+                                proposition_block,
+                                &default_metadata,
+                                &mut handle_map,
+                                &mut cached_pks,
+                                dry_run,
+                            )
+                            .await?
+                        {
+                            proposition_links.push(entity_id);
+                        }
                     }
                 }
             }
         }
 
+        let now_ms = unix_ms();
+        try_join_await!(self.concepts.flush(now_ms), self.propositions.flush(now_ms))
+            .map_err(|err| KipError::Execution(format!("{err:?}")))?;
+
         Ok(json!({
+            "blocks": blocks,
             "concept_nodes": concept_nodes,
             "proposition_links": proposition_links,
         }))
@@ -1964,7 +1154,7 @@ impl CognitiveNexus {
         delete_statement: DeleteStatement,
         dry_run: bool,
     ) -> Result<Json, KipError> {
-        match delete_statement {
+        let result = match delete_statement {
             DeleteStatement::DeleteAttributes {
                 attributes,
                 target,
@@ -1995,7 +1185,13 @@ impl CognitiveNexus {
                 self.execute_delete_concepts(target, where_clauses, dry_run)
                     .await
             }
-        }
+        }?;
+
+        let now_ms = unix_ms();
+        try_join_await!(self.concepts.flush(now_ms), self.propositions.flush(now_ms))
+            .map_err(|err| KipError::Execution(format!("{err:?}")))?;
+
+        Ok(result)
     }
 
     async fn execute_delete_attributes(
@@ -2501,6 +1697,532 @@ impl CognitiveNexus {
         self.propositions.update(id, update_fields).await?;
 
         Ok(())
+    }
+
+    async fn find_propositions(
+        &self,
+        cache: &QueryCache,
+        node: &EntityID,
+        predicate: &str,
+        reverse: bool,
+    ) -> Result<Vec<(EntityID, EntityID)>, KipError> {
+        let ids = self
+            .propositions
+            .query_ids(
+                Filter::Field((
+                    if reverse {
+                        "object".to_string()
+                    } else {
+                        "subject".to_string()
+                    },
+                    RangeQuery::Eq(Fv::Text(node.to_string())),
+                )),
+                None,
+            )
+            .await
+            .map_err(|e| KipError::Execution(format!("Failed to query propositions: {:?}", e)))?;
+
+        let mut results = Vec::with_capacity(ids.len());
+        for id in ids {
+            let rt = self
+                .try_get_proposition_with(cache, id, |proposition| {
+                    if proposition.predicates.contains(predicate) {
+                        Ok(Some((
+                            EntityID::Proposition(id, predicate.to_string()),
+                            if reverse {
+                                proposition.subject.clone()
+                            } else {
+                                proposition.object.clone()
+                            },
+                        )))
+                    } else {
+                        Ok(None)
+                    }
+                })
+                .await?;
+
+            if let Some(rt) = rt {
+                results.push(rt)
+            }
+        }
+
+        Ok(results)
+    }
+
+    // 查询概念节点ID
+    async fn query_concept_ids(&self, matcher: &ConceptMatcher) -> Result<Vec<u64>, KipError> {
+        match matcher {
+            ConceptMatcher::ID(id) => {
+                let entity_id = EntityID::from_str(id).map_err(KipError::Parse)?;
+                if let EntityID::Concept(concept_id) = entity_id {
+                    Ok(vec![concept_id])
+                } else {
+                    Err(KipError::InvalidCommand(format!(
+                        "Invalid concept node ID: {}",
+                        id
+                    )))
+                }
+            }
+            ConceptMatcher::Type(type_name) => {
+                let ids = self
+                    .concepts
+                    .query_ids(
+                        Filter::Field((
+                            "type".to_string(),
+                            RangeQuery::Eq(Fv::Text(type_name.clone())),
+                        )),
+                        None,
+                    )
+                    .await
+                    .map_err(|e| KipError::Execution(format!("{:?}", e)))?;
+                Ok(ids)
+            }
+            ConceptMatcher::Name(name) => {
+                let ids = self
+                    .concepts
+                    .query_ids(
+                        Filter::Field(("name".to_string(), RangeQuery::Eq(Fv::Text(name.clone())))),
+                        None,
+                    )
+                    .await
+                    .map_err(|e| KipError::Execution(format!("{:?}", e)))?;
+                Ok(ids)
+            }
+            ConceptMatcher::Object { r#type, name } => {
+                let virtual_name = virtual_field_name(&["type", "name"]);
+                let virtual_val = virtual_field_value(&[
+                    Some(&Fv::Text(r#type.clone())),
+                    Some(&Fv::Text(name.clone())),
+                ])
+                .unwrap();
+
+                let ids = self
+                    .concepts
+                    .query_ids(
+                        Filter::Field((virtual_name, RangeQuery::Eq(virtual_val))),
+                        None,
+                    )
+                    .await
+                    .map_err(|e| KipError::Execution(format!("{:?}", e)))?;
+                Ok(ids)
+            }
+        }
+    }
+
+    async fn evaluate_filter_operand(
+        &self,
+        ctx: &mut QueryContext,
+        operand: FilterOperand,
+        bindings_snapshot: &mut HashMap<String, Vec<EntityID>>,
+        bindings_cursor: &mut HashMap<String, EntityID>,
+    ) -> Result<Option<Json>, KipError> {
+        match operand {
+            FilterOperand::Variable(dot_path) => {
+                self.consume_bindings(&ctx.cache, dot_path, bindings_snapshot, bindings_cursor)
+                    .await
+            }
+            FilterOperand::Literal(value) => Ok(Some(value.into())),
+        }
+    }
+
+    async fn match_propositions(
+        &self,
+        ctx: &mut QueryContext,
+        subject: TargetTerm,
+        predicate: PredTerm,
+        object: TargetTerm,
+    ) -> Result<TargetEntities, KipError> {
+        let subject_var = match &subject {
+            TargetTerm::Variable(var) => Some(var.clone()),
+            _ => None,
+        };
+        let predicate_var = match &predicate {
+            PredTerm::Variable(var) => Some(var.clone()),
+            _ => None,
+        };
+        let object_var = match &object {
+            TargetTerm::Variable(var) => Some(var.clone()),
+            _ => None,
+        };
+
+        let subjects = self.resolve_target_term_ids(ctx, subject).await?;
+        let objects = self.resolve_target_term_ids(ctx, object).await?;
+
+        let result = match (subjects, predicate, objects) {
+            (
+                subjects,
+                PredTerm::MultiHop {
+                    predicate,
+                    min,
+                    max,
+                },
+                objects,
+            ) => {
+                self.handle_multi_hop_matching(ctx, subjects, predicate, min, max, objects)
+                    .await?
+            }
+            (TargetEntities::IDs(subject_ids), predicate, TargetEntities::IDs(object_ids)) => {
+                self.handle_subject_object_ids_matching(ctx, subject_ids, object_ids, predicate)
+                    .await?
+            }
+            (TargetEntities::IDs(subject_ids), predicate, TargetEntities::AnyPropositions) => {
+                self.handle_subject_ids_any_matching(ctx, subject_ids, predicate, true)
+                    .await?
+            }
+            (TargetEntities::IDs(subject_ids), predicate, TargetEntities::Any) => {
+                self.handle_subject_ids_any_matching(ctx, subject_ids, predicate, false)
+                    .await?
+            }
+            (TargetEntities::AnyPropositions, predicate, TargetEntities::IDs(object_ids)) => {
+                self.handle_any_to_object_ids_matching(ctx, object_ids, predicate, true)
+                    .await?
+            }
+            (TargetEntities::Any, predicate, TargetEntities::IDs(object_ids)) => {
+                self.handle_any_to_object_ids_matching(ctx, object_ids, predicate, false)
+                    .await?
+            }
+            (_, predicate, _) => {
+                if matches!(&predicate, PredTerm::Variable(_)) {
+                    return Ok(TargetEntities::AnyPropositions);
+                }
+
+                self.handle_predicate_matching(ctx, predicate).await?
+            }
+        };
+
+        if let Some(var) = subject_var {
+            ctx.entities.insert(var, result.matched_subjects.clone());
+        }
+        if let Some(var) = predicate_var {
+            ctx.predicates
+                .insert(var, result.matched_predicates.clone());
+        }
+        if let Some(var) = object_var {
+            ctx.entities.insert(var, result.matched_objects.clone());
+        }
+
+        Ok(TargetEntities::IDs(
+            result.matched_propositions.into_iter().collect(),
+        ))
+    }
+
+    async fn resolve_result(
+        &self,
+        cache: &QueryCache,
+        bindings: &HashMap<String, Vec<EntityID>>,
+        dot_path: &DotPathVar,
+        order_by: &[OrderByCondition],
+    ) -> Result<Vec<Json>, KipError> {
+        let ids = bindings.get(&dot_path.var).ok_or_else(|| {
+            KipError::InvalidCommand(format!("Unbound variable: '{}'", dot_path.var))
+        })?;
+
+        let mut result = Vec::with_capacity(ids.len());
+        for id in ids {
+            match id {
+                EntityID::Concept(id) => {
+                    let rt = self
+                        .try_get_concept_with(cache, *id, |concept| {
+                            extract_concept_field_value(concept, &[])
+                        })
+                        .await?;
+                    result.push(rt);
+                }
+                EntityID::Proposition(id, predicate) => {
+                    let rt = self
+                        .try_get_proposition_with(cache, *id, |prop| {
+                            extract_proposition_field_value(prop, predicate, &[])
+                        })
+                        .await?;
+                    result.push(rt);
+                }
+            };
+        }
+
+        result = apply_order_by(result, &dot_path.var, order_by);
+        if dot_path.path.is_empty() {
+            return Ok(result);
+        }
+
+        let path = format!("/{}", dot_path.path.join("/"));
+        Ok(result
+            .into_iter()
+            .map(|val| val.pointer(&path).cloned().unwrap_or(Json::Null))
+            .collect())
+    }
+
+    // 解析目标项为实体ID列表
+    async fn resolve_target_term_ids(
+        &self,
+        ctx: &mut QueryContext,
+        target: TargetTerm,
+    ) -> Result<TargetEntities, KipError> {
+        match target {
+            TargetTerm::Variable(var) => {
+                if let Some(ids) = ctx.entities.get(&var) {
+                    Ok(TargetEntities::IDs(ids.iter().cloned().collect()))
+                } else {
+                    Ok(TargetEntities::Any)
+                }
+            }
+            TargetTerm::Concept(concept_matcher) => {
+                let ids = self.query_concept_ids(&concept_matcher).await?;
+                Ok(TargetEntities::IDs(
+                    ids.into_iter().map(EntityID::Concept).collect(),
+                ))
+            }
+            TargetTerm::Proposition(proposition_matcher) => {
+                match *proposition_matcher {
+                    PropositionMatcher::ID(id) => {
+                        let entity_id = EntityID::from_str(&id).map_err(KipError::Parse)?;
+                        if !matches!(entity_id, EntityID::Proposition(_, _)) {
+                            return Err(KipError::InvalidCommand(format!(
+                                "Invalid proposition link ID: {id:?}"
+                            )));
+                        }
+                        Ok(TargetEntities::IDs(vec![entity_id]))
+                    }
+                    PropositionMatcher::Object {
+                        subject: TargetTerm::Variable(_),
+                        predicate: PredTerm::Variable(_),
+                        object: TargetTerm::Variable(_),
+                    } => Ok(TargetEntities::AnyPropositions),
+                    PropositionMatcher::Object {
+                        subject,
+                        predicate,
+                        object,
+                    } => {
+                        // 递归查询命题
+                        let result =
+                            Box::pin(self.match_propositions(ctx, subject, predicate, object))
+                                .await?;
+                        Ok(result)
+                    }
+                }
+            }
+        }
+    }
+
+    async fn consume_bindings(
+        &self,
+        cache: &QueryCache,
+        dot_path: DotPathVar,
+        bindings_snapshot: &mut HashMap<String, Vec<EntityID>>,
+        bindings_cursor: &mut HashMap<String, EntityID>,
+    ) -> Result<Option<Json>, KipError> {
+        let entity_id = match bindings_cursor.get(&dot_path.var) {
+            Some(id) => id.clone(),
+            None => {
+                // 如果当前游标没有绑定，尝试从快照中获取
+                let ids = bindings_snapshot.get_mut(&dot_path.var).ok_or_else(|| {
+                    KipError::InvalidCommand(format!("Unbound variable: '{}'", dot_path.var))
+                })?;
+                let id = match ids.pop() {
+                    Some(id) => id,
+                    None => return Ok(None), // 如果没有更多ID，返回None
+                };
+
+                if ids.is_empty() {
+                    bindings_snapshot.remove(&dot_path.var);
+                }
+
+                bindings_cursor.insert(dot_path.var.clone(), id.clone());
+                id
+            }
+        };
+
+        match entity_id {
+            EntityID::Concept(id) => {
+                let rt = self
+                    .try_get_concept_with(cache, id, |concept| {
+                        extract_concept_field_value(concept, &dot_path.path)
+                    })
+                    .await?;
+
+                Ok(Some(rt))
+            }
+            EntityID::Proposition(id, predicate) => {
+                let rt = self
+                    .try_get_proposition_with(cache, id, |proposition| {
+                        extract_proposition_field_value(proposition, &predicate, &dot_path.path)
+                    })
+                    .await?;
+
+                Ok(Some(rt))
+            }
+        }
+    }
+
+    async fn try_get_concept_with<F, R>(
+        &self,
+        cache: &QueryCache,
+        id: u64,
+        f: F,
+    ) -> Result<R, KipError>
+    where
+        F: FnOnce(&Concept) -> Result<R, KipError>,
+    {
+        if let Some(concept) = cache.concepts.read().get(&id) {
+            return f(concept);
+        }
+        let concept: Concept = self
+            .concepts
+            .get_as(id)
+            .await
+            .map_err(|e| KipError::Execution(format!("{:?}", e)))?;
+        let rt = f(&concept)?;
+        cache.concepts.write().insert(id, concept);
+        Ok(rt)
+    }
+
+    async fn try_get_proposition_with<F, R>(
+        &self,
+        cache: &QueryCache,
+        id: u64,
+        f: F,
+    ) -> Result<R, KipError>
+    where
+        F: FnOnce(&Proposition) -> Result<R, KipError>,
+    {
+        if let Some(proposition) = cache.propositions.read().get(&id) {
+            return f(proposition);
+        }
+        let proposition: Proposition = self
+            .propositions
+            .get_as(id)
+            .await
+            .map_err(|e| KipError::Execution(format!("{:?}", e)))?;
+        let rt = f(&proposition)?;
+        cache.propositions.write().insert(id, proposition);
+        Ok(rt)
+    }
+
+    async fn evaluate_filter_expression(
+        &self,
+        ctx: &mut QueryContext,
+        expr: FilterExpression,
+        bindings_snapshot: &mut HashMap<String, Vec<EntityID>>,
+        bindings_cursor: &mut HashMap<String, EntityID>,
+    ) -> Result<Option<bool>, KipError> {
+        match expr {
+            FilterExpression::Comparison {
+                left,
+                operator,
+                right,
+            } => {
+                let left_val = match self
+                    .evaluate_filter_operand(ctx, left, bindings_snapshot, bindings_cursor)
+                    .await?
+                {
+                    Some(val) => val,
+                    None => return Ok(None),
+                };
+                let right_val = match self
+                    .evaluate_filter_operand(ctx, right, bindings_snapshot, bindings_cursor)
+                    .await?
+                {
+                    Some(val) => val,
+                    None => return Ok(None),
+                };
+
+                Ok(Some(operator.compare(&left_val, &right_val)))
+            }
+            FilterExpression::Logical {
+                left,
+                operator,
+                right,
+            } => {
+                let left_result = match Box::pin(self.evaluate_filter_expression(
+                    ctx,
+                    *left,
+                    bindings_snapshot,
+                    bindings_cursor,
+                ))
+                .await?
+                {
+                    Some(result) => result,
+                    None => return Ok(None),
+                };
+                let right_result = match Box::pin(self.evaluate_filter_expression(
+                    ctx,
+                    *right,
+                    bindings_snapshot,
+                    bindings_cursor,
+                ))
+                .await?
+                {
+                    Some(result) => result,
+                    None => return Ok(None),
+                };
+
+                Ok(match operator {
+                    LogicalOperator::And => Some(left_result && right_result),
+                    LogicalOperator::Or => Some(left_result || right_result),
+                })
+            }
+            FilterExpression::Not(expr) => {
+                let result = Box::pin(self.evaluate_filter_expression(
+                    ctx,
+                    *expr,
+                    bindings_snapshot,
+                    bindings_cursor,
+                ))
+                .await?;
+                Ok(result.map(|r| !r))
+            }
+            FilterExpression::Function { func, args } => {
+                self.evaluate_filter_function(ctx, func, args, bindings_snapshot, bindings_cursor)
+                    .await
+            }
+        }
+    }
+
+    async fn evaluate_filter_function(
+        &self,
+        ctx: &mut QueryContext,
+        func: FilterFunction,
+        mut args: Vec<FilterOperand>,
+        bindings_snapshot: &mut HashMap<String, Vec<EntityID>>,
+        bindings_cursor: &mut HashMap<String, EntityID>,
+    ) -> Result<Option<bool>, KipError> {
+        if args.len() != 2 {
+            return Err(KipError::InvalidCommand(
+                "Filter functions require exactly 2 arguments".to_string(),
+            ));
+        }
+
+        let pattern_arg = args.pop().unwrap();
+        let str_arg = args.pop().unwrap();
+        let str_val = match self
+            .evaluate_filter_operand(ctx, str_arg, bindings_snapshot, bindings_cursor)
+            .await?
+        {
+            Some(val) => val,
+            None => return Ok(None),
+        };
+        let pattern_val = match self
+            .evaluate_filter_operand(ctx, pattern_arg, bindings_snapshot, bindings_cursor)
+            .await?
+        {
+            Some(val) => val,
+            None => return Ok(None),
+        };
+
+        let string = str_val.as_str().unwrap_or("");
+        let pattern = pattern_val.as_str().unwrap_or("");
+
+        match func {
+            FilterFunction::Contains => Ok(Some(string.contains(pattern))),
+            FilterFunction::StartsWith => Ok(Some(string.starts_with(pattern))),
+            FilterFunction::EndsWith => Ok(Some(string.ends_with(pattern))),
+            FilterFunction::Regex => {
+                // 简单的正则表达式匹配
+                let rt = regex::Regex::new(pattern)
+                    .map_err(|e| KipError::InvalidCommand(format!("Invalid regex: {}", e)))?
+                    .is_match(string);
+                Ok(Some(rt))
+            }
+        }
     }
 
     fn check_target_term_for_kml(

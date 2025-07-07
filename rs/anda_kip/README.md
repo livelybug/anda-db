@@ -87,7 +87,7 @@ pub struct MyKnowledgeGraph {
     // Your knowledge graph implementation
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 impl Executor for MyKnowledgeGraph {
     async fn execute(&self, command: Command, dry_run: bool) -> Result<Json, KipError> {
         match command {

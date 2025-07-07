@@ -4,16 +4,28 @@ use nom::{
     IResult, Mode, Parser,
     branch::alt,
     bytes::{tag, tag_no_case, take},
-    character::{anychar, char, complete::multispace0, none_of},
-    combinator::{map, map_opt, map_res, value, verify},
+    character::{
+        anychar, char,
+        complete::{alpha1, alphanumeric1, multispace0},
+        none_of,
+    },
+    combinator::{map, map_opt, map_res, opt, recognize, value, verify},
     error::{Error, ErrorKind, ParseError},
-    multi::{fold, separated_list0},
+    multi::{fold, many0, separated_list0},
     number::complete::recognize_float,
-    sequence::{delimited, preceded, separated_pair},
+    sequence::{delimited, pair, preceded, separated_pair, terminated},
 };
 use std::str::FromStr;
 
 use crate::{Json, Map, Number};
+
+/// Parse a non-standard JSON:
+/// - Allow identifier as map key (starts with a letter or underscore, followed by any combination of letters, digits, or underscores)
+/// - Allow line comment (starting with //).
+/// - Allow trailing comma
+pub fn json_value<'a>() -> impl Parser<&'a str, Output = Json, Error = Error<&'a str>> {
+    JsonParser
+}
 
 /// Parses a double-quoted string, handling escaped quotes.
 pub fn quoted_string(input: &str) -> IResult<&str, String> {
@@ -32,11 +44,41 @@ where
     E: ParseError<&'a str>,
     F: Parser<&'a str, Output = O, Error = E>,
 {
-    delimited(multispace0, f, multispace0)
+    delimited(skip_ws_and_comments, f, skip_ws_and_comments)
 }
 
-pub fn json_value<'a>() -> impl Parser<&'a str, Output = Json, Error = Error<&'a str>> {
-    JsonParser
+/// Skips whitespace and line comments.
+fn skip_ws_and_comments<'a, E>(input: &'a str) -> IResult<&'a str, (), E>
+where
+    E: ParseError<&'a str>,
+{
+    let mut remaining = input;
+
+    loop {
+        let start_len = remaining.len();
+
+        // 跳过空白字符
+        if let Ok((rest, _)) = multispace0::<&str, E>(remaining) {
+            remaining = rest;
+        }
+
+        // 跳过行注释
+        if remaining.starts_with("//") {
+            if let Some(newline_pos) = remaining.find('\n') {
+                remaining = &remaining[newline_pos + 1..];
+            } else {
+                // 注释到文件末尾
+                remaining = "";
+            }
+        }
+
+        // 如果没有更多内容被跳过，退出循环
+        if remaining.len() == start_len {
+            break;
+        }
+    }
+
+    Ok((remaining, ()))
 }
 
 fn string<'a>() -> impl Parser<&'a str, Output = String, Error = Error<&'a str>> {
@@ -50,21 +92,42 @@ fn string<'a>() -> impl Parser<&'a str, Output = String, Error = Error<&'a str>>
     )
 }
 
+// It is not a standard JSON:
+// - Allow trailing comma
 fn array<'a>() -> impl Parser<&'a str, Output = Vec<Json>, Error = Error<&'a str>> {
     delimited(
         char('['),
-        ws(separated_list0(ws(char(',')), json_value())),
+        ws(terminated(
+            separated_list0(ws(char(',')), json_value()),
+            opt(ws(char(','))),
+        )),
         char(']'),
     )
+}
+
+// An identifier starts with a letter or underscore, followed by any combination of letters, digits, or underscores.
+fn identifier(input: &str) -> IResult<&str, &str> {
+    recognize(pair(
+        alt((alpha1, tag("_"))),
+        many0(alt((alphanumeric1, tag("_")))),
+    ))
+    .parse(input)
 }
 
 fn object<'a>() -> impl Parser<&'a str, Output = Map<String, Json>, Error = Error<&'a str>> {
     map(
         delimited(
             char('{'),
-            ws(separated_list0(
-                ws(char(',')),
-                separated_pair(string(), ws(char(':')), json_value()),
+            ws(terminated(
+                separated_list0(
+                    ws(char(',')),
+                    separated_pair(
+                        alt((string(), map(identifier, |s| s.to_string()))),
+                        ws(char(':')),
+                        json_value(),
+                    ),
+                ),
+                opt(ws(char(','))),
             )),
             char('}'),
         ),
@@ -166,4 +229,43 @@ impl<'a> Parser<&'a str> for JsonParser {
 }
 
 #[cfg(test)]
-mod tests {}
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_non_standard_json() {
+        let input = r#"
+        {
+            description: "Defines a class or category of Concept Nodes. It acts as a template for creating new concept instances. Every concept node in the graph must have a 'type' that points to a concept of this type.",
+            display_hint: "📦",
+            "instance_schema": { // line comments
+                "description": {
+                    type: "string",
+                    is_required: true,
+                    description: "A human-readable explanation of what this concept type represents."
+                },
+                "display_hint": {
+                    type: "string",
+                    is_required: false,
+                    description: "A suggested icon or visual cue for user interfaces (e.g., an emoji or icon name)."
+                },
+                "instance_schema": {
+                    type: "object",
+                    is_required: false,
+                    description: "A recommended schema defining the common and core attributes for instances of this concept type. It serves as a 'best practice' guideline for knowledge creation, not a rigid constraint. Keys are attribute names, values are objects defining 'type', 'is_required', and 'description'. Instances SHOULD include required attributes but MAY also include any other attribute not defined in this schema, allowing for knowledge to emerge and evolve freely."
+                },
+                "key_instances": {
+                    type: "array",
+                    item_type: "string",
+                    is_required: false,
+                    description: "A list of names of the most important or representative instances of this type, to help LLMs ground their queries.",
+                },
+            },
+            key_instances: [ "$ConceptType", "$PropositionType", "Domain", ],
+        }
+        "#;
+
+        let result = json_value().parse(input.trim()).unwrap();
+        println!("{:?}", result);
+    }
+}

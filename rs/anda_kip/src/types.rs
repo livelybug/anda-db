@@ -18,6 +18,8 @@ pub static DOMAIN_TYPE: &str = "Domain";
 
 pub static PERSON_TYPE: &str = "Person";
 
+pub static BELONGS_TO_DOMAIN_TYPE: &str = "belongs_to_domain";
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "_type")]
 pub enum Entity {

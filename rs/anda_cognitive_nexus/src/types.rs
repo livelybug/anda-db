@@ -178,7 +178,7 @@ pub struct QueryCache {
 
 #[derive(Debug)]
 pub enum TargetEntities {
-    Any(String),
+    Any,
     AnyPropositions,
     IDs(Vec<EntityID>),
 }
@@ -229,20 +229,4 @@ pub struct GraphPath {
     pub end: EntityID,
     pub propositions: Vec<EntityID>,
     pub hops: u16,
-}
-
-pub trait Pipe<T> {
-    fn pipe<F, R>(self, f: F) -> R
-    where
-        F: FnOnce(Self) -> R,
-        Self: Sized;
-}
-
-impl<T> Pipe<T> for T {
-    fn pipe<F, R>(self, f: F) -> R
-    where
-        F: FnOnce(Self) -> R,
-    {
-        f(self)
-    }
 }

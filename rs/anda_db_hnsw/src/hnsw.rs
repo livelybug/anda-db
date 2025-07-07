@@ -1233,12 +1233,21 @@ impl HnswIndex {
         }
 
         let mut buf = Vec::with_capacity(4096);
-        let nodes = self.nodes.pin();
         while let Some(id) = dirty_nodes.pop_first() {
-            if let Some(node) = nodes.get(&id) {
-                buf.clear();
-                ciborium::into_writer(&node, &mut buf).expect("Failed to serialize node");
-                match f(id, &buf).await {
+            // 每次迭代都重新获取guard，并立即使用完毕
+            let node_data = {
+                let nodes = self.nodes.pin();
+                if let Some(node) = nodes.get(&id) {
+                    buf.clear();
+                    ciborium::into_writer(&node, &mut buf).expect("Failed to serialize node");
+                    Some(buf.clone()) // 克隆数据以避免持有guard
+                } else {
+                    None
+                }
+            }; // guard在这里被释放
+
+            if let Some(data) = node_data {
+                match f(id, &data).await {
                     Ok(true) => {
                         // continue
                     }

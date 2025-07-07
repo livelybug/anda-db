@@ -57,8 +57,10 @@ pub fn virtual_field_value(vals: &[Option<&Fv>]) -> Option<Fv> {
     if vals.is_empty() {
         return None;
     }
-
-    let data = canonical_cbor_into_vec(vals).ok()?;
+    let mut data = Vec::new();
+    for val in vals {
+        data.extend(canonical_cbor_into_vec(val).ok()?);
+    }
     Some(Fv::Bytes(data))
 }
 
