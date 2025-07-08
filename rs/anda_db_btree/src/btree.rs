@@ -1123,26 +1123,39 @@ where
 
     /// Returns a vector of keys in the index
     /// This method is useful for iterating over all keys in the index.
-    /// It supports pagination with `skip` and `limit` parameters.
+    /// It supports pagination with `cursor` and `limit` parameters.
     /// # Arguments
     ///
-    /// * `skip` - Number of keys to skip
+    /// * `cursor` - The cursor to start pagination from (exclusive)
     /// * `limit` - Maximum number of keys to return
+    ///
     /// # Returns
     ///
     /// * `Vec<FV>` - Vector of field values (keys) in the index
     ///
-    pub fn keys(&self, skip: usize, limit: Option<usize>) -> Vec<FV> {
-        match limit {
-            Some(limit) => self
+    pub fn keys(&self, cursor: Option<FV>, limit: Option<usize>) -> Vec<FV> {
+        match (cursor, limit) {
+            (Some(cursor), Some(limit)) => self
                 .btree
                 .read()
-                .iter()
-                .skip(skip)
+                .range(std::ops::RangeFrom {
+                    start: cursor.clone(),
+                })
+                .filter(|&k| k > &cursor)
                 .take(limit)
                 .cloned()
                 .collect(),
-            _ => self.btree.read().iter().skip(skip).cloned().collect(),
+            (Some(cursor), None) => self
+                .btree
+                .read()
+                .range(std::ops::RangeFrom {
+                    start: cursor.clone(),
+                })
+                .filter(|&k| k > &cursor)
+                .cloned()
+                .collect(),
+            (None, Some(limit)) => self.btree.read().iter().take(limit).cloned().collect(),
+            (None, None) => self.btree.read().iter().cloned().collect(),
         }
     }
 

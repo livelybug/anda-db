@@ -1,8 +1,10 @@
 use anda_db_btree::BTreeIndex;
 use bytes::Bytes;
+use ciborium::from_reader;
+use ic_auth_types::{ByteBufB64, canonical_cbor_into_vec};
 use parking_lot::RwLock;
 use serde::{Serialize, de::DeserializeOwned};
-use std::{fmt::Debug, hash::Hash};
+use std::{fmt::Debug, hash::Hash, str::FromStr};
 
 pub use anda_db_btree::{BTreeConfig, BTreeMetadata, BTreeStats, RangeQuery};
 
@@ -73,6 +75,35 @@ impl BTree {
 
     fn posting_path(name: &str, bucket: u32) -> String {
         format!("btree_indexes/{name}/p_{bucket}.cbor")
+    }
+
+    pub fn from_cursor<T>(cursor: &Option<String>) -> Result<Option<T>, DBError>
+    where
+        T: DeserializeOwned,
+    {
+        cursor
+            .as_ref()
+            .map(|c| ByteBufB64::from_str(c))
+            .transpose()
+            .map_err(|err| DBError::Serialization {
+                name: "from_cursor".to_string(),
+                source: err.into(),
+            })?
+            .map(|v| from_reader(&v[..]))
+            .transpose()
+            .map_err(|err| DBError::Serialization {
+                name: "from_cursor".to_string(),
+                source: err.into(),
+            })
+    }
+
+    pub fn to_cursor<T>(cursor: &T) -> Option<String>
+    where
+        T: Serialize,
+    {
+        canonical_cbor_into_vec(cursor)
+            .map(|v| ByteBufB64(v).to_string())
+            .ok()
     }
 
     pub async fn new(field: Fe, storage: Storage, now_ms: u64) -> Result<Self, DBError> {
@@ -413,32 +444,44 @@ impl BTree {
         }
     }
 
-    pub fn keys(&self, skip: usize, limit: Option<usize>) -> Vec<Fv> {
+    pub fn keys(&self, cursor: Option<String>, limit: Option<usize>) -> Vec<Fv> {
         match self {
-            BTree::I64(btree) => btree
-                .index
-                .keys(skip, limit)
-                .into_iter()
-                .map(Fv::I64)
-                .collect(),
-            BTree::U64(btree) => btree
-                .index
-                .keys(skip, limit)
-                .into_iter()
-                .map(Fv::U64)
-                .collect(),
-            BTree::String(btree) => btree
-                .index
-                .keys(skip, limit)
-                .into_iter()
-                .map(Fv::Text)
-                .collect(),
-            BTree::Bytes(btree) => btree
-                .index
-                .keys(skip, limit)
-                .into_iter()
-                .map(Fv::Bytes)
-                .collect(),
+            BTree::I64(btree) => match Self::from_cursor(&cursor) {
+                Err(_) => vec![],
+                Ok(cursor) => btree
+                    .index
+                    .keys(cursor, limit)
+                    .into_iter()
+                    .map(Fv::I64)
+                    .collect(),
+            },
+            BTree::U64(btree) => match Self::from_cursor(&cursor) {
+                Err(_) => vec![],
+                Ok(cursor) => btree
+                    .index
+                    .keys(cursor, limit)
+                    .into_iter()
+                    .map(Fv::U64)
+                    .collect(),
+            },
+            BTree::String(btree) => match Self::from_cursor(&cursor) {
+                Err(_) => vec![],
+                Ok(cursor) => btree
+                    .index
+                    .keys(cursor, limit)
+                    .into_iter()
+                    .map(Fv::Text)
+                    .collect(),
+            },
+            BTree::Bytes(btree) => match Self::from_cursor(&cursor) {
+                Err(_) => vec![],
+                Ok(cursor) => btree
+                    .index
+                    .keys(cursor, limit)
+                    .into_iter()
+                    .map(Fv::Bytes)
+                    .collect(),
+            },
         }
     }
 

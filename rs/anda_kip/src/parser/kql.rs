@@ -20,14 +20,14 @@ pub fn parse_kql_query(input: &str) -> IResult<&str, KqlQuery> {
             ws(parse_where_block),
             opt(ws(parse_order_by_clause)),
             opt(ws(parse_limit_clause)),
-            opt(ws(parse_offset_clause)),
+            opt(ws(parse_cursor_clause)),
         ),
-        |(find_clause, where_clauses, order_by, limit, offset)| KqlQuery {
+        |(find_clause, where_clauses, order_by, limit, cursor)| KqlQuery {
             find_clause,
             where_clauses,
             order_by,
             limit,
-            offset,
+            cursor,
         },
     )
     .parse(input)
@@ -427,12 +427,8 @@ pub fn parse_limit_clause(input: &str) -> IResult<&str, usize> {
     .parse(input)
 }
 
-pub fn parse_offset_clause(input: &str) -> IResult<&str, usize> {
-    preceded(
-        ws(tag("OFFSET ")),
-        map(nom::character::complete::usize, |n| n),
-    )
-    .parse(input)
+pub fn parse_cursor_clause(input: &str) -> IResult<&str, String> {
+    preceded(ws(tag("CURSOR ")), quoted_string).parse(input)
 }
 
 #[cfg(test)]
@@ -1386,7 +1382,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_limit_and_offset() {
+    fn test_parse_limit_and_cursor() {
         let input = r#"
             FIND(?drug.name)
             WHERE {
@@ -1394,7 +1390,7 @@ mod tests {
             }
             ORDER BY ?drug.name
             LIMIT 20
-            OFFSET 10
+            CURSOR "abcdef"
         "#;
 
         let result = parse_kql_query(input);
@@ -1402,7 +1398,7 @@ mod tests {
 
         let (_, query) = result.unwrap();
         assert_eq!(query.limit, Some(20));
-        assert_eq!(query.offset, Some(10));
+        assert_eq!(query.cursor, Some("abcdef".to_string()));
     }
 
     #[test]
@@ -1434,7 +1430,7 @@ mod tests {
         assert_eq!(query.where_clauses.len(), 6); // 3 groundings + 1 prop + 1 not + 1 filter
         assert!(query.order_by.is_some());
         assert_eq!(query.limit, Some(20));
-        assert!(query.offset.is_none());
+        assert!(query.cursor.is_none());
     }
 
     #[test]

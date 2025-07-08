@@ -7,7 +7,7 @@ use nom::{
 };
 
 use super::common::*;
-use super::kql::{parse_limit_clause, parse_offset_clause};
+use super::kql::{parse_cursor_clause, parse_limit_clause};
 use crate::ast::*;
 
 // --- Top Level META Parser ---
@@ -31,9 +31,9 @@ fn parse_describe_command(input: &str) -> IResult<&str, DescribeTarget> {
             map(
                 preceded(
                     ws(tag("CONCEPT TYPES")),
-                    (opt(ws(parse_limit_clause)), opt(ws(parse_offset_clause))),
+                    (opt(ws(parse_limit_clause)), opt(ws(parse_cursor_clause))),
                 ),
-                |(limit, offset)| DescribeTarget::ConceptTypes { limit, offset },
+                |(limit, cursor)| DescribeTarget::ConceptTypes { limit, cursor },
             ),
             map(
                 preceded(tag("CONCEPT TYPE "), ws(quoted_string)),
@@ -42,9 +42,9 @@ fn parse_describe_command(input: &str) -> IResult<&str, DescribeTarget> {
             map(
                 preceded(
                     ws(tag("PROPOSITION TYPES")),
-                    (opt(ws(parse_limit_clause)), opt(ws(parse_offset_clause))),
+                    (opt(ws(parse_limit_clause)), opt(ws(parse_cursor_clause))),
                 ),
-                |(limit, offset)| DescribeTarget::PropositionTypes { limit, offset },
+                |(limit, cursor)| DescribeTarget::PropositionTypes { limit, cursor },
             ),
             map(
                 preceded(tag("PROPOSITION TYPE "), ws(quoted_string)),
@@ -137,7 +137,7 @@ mod tests {
                 "",
                 DescribeTarget::ConceptTypes {
                     limit: None,
-                    offset: None
+                    cursor: None
                 }
             ))
         );
@@ -147,17 +147,17 @@ mod tests {
                 "",
                 DescribeTarget::ConceptTypes {
                     limit: Some(5),
-                    offset: None
+                    cursor: None
                 }
             ))
         );
         assert_eq!(
-            parse_describe_command("DESCRIBE CONCEPT TYPES LIMIT 5 OFFSET 10"),
+            parse_describe_command("DESCRIBE CONCEPT TYPES LIMIT 5 CURSOR \"abcdef\""),
             Ok((
                 "",
                 DescribeTarget::ConceptTypes {
                     limit: Some(5),
-                    offset: Some(10)
+                    cursor: Some("abcdef".to_string())
                 }
             ))
         );
@@ -167,7 +167,7 @@ mod tests {
                 "",
                 DescribeTarget::PropositionTypes {
                     limit: None,
-                    offset: None
+                    cursor: None
                 }
             ))
         );
@@ -177,17 +177,17 @@ mod tests {
                 "",
                 DescribeTarget::PropositionTypes {
                     limit: Some(5),
-                    offset: None
+                    cursor: None
                 }
             ))
         );
         assert_eq!(
-            parse_describe_command("DESCRIBE PROPOSITION TYPES LIMIT 5 OFFSET 10"),
+            parse_describe_command("DESCRIBE PROPOSITION TYPES LIMIT 5 CURSOR \"abcdef\""),
             Ok((
                 "",
                 DescribeTarget::PropositionTypes {
                     limit: Some(5),
-                    offset: Some(10)
+                    cursor: Some("abcdef".to_string())
                 }
             ))
         );

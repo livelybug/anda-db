@@ -70,6 +70,7 @@
 //! and the project's examples directory.
 
 pub mod ast;
+pub mod capsule;
 pub mod error;
 pub mod executor;
 pub mod parser;
@@ -77,6 +78,7 @@ pub mod request;
 pub mod types;
 
 pub use ast::*;
+pub use capsule::*;
 pub use error::*;
 pub use executor::*;
 pub use parser::*;

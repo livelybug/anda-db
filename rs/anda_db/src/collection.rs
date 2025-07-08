@@ -542,14 +542,6 @@ impl Collection {
     /// # Returns
     /// Ok(()) if successful, or an error if storing fails
     async fn store_indexes(&self, now_ms: u64) -> Result<(), DBError> {
-        // for index in &self.btree_indexes {
-        //     index.flush(now_ms).await?;
-        // }
-        // for (bm25, hnsw) in &self.bm25_hnsw_indexes {
-        //     bm25.flush(now_ms).await?;
-        //     hnsw.flush(now_ms).await?;
-        // }
-
         let _ = try_join_await!(
             try_join_all(self.btree_indexes.iter().map(|index| index.flush(now_ms))),
             try_join_all(self.bm25_indexes.iter().map(|index| index.flush(now_ms))),
@@ -613,7 +605,7 @@ impl Collection {
     /// # Returns
     /// `true` if a document with the ID exists, `false` otherwise
     pub fn contains(&self, id: DocumentId) -> bool {
-        self.doc_ids.read().contains(id)
+        self.doc_ids_index.read().contains(&id)
     }
 
     /// Gets the number of documents in the collection.

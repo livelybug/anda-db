@@ -42,9 +42,6 @@ pub struct Request {
     ///
     /// Used to pass parameters outside of the command text itself.
     /// Command text can reference these parameters using `$key_name` placeholders.
-    ///
-    /// Optional keys include:
-    /// - `domain` (String): Specifies the target domain if the Cognitive Nexus contains multi-domain knowledge
     pub parameters: Map<String, Json>,
 
     /// Dry run flag for command validation
@@ -96,27 +93,57 @@ impl Request {
 ///
 /// All responses from the Cognitive Nexus are JSON objects with this structure.
 /// Either `result` or `error` must be present, but never both.
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(untagged)]
 pub enum Response {
     /// Successful response containing the request results
     ///
     /// Must be present when the request succeeds.
-    /// The internal structure is defined by the specific KIP request command.
-    Result(Json),
+    Ok {
+        /// The internal structure is defined by the specific KIP request command.
+        result: Json,
+
+        // An opaque token representing the pagination position after the last returned result.
+        // If present, there may be more results available.
+        #[serde[default]]
+        #[serde(skip_serializing_if = "Option::is_none")]
+        next_cursor: Option<String>,
+    },
 
     /// Error response containing structured error details
     ///
     /// Must be present when the request fails.
     /// Contains detailed information about what went wrong.
-    Error(ErrorObject),
+    Err { error: ErrorObject },
+}
+
+impl Response {
+    pub fn ok(result: Json) -> Self {
+        Self::Ok {
+            result,
+            next_cursor: None,
+        }
+    }
+
+    pub fn err(error: impl Into<ErrorObject>) -> Self {
+        Self::Err {
+            error: error.into(),
+        }
+    }
+
+    pub fn into_result(self) -> Result<Json, ErrorObject> {
+        match self {
+            Self::Ok { result, .. } => Ok(result),
+            Self::Err { error } => Err(error),
+        }
+    }
 }
 
 /// Structured error details for failed requests
 ///
 /// Provides comprehensive error information including error type,
 /// human-readable message, and optional additional data.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ErrorObject {
     /// Error type/category name
     ///
@@ -133,6 +160,7 @@ pub struct ErrorObject {
     ///
     /// May contain structured data relevant to the specific error,
     /// such as validation details or context information.
+    #[serde[default]]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<Json>,
 }
@@ -175,9 +203,11 @@ impl From<KipError> for ErrorObject {
     fn from(error: KipError) -> Self {
         let (name, message) = match &error {
             KipError::Parse(msg) => ("ParseError".to_string(), msg.clone()),
-            KipError::Execution(msg) => ("ExecutionError".to_string(), msg.clone()),
-            KipError::NotImplemented(msg) => ("NotImplemented".to_string(), msg.clone()),
             KipError::InvalidCommand(msg) => ("InvalidCommand".to_string(), msg.clone()),
+            KipError::Execution(msg) => ("ExecutionError".to_string(), msg.clone()),
+            KipError::NotFound(msg) => ("NotFound".to_string(), msg.clone()),
+            KipError::AlreadyExists(msg) => ("AlreadyExists".to_string(), msg.clone()),
+            KipError::NotImplemented(msg) => ("NotImplemented".to_string(), msg.clone()),
         };
 
         ErrorObject {
@@ -193,26 +223,38 @@ impl From<KipError> for ErrorObject {
 /// Automatically wraps KIP errors in the appropriate response format
 impl From<KipError> for Response {
     fn from(error: KipError) -> Self {
-        Response::Error(error.into())
+        Response::Err {
+            error: error.into(),
+        }
     }
 }
 
-/// Generic conversion from Result to Response
-///
-/// Automatically converts successful results to Response::Result
-/// and errors to Response::Error with proper serialization handling
-impl<T, E> From<Result<T, E>> for Response
+impl<E> From<Result<(Json, Option<String>), E>> for Response
 where
-    T: Serialize,
     E: Into<ErrorObject>,
 {
-    fn from(result: Result<T, E>) -> Self {
+    fn from(result: Result<(Json, Option<String>), E>) -> Self {
         match result {
-            Ok(data) => match serde_json::to_value(data) {
-                Ok(value) => Response::Result(value),
-                Err(err) => Response::Error(err.into()),
+            Ok((result, next_cursor)) => Response::Ok {
+                result,
+                next_cursor,
             },
-            Err(err) => Response::Error(err.into()),
+            Err(err) => Response::Err { error: err.into() },
+        }
+    }
+}
+
+impl<E> From<Result<Json, E>> for Response
+where
+    E: Into<ErrorObject>,
+{
+    fn from(result: Result<Json, E>) -> Self {
+        match result {
+            Ok(result) => Response::Ok {
+                result,
+                next_cursor: None,
+            },
+            Err(err) => Response::Err { error: err.into() },
         }
     }
 }
@@ -467,13 +509,26 @@ mod tests {
 
     #[test]
     fn test_response() {
-        let res = Response::Result(json!("Success"));
+        let res = Response::ok(json!("Success"));
         assert_eq!(
             serde_json::to_string(&res).unwrap(),
             r#"{"result":"Success"}"#
         );
+        assert_eq!(
+            res,
+            serde_json::from_str(r#"{"result":"Success"}"#).unwrap()
+        );
 
-        let res = Response::Error(ErrorObject {
+        let res = Response::Ok {
+            result: json!("Success"),
+            next_cursor: Some("abcdef".to_string()),
+        };
+        assert_eq!(
+            serde_json::to_string(&res).unwrap(),
+            r#"{"result":"Success","next_cursor":"abcdef"}"#
+        );
+
+        let res = Response::err(ErrorObject {
             name: "TestError".to_string(),
             message: "An error occurred".to_string(),
             data: Some(json!("Additional info")),

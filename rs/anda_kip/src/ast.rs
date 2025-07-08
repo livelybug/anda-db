@@ -24,7 +24,7 @@ pub type Json = serde_json::Value;
 
 /// Represents a primitive value in the KIP system.
 /// This is the fundamental data type used throughout KIP for attributes, metadata, and literals.
-#[derive(Debug, Clone, Eq, Hash, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, Eq, PartialEq, Hash)]
 pub enum Value {
     /// Represents a null value
     #[default]
@@ -173,7 +173,7 @@ impl Value {
 
 /// Top-level command enum representing the three main KIP instruction sets.
 /// Each command type serves a specific purpose in the knowledge interaction workflow.
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub enum Command {
     /// KQL (Knowledge Query Language) - for knowledge retrieval and reasoning
     Kql(KqlQuery),
@@ -187,7 +187,7 @@ pub enum Command {
 
 /// Represents a key-value pair used in various contexts throughout KIP.
 /// Used for attributes, metadata, constraints, and unique key specifications.
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub struct KeyValue {
     /// The key name
     pub key: String,
@@ -197,7 +197,7 @@ pub struct KeyValue {
 
 /// Represents a concept clause used for concept identification and grounding.
 /// Syntax: `?node_var {id: "<id>"}`, `?node_var {type: "<type>", name: "<name>"}`, `?node_var {type: "<type>"}`，`?node_var {name: "<name>"}`
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub struct ConceptClause {
     /// The matcher for concept, which can be a combination of `id`, `type`, and `name`
     pub matcher: ConceptMatcher,
@@ -209,7 +209,7 @@ pub struct ConceptClause {
 /// This identifier can be constructed from various attributes like `id`, `type`, and `name`.
 /// It is used to uniquely identify a concept within the knowledge graph, or to match concepts
 /// based on type or name.
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub enum ConceptMatcher {
     /// Syntax: `{id: "<id>"}`
     ID(String),
@@ -286,7 +286,7 @@ impl ConceptMatcher {
 
 /// Represents a proposition clause used for proposition identification and grounding.
 /// Syntax: `?link_var (id: "<link_id>")`, `?link_var (?subject, "<predicate>", ?object)`
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub struct PropositionClause {
     /// The matcher for proposition, which can be a combination of `subject`, `predicate`, and `object`
     pub matcher: PropositionMatcher,
@@ -296,7 +296,7 @@ pub struct PropositionClause {
 
 /// Represents a proposition matcher that identifies a specific relationship between concepts or propositions.
 /// It consists of a subject, predicate, and object, which can be variables, concept references or proposition references.
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub enum PropositionMatcher {
     /// Syntax: `(id: "<link_id>")`
     ID(String),
@@ -310,7 +310,7 @@ pub enum PropositionMatcher {
 
 /// Represents a term that can be a variable, node reference, or nested proposition.
 /// Used for both subject and object positions in proposition patterns.
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub enum TargetTerm {
     /// A variable (e.g., `?drug`)
     Variable(String),
@@ -322,7 +322,7 @@ pub enum TargetTerm {
 
 /// Represents a predicate term in a proposition.
 /// Can be either a variable or a literal string.
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub enum PredTerm {
     /// A variable predicate (e.g., `?relationship`)
     Variable(String),
@@ -343,8 +343,8 @@ pub enum PredTerm {
 /// Represents a complete KQL (Knowledge Query Language) query.
 /// KQL is responsible for knowledge retrieval and reasoning within the Cognitive Nexus.
 ///
-/// Structure: `FIND(...) WHERE { ... } ORDER BY ... LIMIT N OFFSET M`
-#[derive(Debug, PartialEq, Clone)]
+/// Structure: `FIND(...) WHERE { ... } ORDER BY ... LIMIT N CURSOR "<token>"`
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub struct KqlQuery {
     /// The FIND clause specifying what to return
     pub find_clause: FindClause,
@@ -354,14 +354,14 @@ pub struct KqlQuery {
     pub order_by: Option<Vec<OrderByCondition>>,
     /// Optional LIMIT for result count restriction
     pub limit: Option<usize>,
-    /// Optional OFFSET for result pagination
-    pub offset: Option<usize>,
+    /// Optional CURSOR for result pagination
+    pub cursor: Option<String>,
 }
 
 /// Represents the FIND clause of a KQL query.
 /// Declares the final output of the query, supporting both simple variables and aggregations.
 /// Syntax: `FIND(?var1, ?agg_func(?var2))`
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub struct FindClause {
     /// List of expressions to be returned (variables or aggregations)
     pub expressions: Vec<FindExpression>,
@@ -369,7 +369,7 @@ pub struct FindClause {
 
 /// Represents an expression in the FIND clause.
 /// Can be either a simple variable or an aggregation function with alias.
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub enum FindExpression {
     /// A dot notation path (e.g., `?drug.name`, `?drug.attributes.risk_level`)
     Variable(DotPathVar),
@@ -386,7 +386,7 @@ pub enum FindExpression {
 
 /// Represents a dot notation path for accessing nested data.
 /// Syntax: `?var.field` or `?var.attributes.key` or `?var.metadata.key`
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub struct DotPathVar {
     /// The base variable (e.g., `?drug`)
     pub var: String,
@@ -396,7 +396,7 @@ pub struct DotPathVar {
 
 /// Supported aggregation functions in KQL.
 /// These functions operate on grouped data to produce summary statistics.
-#[derive(Debug, PartialEq, Clone, Eq, Hash)]
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub enum AggregationFunction {
     /// COUNT(?var) - counts the number of bindings
     Count,
@@ -453,7 +453,7 @@ impl AggregationFunction {
 /// Represents different types of clauses in the WHERE section of a KQL query.
 /// All clauses are combined with logical AND by default.
 /// Syntax: `WHERE { ... }`
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub enum WhereClause {
     /// Concept clause: `?node_var {type: "<type>", name: "<name>", id: "<id>"}`
     Concept(ConceptClause),
@@ -473,7 +473,7 @@ pub enum WhereClause {
 /// Applies complex filtering logic to bound variables.
 /// Syntax: `FILTER(boolean_expression)`
 /// Example: `FILTER(?risk < 3)` or `FILTER(?count > 5)`
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub struct FilterClause {
     /// The main filter expression
     pub expression: FilterExpression,
@@ -481,7 +481,7 @@ pub struct FilterClause {
 
 /// Represents different types of filter expressions.
 /// Supports comparisons, logical operations, negation, and function calls.
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub enum FilterExpression {
     /// Comparison operations (==, !=, <, >, <=, >=)
     Comparison {
@@ -506,7 +506,7 @@ pub enum FilterExpression {
 
 /// Represents an operand in a filter expression.
 /// Can be either a variable reference, dot notation path, or a literal value.
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub enum FilterOperand {
     /// A dot notation path (e.g., `?risk`, `?drug.attributes.risk_level`)
     Variable(DotPathVar),
@@ -515,7 +515,7 @@ pub enum FilterOperand {
 }
 
 /// Comparison operators supported in filter expressions.
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub enum ComparisonOperator {
     /// Equality (==)
     Equal,
@@ -553,7 +553,7 @@ impl ComparisonOperator {
 }
 
 /// Logical operators for combining filter expressions.
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub enum LogicalOperator {
     /// Logical AND (&&)
     And,
@@ -562,7 +562,7 @@ pub enum LogicalOperator {
 }
 
 /// String manipulation and pattern matching functions for filters.
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub enum FilterFunction {
     /// CONTAINS(?str, "substring") - checks if string contains substring
     Contains,
@@ -575,7 +575,7 @@ pub enum FilterFunction {
 }
 
 /// Represents an ORDER BY condition for result sorting.
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub struct OrderByCondition {
     /// The variable to sort by
     pub variable: DotPathVar,
@@ -584,7 +584,7 @@ pub struct OrderByCondition {
 }
 
 /// Sort direction for ORDER BY clauses.
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub enum OrderDirection {
     /// Ascending order
     Asc,
@@ -596,7 +596,7 @@ pub enum OrderDirection {
 
 /// Represents a KML (Knowledge Manipulation Language) statement.
 /// KML is responsible for knowledge evolution and is the core tool for Agent learning.
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub enum KmlStatement {
     /// UPSERT statement for atomic knowledge creation/updates
     Upsert(Vec<UpsertBlock>),
@@ -607,7 +607,7 @@ pub enum KmlStatement {
 /// Represents an UPSERT block - the primary vehicle for "Knowledge Capsules".
 /// Provides atomic creation or update of knowledge, ensuring idempotent operations.
 /// Structure: `UPSERT { CONCEPT @handle { ... } } WITH METADATA { ... }`
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub struct UpsertBlock {
     /// List of concepts and propositions to upsert
     pub items: Vec<UpsertItem>,
@@ -617,7 +617,7 @@ pub struct UpsertBlock {
 
 /// Represents an item within an UPSERT block.
 /// Can be either a concept definition or a standalone proposition.
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub enum UpsertItem {
     /// A concept block defining a concept node
     Concept(ConceptBlock),
@@ -628,7 +628,7 @@ pub enum UpsertItem {
 /// Represents a concept definition within an UPSERT block.
 /// Defines a concept node with its attributes and outgoing propositions.
 /// Structure: `CONCEPT @handle { { ... } SET ATTRIBUTES { ... } SET PROPOSITIONS { ... } } WITH METADATA { ... }`
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub struct ConceptBlock {
     /// Local handle for referencing within the transaction (starts with @)
     pub handle: String,
@@ -644,7 +644,7 @@ pub struct ConceptBlock {
 
 /// Represents a proposition to be set from a concept.
 /// Used within the SET PROPOSITIONS block of a concept definition.
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub struct SetProposition {
     /// The predicate (relationship type)
     pub predicate: String,
@@ -657,7 +657,7 @@ pub struct SetProposition {
 /// Represents a standalone proposition definition within an UPSERT block.
 /// Used for creating complex relationships that don't naturally belong to a single concept.
 /// Structure: `PROPOSITION @handle { ({ ... }, "predicate", { ... }) SET ATTRIBUTES { ... } } WITH METADATA { ... }`
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub struct PropositionBlock {
     /// Local handle for referencing within the transaction (starts with @)
     pub handle: String,
@@ -671,7 +671,7 @@ pub struct PropositionBlock {
 
 /// Represents different types of DELETE statements in KML.
 /// Provides targeted removal of knowledge components from the Cognitive Nexus.
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub enum DeleteStatement {
     /// Delete specific attributes from concepts or proposition where conditions match
     /// Syntax: `DELETE ATTRIBUTES { "attribute_name", ... } FROM ?target WHERE { ... }`
@@ -715,7 +715,7 @@ pub enum DeleteStatement {
 /// Represents META commands for knowledge exploration and grounding.
 /// META is a lightweight subset focused on introspection and disambiguation.
 /// These are fast, metadata-driven commands that don't involve complex graph traversal.
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub enum MetaCommand {
     /// DESCRIBE commands for schema information and cognitive primers
     Describe(DescribeTarget),
@@ -725,7 +725,7 @@ pub enum MetaCommand {
 
 /// Represents different targets for DESCRIBE commands.
 /// Used to query the "schema" information of the Cognitive Nexus.
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub enum DescribeTarget {
     /// DESCRIBE PRIMER - gets the "Cognitive Primer" for LLM guidance
     Primer,
@@ -735,8 +735,8 @@ pub enum DescribeTarget {
     ConceptTypes {
         /// Optional LIMIT for result count restriction
         limit: Option<usize>,
-        /// Optional OFFSET for result pagination
-        offset: Option<usize>,
+        /// Optional CURSOR for result pagination
+        cursor: Option<String>,
     },
     /// DESCRIBE CONCEPT_TYPE "TypeName" - details about a specific concept type
     ConceptType(String),
@@ -744,8 +744,8 @@ pub enum DescribeTarget {
     PropositionTypes {
         /// Optional LIMIT for result count restriction
         limit: Option<usize>,
-        /// Optional OFFSET for result pagination
-        offset: Option<usize>,
+        /// Optional CURSOR for result pagination
+        cursor: Option<String>,
     },
     /// DESCRIBE PROPOSITION_TYPE "TypeName" - details about a specific proposition type
     PropositionType(String),
@@ -754,7 +754,7 @@ pub enum DescribeTarget {
 /// Represents a SEARCH command for concept disambiguation.
 /// Helps LLMs find and identify concepts or propositions when exact matches are unclear.
 /// Syntax: `SEARCH [CONCEPT|PROPOSITION] "<search_term>" WITH TYPE "<type_name>" LIMIT N`
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub struct SearchCommand {
     pub target: SearchTarget,
     /// The search term
@@ -767,7 +767,7 @@ pub struct SearchCommand {
 
 /// Represents the target of a search command.
 /// Indicates whether the search is for concepts or propositions.
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub enum SearchTarget {
     /// Searching for concepts
     Concept,

@@ -80,7 +80,7 @@ let meta = parse_kip("DESCRIBE PRIMER")?;
 ### Implementing an Executor
 
 ```rust
-use anda_kip::{Executor, Command, Json, KipError};
+use anda_kip::{Executor, Command, Json, KipError, Response};
 use async_trait::async_trait;
 
 pub struct MyKnowledgeGraph {
@@ -89,7 +89,7 @@ pub struct MyKnowledgeGraph {
 
 #[async_trait(?Send)]
 impl Executor for MyKnowledgeGraph {
-    async fn execute(&self, command: Command, dry_run: bool) -> Result<Json, KipError> {
+    async fn execute(&self, command: Command, dry_run: bool) -> Response {
         match command {
             Command::Kql(query) => {
                 // Execute KQL query against your knowledge graph
@@ -132,10 +132,12 @@ let response = request.execute(&executor).await?;
 The crate is organized into several key modules:
 
 - **`ast`**: Abstract Syntax Tree definitions for all KIP constructs
+- **`capsule`**: KIP Genesis Capsules
 - **`error`**: Comprehensive error types and handling
 - **`executor`**: Execution framework and traits
 - **`parser`**: Nom-based parsers for KQL, KML, and META commands
 - **`request`**: Request/Response structures for JSON-based communication
+- **`types`**: KIP Entity Types
 
 ## Contributing
 

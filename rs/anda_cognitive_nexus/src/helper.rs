@@ -1,4 +1,8 @@
-use anda_kip::{Json, KipError, Map, OrderByCondition, OrderDirection, PredTerm};
+use anda_db::error::DBError;
+use anda_kip::{
+    EntityType, Json, KipError, Map, OrderByCondition, OrderDirection, PredTerm,
+    validate_dot_path_var,
+};
 use std::borrow::Cow;
 
 use crate::entity::{Concept, EntityID, Properties, Proposition};
@@ -20,15 +24,17 @@ impl<T> Pipe<T> for T {
 }
 
 pub fn extract_concept_field_value(concept: &Concept, path: &[String]) -> Result<Json, KipError> {
+    validate_dot_path_var(path, EntityType::ConceptNode)?;
+
     if path.is_empty() {
         return Ok(concept.to_concept_node());
     }
 
     match path[0].as_str() {
-        "id" if path.len() == 1 => Ok(concept.entity_id().to_string().into()),
-        "type" if path.len() == 1 => Ok(concept.r#type.clone().into()),
-        "name" if path.len() == 1 => Ok(concept.name.clone().into()),
-        "attributes" if path.len() <= 2 => {
+        "id" => Ok(concept.entity_id().to_string().into()),
+        "type" => Ok(concept.r#type.clone().into()),
+        "name" => Ok(concept.name.clone().into()),
+        "attributes" => {
             if path.len() == 1 {
                 Ok(concept.attributes.clone().into())
             } else {
@@ -40,7 +46,7 @@ pub fn extract_concept_field_value(concept: &Concept, path: &[String]) -> Result
                     .pipe(Ok)
             }
         }
-        "metadata" if path.len() <= 2 => {
+        "metadata" => {
             if path.len() == 1 {
                 Ok(concept.metadata.clone().into())
             } else {
@@ -65,6 +71,8 @@ pub fn extract_proposition_field_value(
     predicate: &str,
     path: &[String],
 ) -> Result<Json, KipError> {
+    validate_dot_path_var(path, EntityType::PropositionLink)?;
+
     if !proposition.predicates.contains(predicate) {
         return Err(KipError::Execution(format!(
             "Invalid predicate: {}",
@@ -90,14 +98,14 @@ pub fn extract_proposition_field_value(
         });
 
     match path[0].as_str() {
-        "id" if path.len() == 1 => Ok(proposition
+        "id" => Ok(proposition
             .entity_id(predicate.to_string())
             .to_string()
             .into()),
-        "subject" if path.len() == 1 => Ok(proposition.subject.to_string().into()),
-        "object" if path.len() == 1 => Ok(proposition.object.to_string().into()),
-        "predicate" if path.len() == 1 => Ok(predicate.into()),
-        "attributes" if path.len() <= 2 => {
+        "subject" => Ok(proposition.subject.to_string().into()),
+        "object" => Ok(proposition.object.to_string().into()),
+        "predicate" => Ok(predicate.into()),
+        "attributes" => {
             if path.len() == 1 {
                 Ok(prop.attributes.clone().into())
             } else {
@@ -108,7 +116,7 @@ pub fn extract_proposition_field_value(
                     .pipe(Ok)
             }
         }
-        "metadata" if path.len() <= 2 => {
+        "metadata" => {
             if path.len() == 1 {
                 Ok(prop.metadata.clone().into())
             } else {
@@ -127,14 +135,14 @@ pub fn extract_proposition_field_value(
 }
 
 // 应用排序
-pub fn apply_order_by(
-    mut values: Vec<Json>,
-    variable: &str,
+pub fn apply_order_by<'a>(
+    mut values: Vec<(&'a EntityID, Json)>,
+    var: &str,
     order_by: &[OrderByCondition],
-) -> Vec<Json> {
-    values.sort_by(|a, b| {
+) -> Vec<(&'a EntityID, Json)> {
+    values.sort_by(|(_, a), (_, b)| {
         for cond in order_by {
-            if cond.variable.var != variable {
+            if cond.variable.var != var {
                 continue; // 只处理与当前变量相关的排序条件
             }
 
@@ -212,5 +220,14 @@ pub fn match_predicate_against_proposition(
         _ => Err(KipError::InvalidCommand(format!(
             "Predicate must be either Literal or Variable, got: {predicate:?}"
         ))),
+    }
+}
+
+pub fn db_to_kip_error(err: DBError) -> KipError {
+    match &err {
+        DBError::Schema { .. } => KipError::Parse(format!("{err}")),
+        DBError::NotFound { .. } => KipError::NotFound(format!("{err}")),
+        DBError::AlreadyExists { .. } => KipError::AlreadyExists(format!("{err}")),
+        _ => KipError::Execution(format!("{err}")),
     }
 }

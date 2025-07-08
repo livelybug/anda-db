@@ -11,20 +11,39 @@ use std::{
     str::FromStr,
 };
 
+/// Represents a concept entity in the cognitive nexus.
+///
+/// A concept is a fundamental unit of knowledge that represents an idea, object, or category.
+/// It contains identifying information, type classification, and associated attributes and metadata.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, AndaDBSchema)]
 pub struct Concept {
+    /// Unique identifier for the concept
     pub _id: u64,
+    /// Type classification of the concept
     pub r#type: String,
+    /// Human-readable name of the concept
     pub name: String,
+    /// Key-value attributes associated with the concept
     pub attributes: Map<String, Json>,
+    /// Additional metadata for the concept
     pub metadata: Map<String, Json>,
 }
 
 impl Concept {
+    /// Returns the entity ID for this concept.
+    ///
+    /// # Returns
+    ///
+    /// An `EntityID::Concept` variant containing the concept's ID.
     pub fn entity_id(&self) -> EntityID {
         EntityID::Concept(self._id)
     }
 
+    /// Converts the concept to a JSON representation as a concept node reference.
+    ///
+    /// # Returns
+    ///
+    /// A JSON object representing the concept node with references to its fields.
     pub fn to_concept_node(&self) -> Json {
         json!(EntityRef::ConceptNode(ConceptNodeRef {
             id: self.entity_id().to_string().as_str(),
@@ -35,6 +54,11 @@ impl Concept {
         }))
     }
 
+    /// Consumes the concept and converts it into a concept node.
+    ///
+    /// # Returns
+    ///
+    /// A `ConceptNode` containing the owned data from this concept.
     pub fn into_concept_node(self) -> ConceptNode {
         ConceptNode {
             id: self.entity_id().to_string(),
@@ -46,26 +70,53 @@ impl Concept {
     }
 }
 
+/// Represents a proposition entity that defines relationships between concepts.
+///
+/// A proposition establishes connections between a subject and object through predicates,
+/// allowing for the representation of complex relationships in the knowledge graph.
 #[derive(Debug, Clone, Deserialize, Serialize, AndaDBSchema)]
 pub struct Proposition {
+    /// Unique identifier for the proposition
     pub _id: u64,
 
+    /// The subject ID in the proposition relationship
     #[field_type = "Text"]
     pub subject: EntityID,
 
+    /// The object ID in the proposition relationship
     #[field_type = "Text"]
     pub object: EntityID,
 
+    /// Set of predicates that define the relationship types
     pub predicates: BTreeSet<String>,
 
+    /// Properties associated with each predicate
     pub properties: BTreeMap<String, Properties>,
 }
 
 impl Proposition {
+    /// Returns the entity ID for this proposition with a specific predicate.
+    ///
+    /// # Arguments
+    ///
+    /// * `predicate` - The predicate string to include in the entity ID
+    ///
+    /// # Returns
+    ///
+    /// An `EntityID::Proposition` variant containing the proposition ID and predicate.
     pub fn entity_id(&self, predicate: String) -> EntityID {
         EntityID::Proposition(self._id, predicate)
     }
 
+    /// Converts the proposition to a JSON representation as a proposition link for a specific predicate.
+    ///
+    /// # Arguments
+    ///
+    /// * `predicate` - The predicate to create the link for
+    ///
+    /// # Returns
+    ///
+    /// An optional JSON object representing the proposition link, or `None` if the predicate doesn't exist.
     pub fn to_proposition_link(&self, predicate: &str) -> Option<Json> {
         match self.predicates.get(predicate) {
             Some(predicate) => {
@@ -94,6 +145,10 @@ impl Proposition {
     }
 }
 
+/// Properties container for storing attributes and metadata.
+///
+/// This structure provides a standardized way to store key-value pairs
+/// for both attributes and metadata, with compact serialization.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, FieldTyped)]
 pub struct Properties {
     #[serde(rename = "a")]
@@ -104,6 +159,15 @@ pub struct Properties {
 }
 
 impl From<Properties> for FieldValue {
+    /// Converts Properties into a FieldValue for database storage.
+    ///
+    /// # Arguments
+    ///
+    /// * `value` - The Properties instance to convert
+    ///
+    /// # Returns
+    ///
+    /// A `FieldValue::Map` containing the attributes and metadata.
     fn from(value: Properties) -> Self {
         FieldValue::Map(BTreeMap::from([
             ("a".to_string(), value.attributes.into()),
@@ -112,13 +176,25 @@ impl From<Properties> for FieldValue {
     }
 }
 
+/// Unique identifier for entities in the cognitive nexus.
+///
+/// EntityID provides a type-safe way to reference different types of entities,
+/// with distinct formats for concepts and propositions.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum EntityID {
+    /// Identifier for a concept entity
     Concept(u64),
+    /// Identifier for a proposition entity with a specific predicate
     Proposition(u64, String),
 }
 
 impl fmt::Display for EntityID {
+    /// Formats the EntityID as a string.
+    ///
+    /// # Format
+    ///
+    /// * Concepts: "C:{id}"
+    /// * Propositions: "P:{id}:{predicate}"
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             EntityID::Concept(id) => write!(f, "C:{}", id),
@@ -130,6 +206,19 @@ impl fmt::Display for EntityID {
 impl FromStr for EntityID {
     type Err = String;
 
+    /// Parses a string into an EntityID.
+    ///
+    /// # Arguments
+    ///
+    /// * `s` - String to parse, expected format: "C:{id}" or "P:{id}:{predicate}"
+    ///
+    /// # Returns
+    ///
+    /// Result containing the parsed EntityID or an error message.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the string doesn't match the expected format.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if let Some(id) = s.strip_prefix("C:") {
             id.parse::<u64>()
@@ -157,12 +246,22 @@ impl FromStr for EntityID {
 impl TryFrom<&str> for EntityID {
     type Error = String;
 
+    /// Attempts to convert a string slice into an EntityID.
+    ///
+    /// # Arguments
+    ///
+    /// * `value` - String slice to convert
+    ///
+    /// # Returns
+    ///
+    /// Result containing the parsed EntityID or an error message.
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         EntityID::from_str(value)
     }
 }
 
 impl Serialize for EntityID {
+    /// Serializes the EntityID as a string.
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
@@ -171,6 +270,7 @@ impl Serialize for EntityID {
     }
 }
 
+/// Visitor for deserializing EntityID from strings.
 struct EntityIDVisitor;
 
 impl serde::de::Visitor<'_> for EntityIDVisitor {
@@ -189,6 +289,7 @@ impl serde::de::Visitor<'_> for EntityIDVisitor {
 }
 
 impl<'de> Deserialize<'de> for EntityID {
+    /// Deserializes an EntityID from a string.
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
@@ -197,15 +298,31 @@ impl<'de> Deserialize<'de> for EntityID {
     }
 }
 
+/// Information about a knowledge domain.
+///
+/// Contains metadata about a domain including its key concept types and proposition types.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct DomainInfo {
+    /// Name of the domain
     pub domain_name: String,
+    /// Description of the domain
     pub description: String,
+    /// Key concept types in this domain
     pub key_concept_types: Vec<ConceptTypeInfo>,
+    /// Key proposition types in this domain
     pub key_proposition_types: Vec<PropositionTypeInfo>,
 }
 
 impl DomainInfo {
+    /// Creates domain information from a domain concept.
+    ///
+    /// # Arguments
+    ///
+    /// * `domain` - The concept representing the domain
+    ///
+    /// # Returns
+    ///
+    /// A new `DomainInfo` instance with basic information extracted from the concept.
     pub fn from(domain: &Concept) -> Self {
         Self {
             domain_name: domain.name.clone(),
@@ -220,14 +337,29 @@ impl DomainInfo {
     }
 }
 
+/// Information about a concept type.
+///
+/// Describes a category of concepts including its key instances.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ConceptTypeInfo {
+    /// Name of the concept type
     pub type_name: String,
+    /// Description of the concept type
     pub description: String,
+    /// Key instances of this concept type
     pub key_instances: Vec<String>,
 }
 
 impl ConceptTypeInfo {
+    /// Creates concept type information from a concept.
+    ///
+    /// # Arguments
+    ///
+    /// * `concept` - The concept representing the type
+    ///
+    /// # Returns
+    ///
+    /// A new `ConceptTypeInfo` instance with information extracted from the concept.
     pub fn from(concept: &Concept) -> Self {
         Self {
             type_name: concept.name.clone(),
@@ -253,13 +385,27 @@ impl ConceptTypeInfo {
     }
 }
 
+/// Information about a proposition type.
+///
+/// Describes a category of propositions defined by their predicate.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PropositionTypeInfo {
+    /// Name of the predicate
     pub predicate_name: String,
+    /// Description of the proposition type
     pub description: String,
 }
 
 impl PropositionTypeInfo {
+    /// Creates proposition type information from a concept.
+    ///
+    /// # Arguments
+    ///
+    /// * `concept` - The concept representing the proposition type
+    ///
+    /// # Returns
+    ///
+    /// A new `PropositionTypeInfo` instance with information extracted from the concept.
     pub fn from(concept: &Concept) -> Self {
         Self {
             predicate_name: concept.name.clone(),
