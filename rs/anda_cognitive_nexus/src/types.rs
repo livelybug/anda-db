@@ -1,7 +1,7 @@
 use anda_kip::*;
 use parking_lot::RwLock;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap},
     fmt,
     hash::Hash,
     str::FromStr,
@@ -164,9 +164,9 @@ impl From<EntityID> for EntityPK {
 #[derive(Clone, Debug, Default)]
 pub struct QueryContext {
     // 变量名到实体ID的映射
-    pub entities: HashMap<String, HashSet<EntityID>>,
+    pub entities: HashMap<String, BTreeSet<EntityID>>,
     // 变量名到谓词的映射
-    pub predicates: HashMap<String, HashSet<String>>,
+    pub predicates: HashMap<String, BTreeSet<String>>,
     pub cache: Arc<QueryCache>,
 }
 
@@ -184,10 +184,10 @@ pub enum TargetEntities {
 }
 
 pub struct PropositionsMatchResult {
-    pub matched_propositions: HashSet<EntityID>,
-    pub matched_subjects: HashSet<EntityID>,
-    pub matched_objects: HashSet<EntityID>,
-    pub matched_predicates: HashSet<String>,
+    pub matched_propositions: BTreeSet<EntityID>,
+    pub matched_subjects: BTreeSet<EntityID>,
+    pub matched_objects: BTreeSet<EntityID>,
+    pub matched_predicates: BTreeSet<String>,
 }
 
 impl Default for PropositionsMatchResult {
@@ -199,10 +199,10 @@ impl Default for PropositionsMatchResult {
 impl PropositionsMatchResult {
     pub fn new() -> Self {
         Self {
-            matched_propositions: HashSet::new(),
-            matched_subjects: HashSet::new(),
-            matched_objects: HashSet::new(),
-            matched_predicates: HashSet::new(),
+            matched_propositions: BTreeSet::new(),
+            matched_subjects: BTreeSet::new(),
+            matched_objects: BTreeSet::new(),
+            matched_predicates: BTreeSet::new(),
         }
     }
 

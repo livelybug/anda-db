@@ -394,6 +394,38 @@ pub struct DotPathVar {
     pub path: Vec<String>,
 }
 
+impl DotPathVar {
+    /// Converts the DotPathVar to a JSON Pointer string.
+    pub fn to_pointer(&self) -> String {
+        if self.path.is_empty() {
+            return "".to_string(); // the whole document
+        }
+
+        // 构建完整的 JSON Pointer 路径
+        let mut pointer = String::new();
+        for component in &self.path {
+            pointer.push('/');
+            pointer.push_str(&escape_json_pointer_token(component));
+        }
+        pointer
+    }
+
+    /// Returns the JSON Pointer string or the specified field if the path is empty.
+    pub fn to_pointer_or(&self, field: &str) -> String {
+        if self.path.is_empty() {
+            return format!("/{}", escape_json_pointer_token(field));
+        }
+
+        self.to_pointer()
+    }
+}
+
+fn escape_json_pointer_token(token: &str) -> String {
+    token
+        .replace('~', "~0") // 首先替换 '~' 为 '~0'
+        .replace('/', "~1") // 然后替换 '/' 为 '~1'
+}
+
 /// Supported aggregation functions in KQL.
 /// These functions operate on grouped data to produce summary statistics.
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]

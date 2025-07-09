@@ -146,6 +146,20 @@ pub struct PropositionLinkRef<'a> {
     pub metadata: &'a Map<String, Json>,
 }
 
+/// The result of an upsert operation in the knowledge graph.
+///
+/// This struct represents the outcome of an upsert operation, which includes
+/// the number of blocks affected, the concept nodes upserted, and the proposition links upserted.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct UpsertResult {
+    /// The number of blocks affected by the upsert operation.
+    pub blocks: usize,
+    /// The concept node IDs upserted during the operation.
+    pub upsert_concept_nodes: Vec<String>,
+    /// The proposition link IDs upserted during the operation.
+    pub upsert_proposition_links: Vec<String>,
+}
+
 /// Validates a dot notation path for accessing entity properties.
 ///
 /// This function ensures that the provided path is valid for the given entity type.

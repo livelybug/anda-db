@@ -163,7 +163,7 @@ impl CognitiveNexus {
         }
 
         // 执行FIND子句
-        let mut rt = self
+        let mut result = self
             .execute_find_clause(
                 &mut ctx,
                 command.find_clause,
@@ -173,10 +173,10 @@ impl CognitiveNexus {
             )
             .await?;
 
-        if rt.0.len() == 1 {
-            Ok((rt.0.pop().unwrap(), rt.1))
+        if result.0.len() == 1 {
+            Ok((result.0.pop().unwrap(), result.1))
         } else {
-            Ok((Json::Array(rt.0), rt.1))
+            Ok((Json::Array(result.0), result.1))
         }
     }
 
@@ -468,17 +468,10 @@ impl CognitiveNexus {
 
                     match &mut group_var {
                         None => {
-                            group_var = Some((
-                                dot_path.var,
-                                if dot_path.path.is_empty() {
-                                    vec![]
-                                } else {
-                                    vec![format!("/{}", dot_path.path.join("/"))]
-                                },
-                            ));
+                            group_var = Some((dot_path.var.clone(), vec![dot_path.to_pointer()]));
                         }
                         Some((_, fields)) => {
-                            fields.push(format!("/{}", dot_path.path.join("/")));
+                            fields.push(dot_path.to_pointer());
                         }
                     }
                 }
@@ -514,7 +507,7 @@ impl CognitiveNexus {
                             &ctx.cache,
                             &bindings,
                             &var.var,
-                            &[format!("/{}", var.path.join("/"))],
+                            &[var.to_pointer_or("id")],
                             &[],
                             None,
                             0,
@@ -706,11 +699,14 @@ impl CognitiveNexus {
                             logical_search: true,
                             ..Default::default()
                         }),
-                        filter: None,
+                        filter: command.in_type.map(|v| {
+                            Filter::Field(("type".to_string(), RangeQuery::Eq(Fv::Text(v))))
+                        }),
                         limit: command.limit,
                     })
                     .await
                     .map_err(db_to_kip_error)?;
+
                 Ok(json!(
                     result
                         .into_iter()
@@ -728,7 +724,9 @@ impl CognitiveNexus {
                             logical_search: true,
                             ..Default::default()
                         }),
-                        filter: None,
+                        filter: command.in_type.map(|v| {
+                            Filter::Field(("predicates".to_string(), RangeQuery::Eq(Fv::Text(v))))
+                        }),
                         limit: command.limit,
                     })
                     .await
@@ -748,8 +746,8 @@ impl CognitiveNexus {
                                 for (_, val) in &prop.metadata {
                                     extract_json_text(&mut texts, val);
                                 }
-
-                                if tokens.iter().any(|t| texts.contains(&t.as_str())) {
+                                let texts = texts.join("\n");
+                                if tokens.iter().any(|t| texts.contains(t.as_str())) {
                                     if let Ok(val) =
                                         extract_proposition_field_value(proposition, predicate, &[])
                                     {
@@ -1161,14 +1159,19 @@ impl CognitiveNexus {
             }
         }
 
-        let now_ms = unix_ms();
-        try_join_await!(self.concepts.flush(now_ms), self.propositions.flush(now_ms))
-            .map_err(db_to_kip_error)?;
+        if !dry_run {
+            let now_ms = unix_ms();
+            try_join_await!(self.concepts.flush(now_ms), self.propositions.flush(now_ms))
+                .map_err(db_to_kip_error)?;
+        }
 
-        Ok(json!({
-            "blocks": blocks,
-            "concept_nodes": concept_nodes,
-            "proposition_links": proposition_links,
+        Ok(json!(UpsertResult {
+            blocks,
+            upsert_concept_nodes: concept_nodes.into_iter().map(|id| id.to_string()).collect(),
+            upsert_proposition_links: proposition_links
+                .into_iter()
+                .map(|id| id.to_string())
+                .collect(),
         }))
     }
 
@@ -2098,11 +2101,12 @@ impl CognitiveNexus {
     ) -> Result<(Vec<Json>, Option<String>), KipError> {
         let ids = bindings
             .get(var)
-            .ok_or_else(|| KipError::InvalidCommand(format!("Unbound variable: '{var}'")))?;
+            .ok_or_else(|| KipError::InvalidCommand(format!("Unbound variable: {var:?}")))?;
 
         let mut result = Vec::with_capacity(ids.len());
+        let has_order_by = order_by.iter().any(|v| v.variable.var == var);
         for eid in ids {
-            if order_by.is_empty() && cursor.map(|v| v <= eid).unwrap_or(true) {
+            if !has_order_by && cursor.map(|v| v <= eid).unwrap_or(false) {
                 continue;
             }
 
@@ -2125,20 +2129,35 @@ impl CognitiveNexus {
                 }
             };
 
-            if order_by.is_empty() && limit > 0 && result.len() >= limit {
+            if !has_order_by && limit > 0 && result.len() >= limit {
                 break;
             }
         }
 
-        result = apply_order_by(result, var, order_by);
+        if has_order_by {
+            result = apply_order_by(result, var, order_by);
+            if let Some(cursor) = cursor {
+                if let Some(idx) = result.iter().position(|(eid, _)| eid == &cursor) {
+                    if idx < result.len() {
+                        result = result.split_off(idx + 1);
+                    }
+                }
+            }
+        }
+
         let mut next_cursor: Option<String> = None;
         if limit > 0 && limit <= result.len() {
             result.truncate(limit);
-            next_cursor = result.last().map(|(eid, _)| eid.to_string());
+            next_cursor = result
+                .last()
+                .and_then(|(eid, _)| BTree::to_cursor(eid));
         }
 
         match fields.len() {
             0 => Ok((result.into_iter().map(|(_, v)| v).collect(), next_cursor)),
+            1 if fields[0].is_empty() => {
+                Ok((result.into_iter().map(|(_, v)| v).collect(), next_cursor))
+            }
             1 => Ok((
                 result
                     .into_iter()
@@ -2226,16 +2245,13 @@ impl CognitiveNexus {
             None => {
                 // 如果当前游标没有绑定，尝试从快照中获取
                 let ids = bindings_snapshot.get_mut(&dot_path.var).ok_or_else(|| {
-                    KipError::InvalidCommand(format!("Unbound variable: '{}'", dot_path.var))
+                    KipError::InvalidCommand(format!("Unbound variable1: {:?}", dot_path.var))
                 })?;
+
                 let id = match ids.pop() {
                     Some(id) => id,
                     None => return Ok(None), // 如果没有更多ID，返回None
                 };
-
-                if ids.is_empty() {
-                    bindings_snapshot.remove(&dot_path.var);
-                }
 
                 bindings_cursor.insert(dot_path.var.clone(), id.clone());
                 id
@@ -2546,5 +2562,1033 @@ impl CognitiveNexus {
 
         cached_pks.insert(entity_pk.clone(), id.clone());
         Ok(id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anda_db::{
+        database::{AndaDB, DBConfig},
+        storage::StorageConfig,
+    };
+    use object_store::memory::InMemory;
+    use std::sync::Arc;
+
+    async fn setup_test_db<F>(f: F) -> Result<CognitiveNexus, KipError>
+    where
+        F: AsyncFnOnce(&CognitiveNexus) -> Result<(), KipError>,
+    {
+        let object_store = Arc::new(InMemory::new());
+
+        let db_config = DBConfig {
+            name: "test_anda".to_string(),
+            description: "Test Anda CognitiveNexus".to_string(),
+            storage: StorageConfig {
+                compress_level: 0,
+                ..Default::default()
+            },
+        };
+
+        let db = AndaDB::connect(object_store, db_config)
+            .await
+            .map_err(db_to_kip_error)?;
+        let nexus = CognitiveNexus::connect(Arc::new(db), f).await?;
+        Ok(nexus)
+    }
+
+    async fn setup_test_data(nexus: &CognitiveNexus) -> Result<(), KipError> {
+        // 创建基础概念类型
+        let drug_type_kml = r#"
+        UPSERT {
+            CONCEPT ?drug_type {
+                {type: "$ConceptType", name: "Drug"}
+                SET ATTRIBUTES {
+                    "description": "Pharmaceutical drug concept type"
+                }
+            }
+            WITH METADATA {
+                "source": "test_setup",
+                "confidence": 1.0
+            }
+        }
+        "#;
+        nexus.execute_kml(parse_kml(drug_type_kml)?, false).await?;
+
+        let symptom_type_kml = r#"
+        UPSERT {
+            CONCEPT ?symptom_type {
+                {type: "$ConceptType", name: "Symptom"}
+                SET ATTRIBUTES {
+                    "description": "Medical symptom concept type"
+                }
+            }
+            WITH METADATA {
+                "source": "test_setup",
+                "confidence": 1.0
+            }
+        }
+        "#;
+        nexus
+            .execute_kml(parse_kml(symptom_type_kml)?, false)
+            .await?;
+
+        // 创建谓词类型
+        let treats_pred_kml = r#"
+        UPSERT {
+            CONCEPT ?treats_pred {
+                {type: "$PropositionType", name: "treats"}
+                SET ATTRIBUTES {
+                    "description": "Treatment relationship"
+                }
+            }
+            WITH METADATA {
+                "source": "test_setup",
+                "confidence": 1.0
+            }
+        }
+        "#;
+        nexus
+            .execute_kml(parse_kml(treats_pred_kml)?, false)
+            .await?;
+
+        let headache_kml = r#"
+        UPSERT {
+            CONCEPT ?headache {
+                {type: "Symptom", name: "Headache"}
+                SET ATTRIBUTES {
+                    "severity": "moderate",
+                    "duration": "2-4 hours"
+                }
+            }
+            WITH METADATA {
+                "source": "test_data",
+                "confidence": 1.0
+            }
+        }
+        "#;
+        nexus.execute_kml(parse_kml(headache_kml)?, false).await?;
+
+        let fever_kml = r#"
+        UPSERT {
+            CONCEPT ?fever {
+                {type: "Symptom", name: "Fever"}
+                SET ATTRIBUTES {
+                    "temperature_range": "38-40°C",
+                    "common": true
+                }
+            }
+            WITH METADATA {
+                "source": "test_data",
+                "confidence": 0.9
+            }
+        }
+        "#;
+        nexus.execute_kml(parse_kml(fever_kml)?, false).await?;
+
+        // 创建测试概念
+        let aspirin_kml = r#"
+        UPSERT {
+            CONCEPT ?aspirin {
+                {type: "Drug", name: "Aspirin"}
+                SET ATTRIBUTES {
+                    "molecular_formula": "C9H8O4",
+                    "risk_level": 2,
+                    "dosage": "325mg"
+                }
+                SET PROPOSITIONS {
+                    ("treats", {type: "Symptom", name: "Headache"})
+                    ("treats", {type: "Symptom", name: "Fever"})
+                }
+            }
+        }
+        WITH METADATA {
+            "source": "test_data",
+            "confidence": 0.95
+        }
+        "#;
+        nexus.execute_kml(parse_kml(aspirin_kml)?, false).await?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_cognitive_nexus_connect() {
+        let nexus = setup_test_db(async |_| Ok(())).await.unwrap();
+        assert_eq!(nexus.name(), "test_anda");
+
+        // 验证元类型已创建
+        assert!(
+            nexus
+                .has_concept(&ConceptPK::Object {
+                    r#type: META_CONCEPT_TYPE.to_string(),
+                    name: META_CONCEPT_TYPE.to_string()
+                })
+                .await
+        );
+
+        assert!(
+            nexus
+                .has_concept(&ConceptPK::Object {
+                    r#type: META_CONCEPT_TYPE.to_string(),
+                    name: META_PROPOSITION_TYPE.to_string()
+                })
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn test_kml_upsert_concept() {
+        let nexus = setup_test_db(async |_| Ok(())).await.unwrap();
+        setup_test_data(&nexus).await.unwrap();
+
+        // 验证概念已创建
+        let aspirin = nexus
+            .get_concept(&ConceptPK::Object {
+                r#type: "Drug".to_string(),
+                name: "Aspirin".to_string(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(aspirin.r#type, "Drug");
+        assert_eq!(aspirin.name, "Aspirin");
+        assert_eq!(
+            aspirin
+                .attributes
+                .get("molecular_formula")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+            "C9H8O4"
+        );
+        assert_eq!(
+            aspirin
+                .attributes
+                .get("risk_level")
+                .unwrap()
+                .as_u64()
+                .unwrap(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn test_kql_find_concepts() {
+        let nexus = setup_test_db(async |_| Ok(())).await.unwrap();
+        setup_test_data(&nexus).await.unwrap();
+
+        // 测试基本概念查询
+        let kql = r#"
+        FIND(?drug.name, ?drug.attributes.risk_level)
+        WHERE {
+            ?drug {type: "Drug"}
+        }
+        "#;
+
+        let query = parse_kql(kql).unwrap();
+        let (result, _) = nexus.execute_kql(query).await.unwrap();
+        assert_eq!(result, json!([["Aspirin", 2]]));
+
+        let kql = r#"
+        FIND(?drug) // return concept object
+        WHERE {
+            ?drug {type: "Drug"}
+        }
+        "#;
+
+        let query = parse_kql(kql).unwrap();
+        let (result, _) = nexus.execute_kql(query).await.unwrap();
+        assert_eq!(
+            result,
+            json!([{
+                "_type":"ConceptNode",
+                "id":"C:12",
+                "type":"Drug",
+                "name":"Aspirin",
+                "attributes":{"dosage":"325mg","molecular_formula":"C9H8O4","risk_level":2},
+                "metadata":{"source":"test_data","confidence":0.95}
+            }])
+        );
+    }
+
+    #[tokio::test]
+    async fn test_kql_proposition_matching() {
+        let nexus = setup_test_db(async |_| Ok(())).await.unwrap();
+        setup_test_data(&nexus).await.unwrap();
+
+        // 测试命题匹配
+        let kql = r#"
+        FIND(?drug.name, ?symptom.name)
+        WHERE {
+            ?drug {type: "Drug"}
+            ?symptom {type: "Symptom"}
+            (?drug, "treats", ?symptom)
+        }
+        "#;
+
+        let query = parse_kql(kql).unwrap();
+        let (result, _) = nexus.execute_kql(query).await.unwrap();
+        assert_eq!(result, json!([["Aspirin"], ["Headache", "Fever"]]));
+
+        let kql = r#"
+        FIND(?drug.name, ?symptom.name)
+        WHERE {
+            ?drug {type: "Drug"}
+            (?drug, "treats", ?symptom) // find symptom by proposition matching
+        }
+        "#;
+
+        let query = parse_kql(kql).unwrap();
+        let (result, _) = nexus.execute_kql(query).await.unwrap();
+        assert_eq!(result, json!([["Aspirin"], ["Headache", "Fever"]]));
+
+        let kql = r#"
+        FIND(?drug.name, ?symptom.name)
+        WHERE {
+            ?drug {type: "Drug"}
+            ?symptom {type: "Symptom"}
+            (?drug, "treats1", ?symptom) // when predicate not exists
+        }
+        "#;
+
+        let query = parse_kql(kql).unwrap();
+        let (result, _) = nexus.execute_kql(query).await.unwrap();
+        assert_eq!(result, json!([[], []]));
+    }
+
+    #[tokio::test]
+    async fn test_kql_filter_clause() {
+        let nexus = setup_test_db(async |_| Ok(())).await.unwrap();
+        setup_test_data(&nexus).await.unwrap();
+
+        // 测试过滤器
+        let kql = r#"
+        FIND(?drug.name)
+        WHERE {
+            ?drug {type: "Drug"}
+            FILTER(?drug.attributes.risk_level < 3)
+        }
+        "#;
+
+        let query = parse_kql(kql).unwrap();
+        let (result, _) = nexus.execute_kql(query).await.unwrap();
+        assert_eq!(result, json!(["Aspirin"]));
+
+        let kql = r#"
+        FIND(?drug.name)
+        WHERE {
+            ?drug {type: "Drug"}
+            FILTER(?drug.attributes.risk_level < 1)
+        }
+        "#;
+
+        let query = parse_kql(kql).unwrap();
+        let (result, _) = nexus.execute_kql(query).await.unwrap();
+        assert_eq!(result, json!([]));
+    }
+
+    #[tokio::test]
+    async fn test_kql_aggregation() {
+        let nexus = setup_test_db(async |_| Ok(())).await.unwrap();
+        setup_test_data(&nexus).await.unwrap();
+
+        // 测试聚合函数
+        let kql = r#"
+        FIND(COUNT(?drug))
+        WHERE {
+            ?drug {type: "Drug"}
+        }
+        "#;
+
+        let query = parse_kql(kql).unwrap();
+        let (result, _) = nexus.execute_kql(query).await.unwrap();
+        assert_eq!(result, json!(1));
+
+        let kql = r#"
+        FIND(COUNT(?drug), COUNT(DISTINCT ?symptom))
+        WHERE {
+            ?drug {type: "Drug"}
+            ?symptom {type: "Symptom"}
+        }
+        "#;
+
+        let query = parse_kql(kql).unwrap();
+        let (result, _) = nexus.execute_kql(query).await.unwrap();
+        assert_eq!(result, json!([1, 2]));
+    }
+
+    #[tokio::test]
+    async fn test_kql_optional_clause() {
+        let nexus = setup_test_db(async |_| Ok(())).await.unwrap();
+        setup_test_data(&nexus).await.unwrap();
+
+        // 测试可选子句
+        let kql = r#"
+        FIND(?symptom.name, ?drug.name)
+        WHERE {
+            ?symptom {type: "Symptom"}
+            OPTIONAL {
+                (?drug, "treats", ?symptom)
+            }
+        }
+        "#;
+
+        let query = parse_kql(kql).unwrap();
+        let (result, _) = nexus.execute_kql(query).await.unwrap();
+        assert_eq!(result, json!([["Headache", "Fever"], ["Aspirin"]]));
+
+        let kql = r#"
+        FIND(?symptom.name, ?drug.name)
+        WHERE {
+            ?symptom {type: "Symptom"}
+            OPTIONAL {
+                (?drug, "treats1", ?symptom)
+            }
+        }
+        "#;
+
+        let query = parse_kql(kql).unwrap();
+        let (result, _) = nexus.execute_kql(query).await.unwrap();
+        assert_eq!(result, json!([["Headache", "Fever"], []]));
+
+        let kql = r#"
+        FIND(?symptom.name, ?drug.name)
+        WHERE {
+            ?symptom {type: "Symptom"}
+            (?drug, "treats1", ?symptom)  // when predicate not exists
+        }
+        "#;
+
+        let query = parse_kql(kql).unwrap();
+        let (result, _) = nexus.execute_kql(query).await.unwrap();
+        assert_eq!(result, json!([[], []]));
+    }
+
+    #[tokio::test]
+    async fn test_kql_not_clause() {
+        let nexus = setup_test_db(async |_| Ok(())).await.unwrap();
+        setup_test_data(&nexus).await.unwrap();
+
+        // 添加另一个药物用于测试
+        let ibuprofen_kml = r#"
+        UPSERT {
+            CONCEPT ?ibuprofen {
+                {type: "Drug", name: "Ibuprofen"}
+                SET ATTRIBUTES {
+                    "risk_level": 4
+                }
+            }
+        }
+        "#;
+        nexus
+            .execute_kml(parse_kml(ibuprofen_kml).unwrap(), false)
+            .await
+            .unwrap();
+
+        // 测试NOT子句
+        let kql = r#"
+        FIND(?drug.name)
+        WHERE {
+            ?drug {type: "Drug"}
+            NOT {
+                FILTER(?drug.attributes.risk_level > 3)
+            }
+        }
+        "#;
+
+        let query = parse_kql(kql).unwrap();
+        let (result, _) = nexus.execute_kql(query).await.unwrap();
+        assert_eq!(result, json!(["Aspirin".to_string()]));
+
+        // 测试NOT子句
+        let kql = r#"
+        FIND(?drug.name)
+        WHERE {
+            ?drug {type: "Drug"}
+            NOT {
+                FILTER(?drug.attributes.risk_level > 4)
+            }
+        }
+        "#;
+
+        let query = parse_kql(kql).unwrap();
+        let (result, _) = nexus.execute_kql(query).await.unwrap();
+
+        assert_eq!(
+            result,
+            json!(["Aspirin".to_string(), "Ibuprofen".to_string()])
+        );
+    }
+
+    #[tokio::test]
+    async fn test_kql_union_clause() {
+        let nexus = setup_test_db(async |_| Ok(())).await.unwrap();
+        setup_test_data(&nexus).await.unwrap();
+
+        // 测试UNION子句
+        let kql = r#"
+        FIND(?concept.name)
+        WHERE {
+            ?concept {type: "Drug"}
+            ?concept {type: "Symptom"}
+        }
+        "#;
+
+        let query = parse_kql(kql).unwrap();
+        let res = nexus.execute_kql(query).await;
+        assert!(matches!(res, Err(KipError::InvalidCommand(_))));
+
+        // 测试UNION子句
+        let kql = r#"
+        FIND(?concept.name)
+        WHERE {
+            ?concept {type: "Drug"}
+            UNION {
+                ?concept {type: "Symptom"}
+            }
+        }
+        "#;
+
+        let query = parse_kql(kql).unwrap();
+        let (result, _) = nexus.execute_kql(query).await.unwrap();
+        assert_eq!(
+            result,
+            json!([
+                "Headache".to_string(),
+                "Fever".to_string(),
+                "Aspirin".to_string()
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn test_kql_order_by_and_limit() {
+        let nexus = setup_test_db(async |_| Ok(())).await.unwrap();
+        setup_test_data(&nexus).await.unwrap();
+
+        // 添加更多药物用于测试排序
+        let drugs_kml = r#"
+        UPSERT {
+            CONCEPT ?drug1 {
+                {type: "Drug", name: "Ibuprofen"}
+                SET ATTRIBUTES {
+                    "risk_level": 3
+                }
+            }
+            CONCEPT ?drug2 {
+                {type: "Drug", name: "Acetaminophen"}
+                SET ATTRIBUTES {
+                    "risk_level": 1
+                }
+            }
+        }
+        "#;
+        nexus
+            .execute_kml(parse_kml(drugs_kml).unwrap(), false)
+            .await
+            .unwrap();
+
+        // 测试排序和限制
+        let kql = r#"
+        FIND(?drug.name, ?drug.attributes.risk_level)
+        WHERE {
+            ?drug {type: "Drug"}
+        }
+        ORDER BY ?drug.attributes.risk_level ASC
+        LIMIT 2
+        "#;
+
+        let query = parse_kql(kql).unwrap();
+        let (result, cursor) = nexus.execute_kql(query).await.unwrap();
+        assert!(cursor.is_some());
+        assert_eq!(
+            result,
+            json!([["Acetaminophen".to_string(), 1], ["Aspirin".to_string(), 2]])
+        );
+
+        let kql = r#"
+        FIND(?drug.name, ?drug.attributes.risk_level)
+        WHERE {
+            ?drug {type: "Drug"}
+        }
+        ORDER BY ?drug.attributes.risk_level ASC
+        LIMIT 2 CURSOR "$cursor"
+        "#;
+
+        let query = parse_kql(&kql.replace("$cursor", cursor.unwrap().as_str())).unwrap();
+        let (result, cursor) = nexus.execute_kql(query).await.unwrap();
+        assert!(cursor.is_none());
+        assert_eq!(result, json!([["Ibuprofen".to_string(), 3]]));
+
+        let kql = r#"
+        FIND(?drug.name, ?drug.attributes.risk_level)
+        WHERE {
+            ?drug {type: "Drug"}
+        }
+        ORDER BY ?drug.attributes.risk_level DESC
+        LIMIT 2
+        "#;
+
+        let query = parse_kql(kql).unwrap();
+        let (result, cursor) = nexus.execute_kql(query).await.unwrap();
+        assert!(cursor.is_some());
+        assert_eq!(
+            result,
+            json!([["Ibuprofen".to_string(), 3], ["Aspirin".to_string(), 2]])
+        );
+
+        let kql = r#"
+        FIND(?drug.name, ?drug.attributes.risk_level)
+        WHERE {
+            ?drug {type: "Drug"}
+        }
+        ORDER BY ?drug.attributes.risk_level DESC
+        LIMIT 2
+        CURSOR "$cursor"
+        "#;
+
+        let query = parse_kql(&kql.replace("$cursor", cursor.unwrap().as_str())).unwrap();
+        let (result, cursor) = nexus.execute_kql(query).await.unwrap();
+        assert!(cursor.is_none());
+        assert_eq!(result, json!([["Acetaminophen".to_string(), 1]]));
+    }
+
+    #[tokio::test]
+    async fn test_kml_upsert_proposition() {
+        let nexus = setup_test_db(async |_| Ok(())).await.unwrap();
+        setup_test_data(&nexus).await.unwrap();
+
+        let kql = r#"
+        FIND(?link, ?drug.name, ?symptom.name)
+        WHERE {
+            ?link (?drug, "treats", ?symptom)
+        }
+        "#;
+
+        let query = parse_kql(kql).unwrap();
+        let (result, _) = nexus.execute_kql(query).await.unwrap();
+        let result = result.as_array().unwrap();
+        assert_eq!(
+            json!(result[1..]),
+            json!([
+                ["Aspirin".to_string()],
+                ["Headache".to_string(), "Fever".to_string()]
+            ])
+        );
+        let props: Vec<PropositionLink> = serde_json::from_value(result[0].clone()).unwrap();
+        // println!("{:#?}", props);
+        assert_eq!(props.len(), 2);
+        assert!(props[0].attributes.is_empty());
+        assert!(props[1].attributes.is_empty());
+        assert_eq!(
+            json!(props[0].metadata),
+            json!({
+                "source": "test_data",
+                "confidence": 0.95
+            })
+        );
+        assert_eq!(
+            json!(props[1].metadata),
+            json!({
+                "source": "test_data",
+                "confidence": 0.95
+            })
+        );
+
+        // 测试独立命题创建
+        let prop_kml = r#"
+        UPSERT {
+            PROPOSITION ?treatment {
+                ({type: "Drug", name: "Aspirin"}, "treats", {type: "Symptom", name: "Headache"})
+                SET ATTRIBUTES {
+                    "effectiveness": 0.85,
+                    "onset_time": "30 minutes"
+                }
+            }
+            WITH METADATA {
+                "source": "clinical_trial",
+                "study_id": "CT-2024-001"
+            }
+        }
+        "#;
+
+        let result = nexus
+            .execute_kml(parse_kml(prop_kml).unwrap(), false)
+            .await
+            .unwrap();
+        let result: UpsertResult = serde_json::from_value(result).unwrap();
+        assert_eq!(result.blocks, 1);
+        assert!(result.upsert_concept_nodes.is_empty());
+        assert_eq!(result.upsert_proposition_links.len(), 1);
+
+        let kql = r#"
+        FIND(?link)
+        WHERE {
+            ?link (?drug, "treats", ?symptom)
+        }
+        "#;
+
+        let query = parse_kql(kql).unwrap();
+        let (result, _) = nexus.execute_kql(query).await.unwrap();
+        let props: Vec<PropositionLink> = serde_json::from_value(result).unwrap();
+        // println!("{:#?}", props);
+        assert_eq!(props.len(), 2);
+        assert_eq!(
+            json!(props[0].attributes),
+            json!({
+                "effectiveness": 0.85,
+                "onset_time": "30 minutes"
+            })
+        );
+        assert_eq!(
+            json!(props[0].metadata),
+            json!({
+                "source": "clinical_trial",
+                "confidence": 0.95,
+                "study_id": "CT-2024-001"
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn test_kml_dry_run() {
+        let nexus = setup_test_db(async |_| Ok(())).await.unwrap();
+        setup_test_data(&nexus).await.unwrap();
+
+        let test_kml = r#"
+        UPSERT {
+            CONCEPT ?test_drug {
+                {type: "Drug", name: "TestDrug"}
+                SET ATTRIBUTES {
+                    "test": true
+                }
+            }
+        }
+        "#;
+
+        // 干运行不应该实际创建概念
+        let result = nexus
+            .execute_kml(parse_kml(test_kml).unwrap(), true)
+            .await
+            .unwrap();
+        let result: UpsertResult = serde_json::from_value(result).unwrap();
+        assert_eq!(result.blocks, 1);
+        assert!(result.upsert_concept_nodes.is_empty());
+        assert_eq!(result.upsert_proposition_links.len(), 0);
+
+        // 验证概念没有被创建
+        assert!(
+            !nexus
+                .has_concept(&ConceptPK::Object {
+                    r#type: "Drug".to_string(),
+                    name: "TestDrug".to_string(),
+                })
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn test_meta_describe_primer() {
+        let nexus = setup_test_db(async |_| Ok(())).await.unwrap();
+        setup_test_data(&nexus).await.unwrap();
+
+        let meta_cmd = MetaCommand::Describe(DescribeTarget::Primer);
+        let result = nexus.execute_meta(meta_cmd).await;
+        assert!(matches!(result, Err(KipError::NotFound(_))));
+        assert!(
+            result
+                .err()
+                .unwrap()
+                .to_string()
+                .contains(r#"{type: "Person", name: "$self"}"#)
+        );
+
+        let kml = PERSION_SELF.replace(
+            "$self_reserved_principal_id",
+            "gcxml-rtxjo-ib7ov-5si5r-5jluv-zek7y-hvody-nneuz-hcg5i-6notx-aae",
+        );
+
+        let result = nexus
+            .execute_kml(parse_kml(&kml).unwrap(), false)
+            .await
+            .unwrap();
+        assert!(result.is_object());
+
+        let (result, _) = nexus
+            .execute_meta(parse_meta("DESCRIBE PRIMER").unwrap())
+            .await
+            .unwrap();
+        assert!(result.is_object());
+
+        let primer = result.as_object().unwrap();
+        assert!(primer.contains_key("identity"));
+        assert!(primer.contains_key("domain_map"));
+    }
+
+    #[tokio::test]
+    async fn test_meta_describe_domains() {
+        let nexus = setup_test_db(async |_| Ok(())).await.unwrap();
+        setup_test_data(&nexus).await.unwrap();
+
+        let (result, _) = nexus
+            .execute_meta(parse_meta("DESCRIBE DOMAINS").unwrap())
+            .await
+            .unwrap();
+        let domains: Vec<ConceptNode> = serde_json::from_value(result).unwrap();
+        // println!("{:#?}", domains);
+        assert_eq!(domains.len(), 1);
+        assert_eq!(domains[0].r#type, "Domain");
+        assert_eq!(domains[0].name, "CoreSchema");
+    }
+
+    #[tokio::test]
+    async fn test_meta_describe_concept_types() {
+        let nexus = setup_test_db(async |_| Ok(())).await.unwrap();
+        setup_test_data(&nexus).await.unwrap();
+
+        let (result, _) = nexus
+            .execute_meta(parse_meta("DESCRIBE CONCEPT TYPES").unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result,
+            json!([
+                "$ConceptType",
+                "$PropositionType",
+                "Domain",
+                "Drug",
+                "Symptom",
+            ])
+        );
+
+        let (result, _) = nexus
+            .execute_meta(parse_meta("DESCRIBE CONCEPT TYPE \"Drug\"").unwrap())
+            .await
+            .unwrap();
+        let concept: ConceptNode = serde_json::from_value(result).unwrap();
+        assert_eq!(concept.r#type, "$ConceptType");
+        assert_eq!(concept.name, "Drug");
+
+        let res = nexus
+            .execute_meta(parse_meta("DESCRIBE CONCEPT TYPE \"drug\"").unwrap())
+            .await;
+        assert!(matches!(res, Err(KipError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn test_meta_describe_proposition_types() {
+        let nexus = setup_test_db(async |_| Ok(())).await.unwrap();
+        setup_test_data(&nexus).await.unwrap();
+
+        let (result, _) = nexus
+            .execute_meta(parse_meta("DESCRIBE PROPOSITION TYPES").unwrap())
+            .await
+            .unwrap();
+
+        // println!("{:#?}", result);
+        assert_eq!(result, json!(["belongs_to_domain", "treats",]));
+
+        let (result, _) = nexus
+            .execute_meta(parse_meta("DESCRIBE PROPOSITION TYPE \"belongs_to_domain\"").unwrap())
+            .await
+            .unwrap();
+        let concept: ConceptNode = serde_json::from_value(result).unwrap();
+        assert_eq!(concept.r#type, "$PropositionType");
+        assert_eq!(concept.name, "belongs_to_domain");
+
+        let res = nexus
+            .execute_meta(parse_meta("DESCRIBE PROPOSITION TYPE \"treats1\"").unwrap())
+            .await;
+        assert!(matches!(res, Err(KipError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn test_meta_search() {
+        let nexus = setup_test_db(async |_| Ok(())).await.unwrap();
+        setup_test_data(&nexus).await.unwrap();
+
+        let (result, _) = nexus
+            .execute_meta(parse_meta(r#"SEARCH CONCEPT "aspirin""#).unwrap())
+            .await
+            .unwrap();
+        let result: Vec<ConceptNode> = serde_json::from_value(result).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "Aspirin");
+
+        let (result, _) = nexus
+            .execute_meta(parse_meta(r#"SEARCH CONCEPT "C9H8O4""#).unwrap())
+            .await
+            .unwrap();
+        let result: Vec<ConceptNode> = serde_json::from_value(result).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "Aspirin");
+
+        let (result, _) = nexus
+            .execute_meta(parse_meta(r#"SEARCH CONCEPT "test_data""#).unwrap())
+            .await
+            .unwrap();
+        let result: Vec<ConceptNode> = serde_json::from_value(result).unwrap();
+        assert_eq!(result.len(), 10);
+
+        let (result, _) = nexus
+            .execute_meta(parse_meta(r#"SEARCH CONCEPT "test_data" LIMIT 5"#).unwrap())
+            .await
+            .unwrap();
+        let result: Vec<ConceptNode> = serde_json::from_value(result).unwrap();
+        assert_eq!(result.len(), 5);
+
+        let (result, _) = nexus
+            .execute_meta(
+                parse_meta(r#"SEARCH CONCEPT "test_data" WITH TYPE "$PropositionType""#).unwrap(),
+            )
+            .await
+            .unwrap();
+        let result: Vec<ConceptNode> = serde_json::from_value(result).unwrap();
+        assert_eq!(result.len(), 2);
+
+        let (result, _) = nexus
+            .execute_meta(parse_meta(r#"SEARCH PROPOSITION "test_data""#).unwrap())
+            .await
+            .unwrap();
+        let result: Vec<PropositionLink> = serde_json::from_value(result).unwrap();
+        assert_eq!(result.len(), 7);
+
+        let (result, _) = nexus
+            .execute_meta(parse_meta(r#"SEARCH PROPOSITION "test_data" LIMIT 5"#).unwrap())
+            .await
+            .unwrap();
+        let result: Vec<PropositionLink> = serde_json::from_value(result).unwrap();
+        assert_eq!(result.len(), 5);
+
+        let (result, _) = nexus
+            .execute_meta(
+                parse_meta(r#"SEARCH PROPOSITION "test_data" WITH TYPE "treats""#).unwrap(),
+            )
+            .await
+            .unwrap();
+        let result: Vec<PropositionLink> = serde_json::from_value(result).unwrap();
+        assert_eq!(result.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_error_handling() {
+        let nexus = setup_test_db(async |_| Ok(())).await.unwrap();
+
+        // 测试查询不存在的概念
+        let result = nexus
+            .get_concept(&ConceptPK::Object {
+                r#type: "NonExistent".to_string(),
+                name: "Test".to_string(),
+            })
+            .await;
+        assert!(result.is_err());
+
+        // 测试无效的KQL
+        let invalid_kql = r#"
+        FIND(?invalid)
+        WHERE {
+            ?invalid {invalid_field: "test"}
+        }
+        "#;
+
+        let parse_result = parse_kql(invalid_kql);
+        assert!(parse_result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_complex_query_scenario() {
+        let nexus = setup_test_db(async |_| Ok(())).await.unwrap();
+        setup_test_data(&nexus).await.unwrap();
+
+        // 创建更复杂的测试数据
+        let complex_data_kml = r#"
+        UPSERT {
+            CONCEPT ?drug_class_type {
+                {type: "$ConceptType", name: "DrugClass"}
+            }
+            CONCEPT ?belongs_to_pred {
+                {type: "$PropositionType", name: "belongs_to_class"}
+            }
+            CONCEPT ?nsaid_class {
+                {type: "DrugClass", name: "NSAID"}
+                SET ATTRIBUTES {
+                    "description": "Non-steroidal anti-inflammatory drugs"
+                }
+            }
+            PROPOSITION ?aspirin_nsaid {
+                ({type: "Drug", name: "Aspirin"}, "belongs_to_class", {type: "DrugClass", name: "NSAID"})
+                SET ATTRIBUTES {
+                    "classification_confidence": 0.99
+                }
+            }
+        }
+        "#;
+        nexus
+            .execute_kml(parse_kml(complex_data_kml).unwrap(), false)
+            .await
+            .unwrap();
+
+        // 复杂查询：找到所有NSAID类药物及其治疗的症状
+        let complex_kql = r#"
+        FIND(?drug.name, ?symptom.name, ?treatment.metadata)
+        WHERE {
+            ?drug {type: "Drug"}
+            ?nsaid_class {type: "DrugClass", name: "NSAID"}
+            ?symptom {type: "Symptom"}
+
+            (?drug, "belongs_to_class", ?nsaid_class)
+            ?treatment (?drug, "treats", ?symptom)
+
+            FILTER(?drug.attributes.risk_level <= 3)
+        }
+        ORDER BY ?drug.name ASC
+        "#;
+
+        let query = parse_kql(complex_kql).unwrap();
+        let (result, _) = nexus.execute_kql(query).await.unwrap();
+        // println!("{:#?}", result);
+        let result = result.as_array().unwrap();
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0], json!(["Aspirin".to_string()]));
+        assert_eq!(
+            result[1],
+            json!(["Headache".to_string(), "Fever".to_string()])
+        );
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_operations() {
+        let nexus = Arc::new(setup_test_db(async |_| Ok(())).await.unwrap());
+        setup_test_data(&nexus).await.unwrap();
+
+        // 测试并发查询
+        let nexus1 = nexus.clone();
+        let nexus2 = nexus.clone();
+
+        let task1 = tokio::spawn(async move {
+            let kql = r#"
+            FIND(?drug.name)
+            WHERE {
+                ?drug {type: "Drug"}
+            }
+            "#;
+            nexus1.execute_kql(parse_kql(kql).unwrap()).await
+        });
+
+        let task2 = tokio::spawn(async move {
+            let kql = r#"
+            FIND(?symptom.name)
+            WHERE {
+                ?symptom {type: "Symptom"}
+            }
+            "#;
+            nexus2.execute_kql(parse_kql(kql).unwrap()).await
+        });
+
+        let (result1, result2) = tokio::try_join!(task1, task2).unwrap();
+        assert!(result1.is_ok());
+        assert!(result2.is_ok());
     }
 }
