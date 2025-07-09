@@ -1,3 +1,9 @@
+//! # Cognitive Nexus Module
+//!
+//! This module provides the core database implementation for the cognitive nexus system.
+//! It implements the Knowledge Interchange Protocol (KIP) executor interface and manages
+//! concepts and propositions in a knowledge graph database.
+//!
 use anda_db::{
     collection::{Collection, CollectionConfig},
     database::AndaDB,
@@ -20,6 +26,19 @@ use std::{
 
 use crate::{entity::*, helper::*, types::*};
 
+/// Core database structure for the cognitive nexus system.
+///
+/// `CognitiveNexus` manages a knowledge graph consisting of concepts and propositions,
+/// providing high-level operations for querying and manipulating the knowledge base.
+/// It implements the Knowledge Interchange Protocol (KIP) executor interface.
+///
+/// # Architecture
+///
+/// - **Database Layer**: Built on top of AndaDB for persistent storage
+/// - **Collections**: Separate collections for concepts and propositions with optimized indexes
+/// - **Caching**: Thread-safe caching for improved query performance
+/// - **Protocol Support**: Full KIP implementation with KQL, KML, and Meta commands
+///
 #[derive(Clone, Debug)]
 pub struct CognitiveNexus {
     db: Arc<AndaDB>,
@@ -27,8 +46,26 @@ pub struct CognitiveNexus {
     propositions: Arc<Collection>,
 }
 
+/// Implementation of the Knowledge Interchange Protocol (KIP) executor.
+///
+/// This trait implementation allows the cognitive nexus to process KIP commands,
+/// including queries (KQL), markup language statements (KML), and meta commands.
 #[async_trait(?Send)]
 impl Executor for CognitiveNexus {
+    /// Executes a KIP command and returns the appropriate response.
+    ///
+    /// # Arguments
+    ///
+    /// * `command` - The KIP command to execute (KQL, KML, or Meta)
+    /// * `dry_run` - Whether to perform a dry run (only applicable to KML commands)
+    ///
+    /// # Returns
+    ///
+    /// A `Response` containing the execution result, which may include:
+    /// - Query results for KQL commands
+    /// - Modification results for KML commands
+    /// - Metadata for Meta commands
+    ///
     async fn execute(&self, command: Command, dry_run: bool) -> Response {
         match command {
             Command::Kql(command) => self.execute_kql(command).await.into(),
@@ -39,6 +76,51 @@ impl Executor for CognitiveNexus {
 }
 
 impl CognitiveNexus {
+    /// Establishes a connection to the cognitive nexus database.
+    ///
+    /// This method initializes the database collections, creates necessary indexes,
+    /// and sets up the initial schema. It also ensures that essential meta-concepts
+    /// are present in the database.
+    ///
+    /// # Arguments
+    ///
+    /// * `db` - Reference to the underlying AndaDB database
+    /// * `f` - Initialization function called after setup but before returning
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(CognitiveNexus)` - Successfully initialized cognitive nexus
+    /// * `Err(KipError)` - If initialization fails
+    ///
+    /// # Database Setup
+    ///
+    /// The method performs the following initialization steps:
+    /// 1. Creates or opens the "concepts" collection with appropriate schema and indexes
+    /// 2. Creates or opens the "propositions" collection with appropriate schema and indexes
+    /// 3. Sets up text tokenization for full-text search capabilities
+    /// 4. Ensures essential meta-concepts exist (creates them if missing)
+    /// 5. Calls the provided initialization function
+    ///
+    /// # Indexes Created
+    ///
+    /// **Concepts Collection:**
+    /// - BTree indexes: ["type", "name"], ["type"], ["name"]
+    /// - BM25 index: ["name", "attributes", "metadata"]
+    ///
+    /// **Propositions Collection:**
+    /// - BTree indexes: ["subject", "object"], ["subject"], ["object"], ["predicates"]
+    /// - BM25 index: ["predicates", "properties"]
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let db = Arc::new(AndaDB::new("knowledge_base").await?);
+    /// let nexus = CognitiveNexus::connect(db, |nexus| async {
+    ///     // Custom initialization logic here
+    ///     println!("Connected to database: {}", nexus.name());
+    ///     Ok(())
+    /// }).await?;
+    /// ```
     pub async fn connect<F>(db: Arc<AndaDB>, f: F) -> Result<Self, KipError>
     where
         F: AsyncFnOnce(&CognitiveNexus) -> Result<(), KipError>,
@@ -108,7 +190,7 @@ impl CognitiveNexus {
             })
             .await
         {
-            this.execute_kml(parse_kml(GENESIS)?, false).await?;
+            this.execute_kml(parse_kml(GENESIS_KIP)?, false).await?;
         }
 
         if !this
@@ -118,21 +200,63 @@ impl CognitiveNexus {
             })
             .await
         {
-            this.execute_kml(parse_kml(PERSION_TYPE)?, false).await?;
+            this.execute_kml(parse_kml(PERSON_KIP)?, false).await?;
         }
 
         f(&this).await?;
         Ok(this)
     }
 
-    pub async fn close(&self) -> Result<(), DBError> {
-        self.db.close().await
+    /// Closes the database connection and releases resources.
+    ///
+    /// This method should be called when the cognitive nexus is no longer needed
+    /// to ensure proper cleanup of database resources.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - Database closed successfully
+    /// * `Err(KipError)` - If closing the database fails
+    ///
+    pub async fn close(&self) -> Result<(), KipError> {
+        self.db.close().await.map_err(db_to_kip_error)
     }
 
+    /// Returns the name of the underlying database.
     pub fn name(&self) -> &str {
         self.db.name()
     }
 
+    /// Checks whether a concept exists in the database.
+    ///
+    /// This method performs a fast existence check without loading the full concept data.
+    /// It supports both ID-based and object-based concept identification.
+    ///
+    /// # Arguments
+    ///
+    /// * `pk` - The primary key of the concept to check
+    ///
+    /// # Returns
+    ///
+    /// * `true` - If the concept exists
+    /// * `false` - If the concept does not exist or cannot be found
+    ///
+    /// # Performance
+    ///
+    /// - For ID-based lookups: O(1) existence check
+    /// - For object-based lookups: O(log n) index lookup followed by O(1) existence check
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Check by ID
+    /// let exists = nexus.has_concept(&ConceptPK::ID(12345)).await;
+    ///
+    /// // Check by type and name
+    /// let exists = nexus.has_concept(&ConceptPK::Object {
+    ///     r#type: "Person".to_string(),
+    ///     name: "Alice".to_string(),
+    /// }).await;
+    /// ```
     pub async fn has_concept(&self, pk: &ConceptPK) -> bool {
         let id = match pk {
             ConceptPK::ID(id) => *id,
@@ -145,6 +269,20 @@ impl CognitiveNexus {
         self.concepts.contains(id)
     }
 
+    /// Retrieves a concept from the database.
+    ///
+    /// This method loads the complete concept data including all attributes and metadata.
+    /// It supports both ID-based and object-based concept identification.
+    ///
+    /// # Arguments
+    ///
+    /// * `pk` - The primary key of the concept to retrieve
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Concept)` - The loaded concept with all its data
+    /// * `Err(KipError)` - If the concept is not found or loading fails
+    ///
     pub async fn get_concept(&self, pk: &ConceptPK) -> Result<Concept, KipError> {
         let id = match pk {
             ConceptPK::ID(id) => *id,
@@ -297,7 +435,7 @@ impl CognitiveNexus {
 
         if let TargetEntities::IDs(ids) = result {
             if let Some(var) = clause.variable {
-                ctx.entities.insert(var, ids.into_iter().collect());
+                ctx.entities.insert(var, ids);
             }
         }
 
@@ -309,11 +447,7 @@ impl CognitiveNexus {
         ctx: &mut QueryContext,
         clause: FilterClause,
     ) -> Result<(), KipError> {
-        let mut entities: HashMap<String, Vec<EntityID>> = ctx
-            .entities
-            .iter()
-            .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
-            .collect();
+        let mut entities = ctx.entities.clone();
 
         loop {
             let mut bindings_snapshot = entities.clone();
@@ -335,7 +469,9 @@ impl CognitiveNexus {
                     // 过滤不通过，移除相关值
                     for (var, id) in bindings_cursor {
                         if let Some(existing) = ctx.entities.get_mut(&var) {
-                            existing.remove(&id);
+                            if let Some(idx) = existing.iter().position(|x| x == &id) {
+                                existing.remove(idx);
+                            }
                         }
                     }
                     // 继续处理剩余绑定
@@ -382,7 +518,7 @@ impl CognitiveNexus {
         // 合并 OPTIONAL 子句
         for (var, ids) in optional_context.entities {
             if let Some(existing) = ctx.entities.get_mut(&var) {
-                existing.extend(ids);
+                extend_ne(existing, ids);
             } else {
                 ctx.entities.insert(var, ids);
             }
@@ -408,7 +544,7 @@ impl CognitiveNexus {
         // 合并 UNION 子句
         for (var, ids) in union_context.entities {
             if let Some(existing) = ctx.entities.get_mut(&var) {
-                existing.extend(ids);
+                extend_ne(existing, ids);
             } else {
                 ctx.entities.insert(var, ids);
             }
@@ -426,11 +562,7 @@ impl CognitiveNexus {
         limit: Option<usize>,
     ) -> Result<(Vec<Json>, Option<String>), KipError> {
         let mut result: Vec<Json> = Vec::with_capacity(clause.expressions.len());
-        let bindings: HashMap<String, Vec<EntityID>> = ctx
-            .entities
-            .iter()
-            .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
-            .collect();
+        let bindings = ctx.entities.clone();
 
         let order_by = order_by.unwrap_or_default();
         let limit = limit.unwrap_or(0);
@@ -785,6 +917,7 @@ impl CognitiveNexus {
             };
 
             let max_hops = max.unwrap_or(10).min(10);
+
             for start_node in start_nodes {
                 let paths = self
                     .bfs_multi_hop(
@@ -799,10 +932,10 @@ impl CognitiveNexus {
                     .await?;
 
                 for path in paths {
-                    result.matched_subjects.insert(path.start);
-                    result.matched_objects.insert(path.end);
-                    result.matched_predicates.insert(predicate.clone());
-                    result.matched_propositions.extend(path.propositions);
+                    push_ne(&mut result.matched_subjects, path.start);
+                    push_ne(&mut result.matched_objects, path.end);
+                    push_ne(&mut result.matched_predicates, predicate.clone());
+                    extend_ne(&mut result.matched_propositions, path.propositions);
                 }
             }
         } else {
@@ -831,10 +964,10 @@ impl CognitiveNexus {
                     .await?;
 
                 for path in paths {
-                    result.matched_subjects.insert(path.end);
-                    result.matched_objects.insert(path.start);
-                    result.matched_predicates.insert(predicate.clone());
-                    result.matched_propositions.extend(path.propositions);
+                    push_ne(&mut result.matched_subjects, path.end);
+                    push_ne(&mut result.matched_objects, path.start);
+                    push_ne(&mut result.matched_predicates, predicate.clone());
+                    extend_ne(&mut result.matched_propositions, path.propositions);
                 }
             }
         }
@@ -2073,19 +2206,16 @@ impl CognitiveNexus {
         };
 
         if let Some(var) = subject_var {
-            ctx.entities.insert(var, result.matched_subjects.clone());
+            ctx.entities.insert(var, result.matched_subjects);
         }
         if let Some(var) = predicate_var {
-            ctx.predicates
-                .insert(var, result.matched_predicates.clone());
+            ctx.predicates.insert(var, result.matched_predicates);
         }
         if let Some(var) = object_var {
-            ctx.entities.insert(var, result.matched_objects.clone());
+            ctx.entities.insert(var, result.matched_objects);
         }
 
-        Ok(TargetEntities::IDs(
-            result.matched_propositions.into_iter().collect(),
-        ))
+        Ok(TargetEntities::IDs(result.matched_propositions))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2148,9 +2278,7 @@ impl CognitiveNexus {
         let mut next_cursor: Option<String> = None;
         if limit > 0 && limit <= result.len() {
             result.truncate(limit);
-            next_cursor = result
-                .last()
-                .and_then(|(eid, _)| BTree::to_cursor(eid));
+            next_cursor = result.last().and_then(|(eid, _)| BTree::to_cursor(eid));
         }
 
         match fields.len() {
@@ -2190,7 +2318,7 @@ impl CognitiveNexus {
         match target {
             TargetTerm::Variable(var) => {
                 if let Some(ids) = ctx.entities.get(&var) {
-                    Ok(TargetEntities::IDs(ids.iter().cloned().collect()))
+                    Ok(TargetEntities::IDs(ids.clone()))
                 } else {
                     Ok(TargetEntities::Any)
                 }
@@ -2583,7 +2711,7 @@ mod tests {
 
         let db_config = DBConfig {
             name: "test_anda".to_string(),
-            description: "Test Anda CognitiveNexus".to_string(),
+            description: "Test Anda Cognitive Nexus".to_string(),
             storage: StorageConfig {
                 compress_level: 0,
                 ..Default::default()
@@ -2858,6 +2986,231 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_kql_multi_hop_bidirectional_matching() {
+        let nexus = setup_test_db(async |_| Ok(())).await.unwrap();
+        setup_test_data(&nexus).await.unwrap();
+
+        // 创建多层级的测试数据用于多跳查询
+        let multi_hop_data_kml = r#"
+            UPSERT {
+                // 创建新的概念类型
+                CONCEPT ?category_type {
+                    {type: "$ConceptType", name: "Category"}
+                }
+                CONCEPT ?person_type {
+                    {type: "$ConceptType", name: "Person"}
+                }
+
+                // 创建新的谓词类型
+                CONCEPT ?is_subclass_of_pred {
+                    {type: "$PropositionType", name: "is_subclass_of"}
+                }
+                CONCEPT ?belongs_to_pred {
+                    {type: "$PropositionType", name: "belongs_to"}
+                }
+                CONCEPT ?knows_pred {
+                    {type: "$PropositionType", name: "knows"}
+                }
+
+                // 创建分类层次结构
+                CONCEPT ?medicine {
+                    {type: "Category", name: "Medicine"}
+                }
+                CONCEPT ?pain_reliever {
+                    {type: "Category", name: "PainReliever"}
+                    SET PROPOSITIONS {
+                        ("is_subclass_of", {type: "Category", name: "Medicine"})
+                    }
+                }
+                CONCEPT ?nsaid {
+                    {type: "Category", name: "NSAID"}
+                    SET PROPOSITIONS {
+                        ("is_subclass_of", {type: "Category", name: "PainReliever"})
+                    }
+                }
+
+                // 让阿司匹林属于NSAID类别
+                CONCEPT ?aspirin_category {
+                    {type: "Drug", name: "Aspirin"}
+                    SET PROPOSITIONS {
+                        ("belongs_to", {type: "Category", name: "NSAID"})
+                    }
+                }
+
+                // 创建人员和关系网络
+                CONCEPT ?alice {
+                    {type: "Person", name: "Alice"}
+                }
+                CONCEPT ?bob {
+                    {type: "Person", name: "Bob"}
+                    SET PROPOSITIONS {
+                        ("knows", {type: "Person", name: "Alice"})
+                    }
+                }
+                CONCEPT ?charlie {
+                    {type: "Person", name: "Charlie"}
+                    SET PROPOSITIONS {
+                        ("knows", {type: "Person", name: "Bob"})
+                    }
+                }
+                CONCEPT ?david {
+                    {type: "Person", name: "David"}
+                    SET PROPOSITIONS {
+                        ("knows", {type: "Person", name: "Charlie"})
+                    }
+                }
+            }
+        "#;
+        nexus
+            .execute_kml(parse_kml(multi_hop_data_kml).unwrap(), false)
+            .await
+            .unwrap();
+
+        // 测试1: 正向多跳查询 - 查找阿司匹林的所有上级分类（1-3跳）
+        let kql = r#"
+            FIND(?drug.name, ?category.name, ?parent_category.name)
+            WHERE {
+                ?drug {type: "Drug", name: "Aspirin"}
+                (?drug, "belongs_to", ?category)
+                (?category, "is_subclass_of"{1,3}, ?parent_category)
+            }
+            "#;
+        let query = parse_kql(kql).unwrap();
+        let (result, _) = nexus.execute_kql(query).await.unwrap();
+        assert_eq!(
+            result,
+            json!([["Aspirin"], ["NSAID"], ["PainReliever", "Medicine"]])
+        );
+
+        // 测试2: 反向多跳查询 - 从Medicine分类查找所有下级药物（1-3跳）
+        // 反向查询：从Medicine通过is_subclass_of关系找到药物
+        let kql = r#"
+            FIND(?category.name)
+            WHERE {
+                (?category, "is_subclass_of"{1,3}, {type: "Category", name: "Medicine"})
+            }
+            "#;
+        let query = parse_kql(kql).unwrap();
+        let (result, _) = nexus.execute_kql(query).await.unwrap();
+        assert_eq!(result, json!(["PainReliever", "NSAID"]));
+
+        let kql = r#"
+            FIND(?category.name, ?drug.name)
+            WHERE {
+                (?category, "is_subclass_of"{1,3}, {type: "Category", name: "Medicine"})
+                (?drug, "belongs_to", ?category)
+            }
+            "#;
+        let query = parse_kql(kql).unwrap();
+        let (result, _) = nexus.execute_kql(query).await.unwrap();
+        assert_eq!(result, json!([["NSAID"], ["Aspirin"]]));
+
+        // 测试3: 精确跳数查询 - 查找恰好2跳的关系
+        let kql = r#"
+            FIND(?drug.name, ?parent_category.name)
+            WHERE {
+                ?drug {type: "Drug", name: "Aspirin"}
+                (?drug, "belongs_to", ?category)
+                (?category, "is_subclass_of"{2}, ?parent_category)
+            }
+            "#;
+        let query = parse_kql(kql).unwrap();
+        let (result, _) = nexus.execute_kql(query).await.unwrap();
+        // 应该只找到PainReliever（2跳：Aspirin->NSAID, NSAID->PainReliever->Medicine）
+        assert_eq!(result, json!([["Aspirin"], ["Medicine"]]));
+
+        // 测试4: 人际关系网络的多跳查询
+        let kql = r#"
+            FIND(?person1.name, ?person2.name)
+            WHERE {
+                ?person1 {type: "Person", name: "David"}
+                ?person2 {type: "Person", name: "Alice"}
+                (?person1, "knows"{1,3}, ?person2)
+            }
+        "#;
+        let query = parse_kql(kql).unwrap();
+        let (result, _) = nexus.execute_kql(query).await.unwrap();
+        // David通过3跳关系认识Alice: David->Charlie->Bob->Alice
+        assert_eq!(result, json!([["David"], ["Alice"]]));
+
+        // 测试5: 反向人际关系查询
+        let kql = r#"
+            FIND(?person1.name, ?person2.name)
+            WHERE {
+                ?person1 {type: "Person", name: "Alice"}
+                ?person2 {type: "Person", name: "David"}
+                (?person1, "knows"{1,3}, ?person2)
+            }
+        "#;
+        let query = parse_kql(kql).unwrap();
+        let (result, _) = nexus.execute_kql(query).await.unwrap();
+        // 反向查询应该为空，因为knows关系是单向的
+        assert_eq!(result, json!([[], []]));
+
+        // 测试6: 边界条件 - 0跳查询（自身）
+        let kql = r#"
+            FIND(?drug.name)
+            WHERE {
+                ?drug {type: "Drug", name: "Aspirin"}
+                (?drug, "belongs_to"{0}, ?drug)
+            }
+        "#;
+        let query = parse_kql(kql).unwrap();
+        let (result, _) = nexus.execute_kql(query).await.unwrap();
+        // 0跳应该匹配自身
+        assert_eq!(result, json!(["Aspirin"]));
+
+        // 测试7: 超出范围的查询
+        let kql = r#"
+            FIND(?drug.name, ?category.name)
+            WHERE {
+                ?drug {type: "Drug", name: "Aspirin"}
+                (?drug, "belongs_to", ?category)
+                (?category, "is_subclass_of"{1,}, ?o)
+            }
+        "#;
+        let query = parse_kql(kql).unwrap();
+        let (result, _) = nexus.execute_kql(query).await.unwrap();
+        assert_eq!(result, json!([["Aspirin"], ["NSAID"]]));
+
+        let kql = r#"
+            FIND(?drug.name, ?category.name)
+            WHERE {
+                ?drug {type: "Drug", name: "Aspirin"}
+                (?drug, "belongs_to", ?category)
+                (?category, "is_subclass_of"{5,10}, ?o)
+            }
+        "#;
+        let query = parse_kql(kql).unwrap();
+        let (result, _) = nexus.execute_kql(query).await.unwrap();
+        // 超出实际路径长度，应该为空
+        assert_eq!(result, json!([["Aspirin"], []]));
+    }
+
+    #[tokio::test]
+    async fn test_multi_hop_error_handling() {
+        let nexus = setup_test_db(async |_| Ok(())).await.unwrap();
+        setup_test_data(&nexus).await.unwrap();
+
+        // 测试错误情况：主语和宾语都是变量的多跳查询
+        let kql = r#"
+            FIND(?a.name, ?b.name)
+            WHERE {
+                (?a, "treats"{1,3}, ?b)
+            }
+            "#;
+        let query = parse_kql(kql).unwrap();
+        let result = nexus.execute_kql(query).await;
+        // 应该返回错误，因为多跳查询要求主语或宾语至少有一个是具体的ID
+        assert!(result.is_err());
+        if let Err(KipError::InvalidCommand(msg)) = result {
+            assert!(msg.contains("cannot both be variables in multi-hop matching"));
+        } else {
+            panic!("Expected InvalidCommand error");
+        }
+    }
+
+    #[tokio::test]
     async fn test_kql_filter_clause() {
         let nexus = setup_test_db(async |_| Ok(())).await.unwrap();
         setup_test_data(&nexus).await.unwrap();
@@ -3055,9 +3408,9 @@ mod tests {
         assert_eq!(
             result,
             json!([
+                "Aspirin".to_string(),
                 "Headache".to_string(),
                 "Fever".to_string(),
-                "Aspirin".to_string()
             ])
         );
     }
@@ -3304,7 +3657,7 @@ mod tests {
                 .contains(r#"{type: "Person", name: "$self"}"#)
         );
 
-        let kml = PERSION_SELF.replace(
+        let kml = PERSON_SELF_KIP.replace(
             "$self_reserved_principal_id",
             "gcxml-rtxjo-ib7ov-5si5r-5jluv-zek7y-hvody-nneuz-hcg5i-6notx-aae",
         );

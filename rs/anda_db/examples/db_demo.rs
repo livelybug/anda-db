@@ -48,9 +48,6 @@ async fn main() -> Result<(), DBError> {
     // init structured logger
     structured_logger::init();
 
-    // create an in-memory object store
-    // It's a simple in-memory storage for testing purposes.
-    // In a real application, you would use a persistent storage backend.
     // let object_store = InMemory::new();
     let object_store = MetaStoreBuilder::new(
         LocalFileSystem::new_with_prefix("./debug/metastore")?,

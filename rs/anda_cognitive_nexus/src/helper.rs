@@ -1,3 +1,8 @@
+//! # Helper Module
+//!
+//! Utility functions and traits for the Anda Cognitive Nexus system.
+//! Provides field extraction, sorting, predicate matching, and error conversion utilities.
+
 use anda_db::error::DBError;
 use anda_kip::{
     EntityType, Json, KipError, Map, OrderByCondition, OrderDirection, PredTerm,
@@ -7,7 +12,20 @@ use std::borrow::Cow;
 
 use crate::entity::{Concept, EntityID, Properties, Proposition};
 
+/// A trait for functional-style method chaining.
+///
+/// Allows any value to be passed through a function, enabling
+/// fluent interfaces and functional programming patterns.
 pub trait Pipe<T> {
+    /// Passes the value through a function.
+    ///
+    /// # Arguments
+    ///
+    /// * `f` - Function to apply to the value
+    ///
+    /// # Returns
+    ///
+    /// The result of applying the function to the value
     fn pipe<F, R>(self, f: F) -> R
     where
         F: FnOnce(Self) -> R,
@@ -23,6 +41,57 @@ impl<T> Pipe<T> for T {
     }
 }
 
+/// Adds an item to a vector if it doesn't already exist.
+///
+/// # Arguments
+///
+/// * `vec` - The vector to modify
+/// * `item` - The item to add
+pub fn push_ne<T>(vec: &mut Vec<T>, item: T)
+where
+    T: PartialEq,
+{
+    if !vec.contains(&item) {
+        vec.push(item);
+    }
+}
+
+/// Extends a vector with items that don't already exist.
+///
+/// # Arguments
+///
+/// * `vec` - The vector to extend
+/// * `items` - The items to add
+pub fn extend_ne<T>(vec: &mut Vec<T>, items: Vec<T>)
+where
+    T: PartialEq,
+{
+    for item in items {
+        push_ne(vec, item);
+    }
+}
+
+/// Extracts field values from a concept using a dot-notation path.
+///
+/// # Arguments
+///
+/// * `concept` - The concept to extract from
+/// * `path` - Dot-notation field path (e.g., ["attributes", "name"])
+///
+/// # Returns
+///
+/// The extracted JSON value or an error if the path is invalid
+///
+/// # Supported Paths
+///
+/// * `[]` - Returns the complete concept node
+/// * `["id"]` - Returns the entity ID
+/// * `["type"]` - Returns the concept type
+/// * `["name"]` - Returns the concept name
+/// * `["attributes"]` - Returns all attributes
+/// * `["attributes", "key"]` - Returns specific attribute
+/// * `["metadata"]` - Returns all metadata
+/// * `["metadata", "key"]` - Returns specific metadata
 pub fn extract_concept_field_value(concept: &Concept, path: &[String]) -> Result<Json, KipError> {
     validate_dot_path_var(path, EntityType::ConceptNode)?;
 
@@ -65,7 +134,29 @@ pub fn extract_concept_field_value(concept: &Concept, path: &[String]) -> Result
     }
 }
 
-// 从命题中提取字段值
+/// Extracts field values from a proposition using a dot-notation path.
+///
+/// # Arguments
+///
+/// * `proposition` - The proposition to extract from
+/// * `predicate` - The specific predicate to use
+/// * `path` - Dot-notation field path
+///
+/// # Returns
+///
+/// The extracted JSON value or an error if the path/predicate is invalid
+///
+/// # Supported Paths
+///
+/// * `[]` - Returns the complete proposition link
+/// * `["id"]` - Returns the proposition entity ID
+/// * `["subject"]` - Returns the subject entity ID
+/// * `["object"]` - Returns the object entity ID
+/// * `["predicate"]` - Returns the predicate name
+/// * `["attributes"]` - Returns predicate-specific attributes
+/// * `["attributes", "key"]` - Returns specific attribute
+/// * `["metadata"]` - Returns predicate-specific metadata
+/// * `["metadata", "key"]` - Returns specific metadata
 pub fn extract_proposition_field_value(
     proposition: &Proposition,
     predicate: &str,
@@ -134,7 +225,23 @@ pub fn extract_proposition_field_value(
     }
 }
 
-// 应用排序
+/// Applies sorting to entity-value pairs based on order conditions.
+///
+/// # Arguments
+///
+/// * `values` - Vector of (EntityID, JSON) pairs to sort
+/// * `var` - Variable name to match against order conditions
+/// * `order_by` - Sorting conditions to apply
+///
+/// # Returns
+///
+/// Sorted vector of entity-value pairs
+///
+/// # Supported Types
+///
+/// * Numbers - Sorted numerically
+/// * Strings - Sorted lexicographically
+/// * Booleans - false < true
 pub fn apply_order_by<'a>(
     mut values: Vec<(&'a EntityID, Json)>,
     var: &str,
@@ -143,7 +250,7 @@ pub fn apply_order_by<'a>(
     values.sort_by(|(_, a), (_, b)| {
         for cond in order_by {
             if cond.variable.var != var {
-                continue; // 只处理与当前变量相关的排序条件
+                continue; // Only process conditions for the current variable
             }
 
             let path = format!("/{}", cond.variable.path.join("/"));
@@ -178,7 +285,22 @@ pub fn apply_order_by<'a>(
     values
 }
 
-// 处理谓词匹配逻辑
+/// Matches a predicate term against a proposition.
+///
+/// # Arguments
+///
+/// * `proposition` - The proposition to match against
+/// * `predicate` - The predicate term to match
+///
+/// # Returns
+///
+/// Optional tuple of (subject, matched_predicates, object) or None if no match
+///
+/// # Predicate Types
+///
+/// * `Literal` - Exact predicate name match
+/// * `Variable` - Matches all predicates in the proposition
+/// * `Alternative` - Matches any predicate from a set of alternatives
 pub fn match_predicate_against_proposition(
     proposition: &Proposition,
     predicate: &PredTerm,
@@ -223,6 +345,22 @@ pub fn match_predicate_against_proposition(
     }
 }
 
+/// Converts database errors to KIP errors.
+///
+/// # Arguments
+///
+/// * `err` - The database error to convert
+///
+/// # Returns
+///
+/// Corresponding KIP error type
+///
+/// # Error Mappings
+///
+/// * `Schema` → `Parse`
+/// * `NotFound` → `NotFound`
+/// * `AlreadyExists` → `AlreadyExists`
+/// * Others → `Execution`
 pub fn db_to_kip_error(err: DBError) -> KipError {
     match &err {
         DBError::Schema { .. } => KipError::Parse(format!("{err}")),

@@ -6,4 +6,5 @@ mod types;
 
 pub use db::*;
 pub use entity::*;
+pub use helper::*;
 pub use types::ConceptPK;
