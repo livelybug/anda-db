@@ -186,8 +186,8 @@ where
     where
         F: FnMut(&T) -> bool,
     {
-        self.set.retain(&mut f);
         self.vec.retain(&mut f);
+        self.set = self.vec.iter().cloned().collect();
     }
 
     /// Removes and returns the element at `index`.

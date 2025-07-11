@@ -501,8 +501,21 @@ impl CognitiveNexus {
         }
 
         for (var, ids) in not_context.entities {
+            if ids.is_empty() {
+                continue;
+            }
             // 如果NOT子句中有变量绑定，则从当前上下文中移除这些绑定
             if let Some(existing) = ctx.entities.get_mut(&var) {
+                existing.retain(|id| !ids.contains(id));
+            }
+        }
+
+        for (pred, ids) in not_context.predicates {
+            if ids.is_empty() {
+                continue;
+            }
+            // 如果NOT子句中有谓词绑定，则从当前上下文中移除这些绑定
+            if let Some(existing) = ctx.predicates.get_mut(&pred) {
                 existing.retain(|id| !ids.contains(id));
             }
         }
@@ -522,11 +535,14 @@ impl CognitiveNexus {
 
         // 合并 OPTIONAL 子句
         for (var, ids) in optional_context.entities {
-            if let Some(existing) = ctx.entities.get_mut(&var) {
-                existing.extend(ids.to_vec());
-            } else {
-                ctx.entities.insert(var, ids);
-            }
+            ctx.entities.entry(var).or_default().extend(ids.into_vec());
+        }
+
+        for (pred, ids) in optional_context.predicates {
+            ctx.predicates
+                .entry(pred)
+                .or_default()
+                .extend(ids.into_vec());
         }
 
         Ok(())
@@ -548,11 +564,13 @@ impl CognitiveNexus {
 
         // 合并 UNION 子句
         for (var, ids) in union_context.entities {
-            if let Some(existing) = ctx.entities.get_mut(&var) {
-                existing.extend(ids.to_vec());
-            } else {
-                ctx.entities.insert(var, ids);
-            }
+            ctx.entities.entry(var).or_default().extend(ids.into_vec());
+        }
+        for (pred, ids) in union_context.predicates {
+            ctx.predicates
+                .entry(pred)
+                .or_default()
+                .extend(ids.into_vec());
         }
 
         Ok(())

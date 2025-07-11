@@ -139,6 +139,97 @@ impl CognitiveNexus {
 }
 ```
 
+### Anda Cognitive Nexus Example
+
+Here's a brief example of how to initialize the nexus, insert knowledge using KML, and retrieve it with KQL.
+
+```rust
+use anda_cognitive_nexus::{CognitiveNexus, KipError};
+use anda_db::{database::{AndaDB, DBConfig}, storage::StorageConfig};
+use anda_kip::{parse_kml, parse_kql};
+use anda_object_store::MetaStoreBuilder;
+use object_store::local::LocalFileSystem;
+use std::sync::Arc;
+
+#[tokio::main]
+async fn main() -> Result<(), KipError> {
+    // 1. Set up storage and database
+    let object_store = MetaStoreBuilder::new(LocalFileSystem::new_with_prefix("./db")?, 10000).build();
+    let db_config = DBConfig::default();
+    let db = AndaDB::connect(Arc::new(object_store), db_config).await?;
+
+    // 2. Connect to the Cognitive Nexus
+    let nexus = CognitiveNexus::connect(Arc::new(db), |_| async { Ok(()) }).await?;
+    println!("Connected to Anda Cognitive Nexus: {}", nexus.name());
+
+    // 3. Manipulate Knowledge with KML (Knowledge Manipulation Language)
+    let kml_string = r#"
+    UPSERT {
+        // Define concept types
+        CONCEPT ?drug_type {
+            {type: "$ConceptType", name: "Drug"}
+            SET ATTRIBUTES {
+                description: "Pharmaceutical drug concept type"
+            }
+        }
+
+        CONCEPT ?symptom_type {
+            {type: "$ConceptType", name: "Symptom"}
+            SET ATTRIBUTES {
+                description: "Medical symptom concept type"
+            }
+        }
+
+        // Define relation types
+        CONCEPT ?treats_relation {
+            {type: "$PropositionType", name: "treats"}
+            SET ATTRIBUTES {
+                description: "Drug treats symptom relationship"
+            }
+        }
+
+        // Create symptom concepts
+        CONCEPT ?headache {
+            {type: "Symptom", name: "Headache"}
+            SET ATTRIBUTES {
+                severity_scale: "1-10",
+                description: "Pain in the head or neck area"
+            }
+        }
+
+        // Create a drug and the symptom it treats
+        CONCEPT ?aspirin {
+            {type: "Drug", name: "Aspirin"}
+            SET ATTRIBUTES { molecular_formula: "C9H8O4", risk_level: 1 }
+            SET PROPOSITIONS {
+                ("treats", {type: "Symptom", name: "Headache"})
+            }
+        }
+    }
+    WITH METADATA { source: "Basic Medical Knowledge" }
+    "#;
+
+    let kml_commands = parse_kml(kml_string)?;
+    let kml_result = nexus.execute_kml(kml_commands, false).await?;
+    println!("KML Execution Result: {:#?}", kml_result);
+
+    // 4. Query Knowledge with KQL (Knowledge Query Language)
+    let kql_query = r#"
+    FIND(?drug.name, ?drug.attributes.risk_level)
+    WHERE {
+        ?drug {type: "Drug"}
+        (?drug, "treats", {type: "Symptom", name: "Headache"})
+    }
+    "#;
+
+    let (kql_result, _) = nexus.execute_kql(parse_kql(kql_query)?).await?;
+    println!("KQL Query Result: {:#?}", kql_result);
+
+    nexus.close().await?;
+    Ok(())
+}
+```
+
 ## License
 
 Copyright © 2025 [LDC Labs](https://github.com/ldclabs).
