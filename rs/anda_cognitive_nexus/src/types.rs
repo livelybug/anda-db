@@ -11,11 +11,12 @@
 //! - **Result Types**: `PropositionsMatchResult` and `GraphPath` for query results
 //! - **Target Types**: `TargetEntities` for specifying query targets
 
+use anda_db_utils::UniqueVec;
 use anda_kip::*;
 use parking_lot::RwLock;
 use std::{collections::HashMap, fmt, hash::Hash, str::FromStr, sync::Arc};
 
-use crate::{entity::*, helper::push_ne};
+use crate::entity::*;
 
 /// Primary key for identifying concepts in the cognitive nexus.
 ///
@@ -250,13 +251,13 @@ pub struct QueryContext {
     ///
     /// Maps variable names (e.g., "?person", "?location") to lists of entity IDs
     /// that match the variable's constraints in the current query context.
-    pub entities: HashMap<String, Vec<EntityID>>,
+    pub entities: HashMap<String, UniqueVec<EntityID>>,
 
     /// Variable name to predicate mappings
     ///
     /// Maps variable names to lists of predicate strings that match
     /// the variable's constraints in the current query context.
-    pub predicates: HashMap<String, Vec<String>>,
+    pub predicates: HashMap<String, UniqueVec<String>>,
 
     /// Shared cache for loaded entities
     ///
@@ -316,42 +317,23 @@ pub enum TargetEntities {
 ///
 /// This structure is typically populated during query execution and provides
 /// access to all matched components of propositions for further processing.
+#[derive(Default)]
 pub struct PropositionsMatchResult {
     /// List of matched proposition entity IDs
-    pub matched_propositions: Vec<EntityID>,
+    pub matched_propositions: UniqueVec<EntityID>,
     /// List of matched subject entity IDs
-    pub matched_subjects: Vec<EntityID>,
+    pub matched_subjects: UniqueVec<EntityID>,
     /// List of matched object entity IDs
-    pub matched_objects: Vec<EntityID>,
+    pub matched_objects: UniqueVec<EntityID>,
     /// List of matched predicate strings
-    pub matched_predicates: Vec<String>,
-}
-
-impl Default for PropositionsMatchResult {
-    fn default() -> Self {
-        Self::new()
-    }
+    pub matched_predicates: UniqueVec<String>,
 }
 
 impl PropositionsMatchResult {
-    /// Creates a new empty proposition match result.
-    ///
-    /// # Returns
-    ///
-    /// A new `PropositionsMatchResult` with all collections initialized as empty vectors.
-    pub fn new() -> Self {
-        Self {
-            matched_propositions: Vec::new(),
-            matched_subjects: Vec::new(),
-            matched_objects: Vec::new(),
-            matched_predicates: Vec::new(),
-        }
-    }
-
     /// Adds a matching proposition and its components to the result.
     ///
     /// This method ensures that duplicate entries are not added to the result collections
-    /// by using the `push_ne` helper function.
+    /// by using the `push_nx` helper function.
     ///
     /// # Arguments
     ///
@@ -372,13 +354,13 @@ impl PropositionsMatchResult {
         predicates: Vec<String>,
         proposition_id: u64,
     ) {
-        push_ne(&mut self.matched_subjects, subject);
-        push_ne(&mut self.matched_objects, object);
+        self.matched_subjects.push(subject);
+        self.matched_objects.push(object);
 
         for pred in predicates {
             let id = EntityID::Proposition(proposition_id, pred.clone());
-            push_ne(&mut self.matched_propositions, id);
-            push_ne(&mut self.matched_predicates, pred);
+            self.matched_propositions.push(id);
+            self.matched_predicates.push(pred);
         }
     }
 }
@@ -406,7 +388,7 @@ pub struct GraphPath {
     ///
     /// Each proposition represents an edge in the path from start to end.
     /// The order of propositions matters as it represents the traversal sequence.
-    pub propositions: Vec<EntityID>,
+    pub propositions: UniqueVec<EntityID>,
     /// The number of hops (edges) in the path
     ///
     /// This should equal the length of the `propositions` vector.

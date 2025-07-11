@@ -1,5 +1,6 @@
 //! # Anda-DB BM25 Full-Text Search Library
 
+use anda_db_utils::{CountingWriter, UniqueVec};
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -26,7 +27,7 @@ pub struct BM25Index<T: Tokenizer + Clone> {
     /// BM25 algorithm parameters
     config: BM25Config,
 
-    /// Maps segment IDs to their token counts
+    /// Maps document IDs to their token counts
     seg_tokens: DashMap<u64, usize>,
 
     /// Buckets store information about where posting entries are stored and their current state
@@ -34,9 +35,9 @@ pub struct BM25Index<T: Tokenizer + Clone> {
     /// - bucket_size: Current size of the bucket in bytes
     /// - is_dirty: Indicates if the bucket has new data that needs to be persisted
     /// - tokens: List of tokens stored in this bucket
-    buckets: DashMap<u32, (u32, bool, Vec<String>)>,
+    buckets: DashMap<u32, (u32, bool, UniqueVec<String>)>,
 
-    /// Inverted index mapping tokens to (bucket id, Vec<(segment_id, term_frequency)>)
+    /// Inverted index mapping tokens to (bucket id, Vec<(document_id, term_frequency)>)
     postings: DashMap<String, PostingValue>,
 
     /// Index metadata.
@@ -45,18 +46,18 @@ pub struct BM25Index<T: Tokenizer + Clone> {
     /// Maximum bucket ID currently in use
     max_bucket_id: AtomicU32,
 
-    /// Maximum segment ID currently in use
-    max_segment_id: AtomicU64,
+    /// Maximum document ID currently in use
+    max_document_id: AtomicU64,
 
-    /// Set of dirty segment buckets that need to be persisted
-    dirty_segment_buckets: RwLock<BTreeSet<u32>>,
+    /// Set of dirty document buckets that need to be persisted
+    dirty_document_buckets: RwLock<BTreeSet<u32>>,
 
     /// Maximum size of a bucket before creating a new one
     /// When a bucket's stored data exceeds this size,
     /// a new bucket should be created for new data
     bucket_overload_size: u32,
 
-    /// Average number of tokens per segment
+    /// Average number of tokens per document
     avg_seg_tokens: RwLock<f32>,
 
     /// Number of search operations performed.
@@ -69,7 +70,7 @@ pub struct BM25Index<T: Tokenizer + Clone> {
 /// Parameters for the BM25 ranking algorithm
 ///
 /// - `k1`: Controls term frequency saturation. Higher values give more weight to term frequency.
-/// - `b`: Controls segment length normalization. 0.0 means no normalization, 1.0 means full normalization.
+/// - `b`: Controls document length normalization. 0.0 means no normalization, 1.0 means full normalization.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BM25Params {
     pub k1: f32,
@@ -104,10 +105,10 @@ impl Default for BM25Config {
     }
 }
 
-/// Type alias for posting values: (bucket id, Vec<(segment_id, token_frequency)>)
+/// Type alias for posting values: (bucket id, Vec<(document_id, token_frequency)>)
 /// - bucket_id: The bucket where this posting is stored
-/// - Vec<(segment_id, token_frequency)>: List of segments and their term frequencies
-pub type PostingValue = (u32, Vec<(u64, usize)>);
+/// - Vec<(document_id, token_frequency)>: List of documents and their term frequencies
+pub type PostingValue = (u32, UniqueVec<(u64, usize)>);
 
 /// Index metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -152,10 +153,10 @@ pub struct BM25Stats {
     /// Maximum bucket ID currently in use
     pub max_bucket_id: u32,
 
-    /// Maximum segment ID currently in use
-    pub max_segment_id: u64,
+    /// Maximum document ID currently in use
+    pub max_document_id: u64,
 
-    /// Average number of tokens per segment
+    /// Average number of tokens per document
     pub avg_seg_tokens: f32,
 }
 
@@ -202,7 +203,7 @@ where
             config: config.clone(),
             seg_tokens: DashMap::new(),
             postings: DashMap::new(),
-            buckets: DashMap::from_iter(vec![(0, (0, true, Vec::new()))]),
+            buckets: DashMap::from_iter(vec![(0, (0, true, UniqueVec::default()))]),
             metadata: RwLock::new(BM25Metadata {
                 name,
                 config,
@@ -210,21 +211,21 @@ where
             }),
             bucket_overload_size,
             max_bucket_id: AtomicU32::new(0),
-            max_segment_id: AtomicU64::new(0),
-            dirty_segment_buckets: RwLock::new(BTreeSet::new()),
+            max_document_id: AtomicU64::new(0),
+            dirty_document_buckets: RwLock::new(BTreeSet::new()),
             avg_seg_tokens: RwLock::new(0.0),
             search_count: AtomicU64::new(0),
             last_saved_version: AtomicU64::new(0),
         }
     }
 
-    /// Loads an index from metadata reader and closure for loading segments and postings.
+    /// Loads an index from metadata reader and closure for loading documents and postings.
     ///
     /// # Arguments
     ///
     /// * `tokenizer` - Tokenizer to use for processing text
     /// * `metadata` - Metadata reader
-    /// * `f1` - Closure for loading segments
+    /// * `f1` - Closure for loading documents
     /// * `f2` - Closure for loading postings
     ///
     /// # Returns
@@ -233,7 +234,7 @@ where
     pub async fn load_all<R: Read, F1, F2>(
         tokenizer: T,
         metadata: R,
-        segments_fn: F1,
+        documents_fn: F1,
         postings_fn: F2,
     ) -> Result<Self, BM25Error>
     where
@@ -241,7 +242,7 @@ where
         F2: AsyncFnMut(u32) -> Result<Option<Vec<u8>>, BoxError>,
     {
         let mut index = Self::load_metadata(tokenizer, metadata)?;
-        index.load_segments(segments_fn).await?;
+        index.load_documents(documents_fn).await?;
         index.load_postings(postings_fn).await?;
         Ok(index)
     }
@@ -265,7 +266,7 @@ where
             })?;
         let bucket_overload_size = index.metadata.config.bucket_overload_size;
         let max_bucket_id = AtomicU32::new(index.metadata.stats.max_bucket_id);
-        let max_segment_id = AtomicU64::new(index.metadata.stats.max_segment_id);
+        let max_document_id = AtomicU64::new(index.metadata.stats.max_document_id);
         let search_count = AtomicU64::new(index.metadata.stats.search_count);
         let avg_seg_tokens = RwLock::new(index.metadata.stats.avg_seg_tokens);
         let last_saved_version = AtomicU64::new(index.metadata.stats.version);
@@ -276,49 +277,49 @@ where
             config: index.metadata.config.clone(),
             seg_tokens: index.seg_tokens,
             postings: index.postings,
-            buckets: DashMap::from_iter(vec![(0, (0, true, Vec::new()))]),
+            buckets: DashMap::from_iter(vec![(0, (0, true, UniqueVec::new()))]),
             metadata: RwLock::new(index.metadata),
-            dirty_segment_buckets: RwLock::new(BTreeSet::new()),
+            dirty_document_buckets: RwLock::new(BTreeSet::new()),
             bucket_overload_size,
             max_bucket_id,
-            max_segment_id,
+            max_document_id,
             avg_seg_tokens,
             search_count,
             last_saved_version,
         })
     }
 
-    /// Loads segments from buckets using the provided async function
-    /// This function should be called during database startup to load all segment data
-    /// and form a complete segment index
+    /// Loads documents from buckets using the provided async function
+    /// This function should be called during database startup to load all document data
+    /// and form a complete document index
     ///
     /// # Arguments
     ///
     /// * `f` - Async function that reads posting data from a specified bucket.
     ///   `F: AsyncFn(u64) -> Result<Vec<u8>, BTreeError>`
     ///   The function should take a bucket ID as input and return a vector of bytes
-    ///   containing the serialized segment data.
+    ///   containing the serialized document data.
     ///
     /// # Returns
     ///
     /// * `Result<(), BTreeError>` - Success or error
-    pub async fn load_segments<F>(&mut self, mut f: F) -> Result<(), BM25Error>
+    pub async fn load_documents<F>(&mut self, mut f: F) -> Result<(), BM25Error>
     where
         F: AsyncFnMut(u32) -> Result<Option<Vec<u8>>, BoxError>,
     {
-        for i in 0..=self.max_segment_id.load(Ordering::Relaxed) / SEGMENTS_BUCKET_SIZE {
+        for i in 0..=self.max_document_id.load(Ordering::Relaxed) / SEGMENTS_BUCKET_SIZE {
             let data = f(i as u32).await.map_err(|err| BM25Error::Generic {
                 name: self.name.clone(),
                 source: err,
             })?;
             if let Some(data) = data {
-                let segments: HashMap<u64, usize> =
+                let documents: HashMap<u64, usize> =
                     ciborium::from_reader(&data[..]).map_err(|err| BM25Error::Serialization {
                         name: self.name.clone(),
                         source: err.into(),
                     })?;
 
-                self.seg_tokens.extend(segments);
+                self.seg_tokens.extend(documents);
             }
         }
 
@@ -357,7 +358,8 @@ where
                 let bks = postings.keys().cloned().collect::<Vec<_>>();
                 // Update bucket information
                 // Larger buckets have the most recent state and can override smaller buckets
-                self.buckets.insert(i, (data.len() as u32, false, bks));
+                self.buckets
+                    .insert(i, (data.len() as u32, false, bks.into()));
                 self.postings.extend(postings);
             }
         }
@@ -365,7 +367,7 @@ where
         Ok(())
     }
 
-    /// Returns the number of segments in the index
+    /// Returns the number of documents in the index
     pub fn len(&self) -> usize {
         self.seg_tokens.len()
     }
@@ -386,7 +388,7 @@ where
         metadata.stats.search_count = self.search_count.load(Ordering::Relaxed);
         metadata.stats.num_elements = self.seg_tokens.len() as u64;
         metadata.stats.max_bucket_id = self.max_bucket_id.load(Ordering::Relaxed);
-        metadata.stats.max_segment_id = self.max_segment_id.load(Ordering::Relaxed);
+        metadata.stats.max_document_id = self.max_document_id.load(Ordering::Relaxed);
         metadata.stats.avg_seg_tokens = *self.avg_seg_tokens.read();
         metadata
     }
@@ -401,22 +403,22 @@ where
         stats.search_count = self.search_count.load(Ordering::Relaxed);
         stats.num_elements = self.seg_tokens.len() as u64;
         stats.max_bucket_id = self.max_bucket_id.load(Ordering::Relaxed);
-        stats.max_segment_id = self.max_segment_id.load(Ordering::Relaxed);
+        stats.max_document_id = self.max_document_id.load(Ordering::Relaxed);
         stats.avg_seg_tokens = *self.avg_seg_tokens.read();
         stats
     }
 
-    /// Inserts a segment to the index
+    /// Inserts a document to the index
     ///
     /// # Arguments
     ///
-    /// * `id` - Unique segment identifier
+    /// * `id` - Unique document identifier
     /// * `text` - Segment text content
     /// * `now_ms` - Current timestamp in milliseconds
     ///
     /// # Returns
     ///
-    /// * `Ok(())` if the segment was successfully added
+    /// * `Ok(())` if the document was successfully added
     /// * `Err(BM25Error)` if failed
     pub fn insert(&self, id: u64, text: &str, now_ms: u64) -> Result<(), BM25Error> {
         if self.seg_tokens.contains_key(&id) {
@@ -426,7 +428,7 @@ where
             });
         }
 
-        // Tokenize the segment
+        // Tokenize the document
         let token_freqs = {
             let mut tokenizer = self.tokenizer.clone();
             collect_tokens(&mut tokenizer, text, None)
@@ -441,7 +443,10 @@ where
             });
         }
 
-        let _ = self.max_segment_id.fetch_max(id, Ordering::Relaxed).max(id);
+        let _ = self
+            .max_document_id
+            .fetch_max(id, Ordering::Relaxed)
+            .max(id);
 
         // Phase 1: Update the postings collection
         let bucket = self.max_bucket_id.load(Ordering::Acquire);
@@ -473,7 +478,7 @@ where
                         }
                         dashmap::Entry::Vacant(entry) => {
                             // Create new posting
-                            let val = (bucket, vec![(id, freq)]);
+                            let val = (bucket, vec![(id, freq)].into());
                             let size_increase = CountingWriter::count_cbor(&val) + 2;
                             entry.insert(val);
                             let b = buckets_to_update.entry(bucket).or_default();
@@ -482,10 +487,10 @@ where
                     };
                 }
 
-                // Calculate new average segment length
+                // Calculate new average document length
                 let avg_seg_tokens = (total_tokens + tokens) as f32 / (docs + 1) as f32;
                 *self.avg_seg_tokens.write() = avg_seg_tokens;
-                self.dirty_segment_buckets
+                self.dirty_document_buckets
                     .write()
                     .insert((id / SEGMENTS_BUCKET_SIZE) as u32);
 
@@ -508,9 +513,7 @@ where
                 if bucket.2.is_empty() || bucket.0 + size < self.bucket_overload_size {
                     bucket.0 += size;
                     // Add field value to bucket if not already present
-                    if !bucket.2.contains(&token) {
-                        bucket.2.push(token);
-                    }
+                    bucket.2.push(token);
                 } else {
                     tokens_to_migrate.push((id, token, size));
                 }
@@ -524,7 +527,7 @@ where
             {
                 self.buckets
                     .entry(next_bucket_id)
-                    .or_insert_with(|| (0, true, Vec::new()));
+                    .or_insert_with(|| (0, true, UniqueVec::new()));
                 // release the lock on the entry
             }
 
@@ -534,10 +537,9 @@ where
                 }
 
                 if let Some(mut ob) = self.buckets.get_mut(&old_bucket_id) {
-                    if let Some(pos) = ob.2.iter().position(|k| &token == k) {
+                    if ob.2.swap_remove_if(|k| &token == k).is_some() {
                         ob.0 = ob.0.saturating_sub(size);
                         // ob.1 = true; // do not need to set dirty
-                        ob.2.swap_remove(pos);
                     }
                 }
 
@@ -546,9 +548,7 @@ where
                     if nb.2.is_empty() || nb.0 + size < self.bucket_overload_size {
                         // Bucket has enough space, update directly
                         nb.0 += size;
-                        if !nb.2.contains(&token) {
-                            nb.2.push(token.clone());
-                        }
+                        nb.2.push(token.clone());
                     } else {
                         // Bucket doesn't have enough space, need to migrate to the next bucket
                         new_bucket = true;
@@ -565,15 +565,13 @@ where
                     match self.buckets.entry(next_bucket_id) {
                         dashmap::Entry::Vacant(entry) => {
                             // Create a new bucket with the initial size
-                            entry.insert((size, true, vec![token]));
+                            entry.insert((size, true, vec![token].into()));
                         }
                         dashmap::Entry::Occupied(mut entry) => {
                             let bucket_entry = entry.get_mut();
                             bucket_entry.0 += size;
                             bucket_entry.1 = true; // Mark as dirty
-                            if !bucket_entry.2.contains(&token) {
-                                bucket_entry.2.push(token);
-                            }
+                            bucket_entry.2.push(token);
                         }
                     }
                 }
@@ -583,25 +581,25 @@ where
         Ok(())
     }
 
-    /// Removes a segment from the index
+    /// Removes a document from the index
     ///
     /// # Arguments
     ///
     /// * `id` - Segment identifier to remove
-    /// * `text` - Original segment text (needed to identify tokens to remove)
+    /// * `text` - Original document text (needed to identify tokens to remove)
     /// * `now_ms` - Current timestamp in milliseconds
     ///
     /// # Returns
     ///
-    /// * `true` if the segment was found and removed
-    /// * `false` if the segment was not found
+    /// * `true` if the document was found and removed
+    /// * `false` if the document was not found
     pub fn remove(&self, id: u64, text: &str, now_ms: u64) -> bool {
         if self.seg_tokens.remove(&id).is_none() {
             // Segment not found
             return false;
         }
 
-        // Tokenize the segment
+        // Tokenize the document
         let token_freqs = {
             let mut tokenizer = self.tokenizer.clone();
             collect_tokens(&mut tokenizer, text, None)
@@ -613,9 +611,8 @@ where
         let mut tokens_to_remove = Vec::new();
         for (token, _) in token_freqs {
             if let Some(mut posting) = self.postings.get_mut(&token) {
-                // Remove segment from postings list
-                if let Some(pos) = posting.1.iter().position(|&(idx, _)| idx == id) {
-                    let val = posting.1.swap_remove(pos);
+                // Remove document from postings list
+                if let Some(val) = posting.1.swap_remove_if(|&(idx, _)| idx == id) {
                     let mut size_decrease = CountingWriter::count_cbor(&val) + 2;
                     if posting.1.is_empty() {
                         size_decrease += CountingWriter::count_cbor(&token) + 2;
@@ -634,9 +631,7 @@ where
                 for (token, size_decrease) in val {
                     b.0 = b.0.saturating_sub(size_decrease);
                     if tokens_to_remove.contains(&token) {
-                        if let Some(pos) = b.2.iter().position(|k| &token == k) {
-                            b.2.swap_remove(pos);
-                        }
+                        b.2.swap_remove_if(|k| &token == k);
                     }
                 }
             }
@@ -646,7 +641,7 @@ where
             self.postings.remove(&token);
         }
 
-        // Recalculate average segment length
+        // Recalculate average document length
         let total_tokens: usize = self.seg_tokens.iter().map(|r| *r.value()).sum();
         let avg_seg_tokens = if self.seg_tokens.is_empty() {
             0.0
@@ -654,7 +649,7 @@ where
             total_tokens as f32 / self.seg_tokens.len() as f32
         };
         *self.avg_seg_tokens.write() = avg_seg_tokens;
-        self.dirty_segment_buckets
+        self.dirty_document_buckets
             .write()
             .insert((id / SEGMENTS_BUCKET_SIZE) as u32);
 
@@ -667,7 +662,7 @@ where
         true
     }
 
-    /// Searches the index for segments matching the query
+    /// Searches the index for documents matching the query
     ///
     /// # Arguments
     ///
@@ -676,7 +671,7 @@ where
     ///
     /// # Returns
     ///
-    /// A vector of (segment_id, score) pairs, sorted by descending score
+    /// A vector of (document_id, score) pairs, sorted by descending score
     pub fn search(&self, query: &str, top_k: usize, params: Option<BM25Params>) -> Vec<(u64, f32)> {
         let params = params.as_ref().unwrap_or(&self.config.bm25);
         let scored_docs = self.score_term(query.trim(), params);
@@ -689,7 +684,7 @@ where
         sorted_scores
     }
 
-    /// Searches the index for segments matching the query expression
+    /// Searches the index for documents matching the query expression
     ///
     /// # Arguments
     ///
@@ -699,7 +694,7 @@ where
     ///
     /// # Returns
     ///
-    /// A vector of (segment_id, score) pairs, sorted by descending score
+    /// A vector of (document_id, score) pairs, sorted by descending score
     pub fn search_advanced(
         &self,
         query: &str,
@@ -719,7 +714,7 @@ where
         results
     }
 
-    /// Execute a query expression, returning a mapping of segment IDs to scores
+    /// Execute a query expression, returning a mapping of document IDs to scores
     fn execute_query(&self, query: &QueryType, params: &BM25Params) -> HashMap<u64, f32> {
         match query {
             QueryType::Term(term) => self.score_term(term, params),
@@ -751,7 +746,7 @@ where
                     let df = postings.1.len() as f32;
                     let idf = ((seg_tokens - df + 0.5) / (df + 0.5) + 1.0).ln();
 
-                    // compute BM25 score for each segment
+                    // compute BM25 score for each document
                     let mut term_scores = HashMap::new();
                     for (doc_id, tf) in postings.1.iter() {
                         let tokens = self
@@ -772,7 +767,7 @@ where
             })
             .collect();
 
-        // merge term scores into a single score for each segment
+        // merge term scores into a single score for each document
         for term_score in term_scores {
             for (doc_id, score) in term_score {
                 *scores.entry(doc_id).or_default() += score;
@@ -824,7 +819,7 @@ where
                 continue;
             }
 
-            // Retain only segments that are in both results
+            // Retain only documents that are in both results
             result.retain(|k, _| sub_result.contains_key(k));
             if result.is_empty() {
                 return HashMap::new();
@@ -849,7 +844,7 @@ where
         &self,
         metadata: W,
         now_ms: u64,
-        segments_fn: F1,
+        documents_fn: F1,
         postings_fn: F2,
     ) -> Result<bool, BM25Error>
     where
@@ -860,7 +855,7 @@ where
             return Ok(false);
         }
 
-        self.store_dirty_segments(segments_fn).await?;
+        self.store_dirty_documents(documents_fn).await?;
         self.store_dirty_postings(postings_fn).await?;
         Ok(true)
     }
@@ -907,51 +902,51 @@ where
         Ok(true)
     }
 
-    /// Stores dirty segments to persistent storage using the provided async function
-    pub async fn store_dirty_segments<F>(&self, mut f: F) -> Result<(), BM25Error>
+    /// Stores dirty documents to persistent storage using the provided async function
+    pub async fn store_dirty_documents<F>(&self, mut f: F) -> Result<(), BM25Error>
     where
         F: AsyncFnMut(u32, &[u8]) -> Result<bool, BoxError>,
     {
-        let mut dirty_segment_buckets = BTreeSet::new();
+        let mut dirty_document_buckets = BTreeSet::new();
         {
             // move the dirty nodes into a temporary variable
             // and release the lock
-            dirty_segment_buckets.append(&mut self.dirty_segment_buckets.write());
+            dirty_document_buckets.append(&mut self.dirty_document_buckets.write());
         }
 
         let mut buf = Vec::with_capacity(1024 * 256);
-        while let Some(bucket) = dirty_segment_buckets.pop_first() {
-            let mut segments = HashMap::new();
+        while let Some(bucket) = dirty_document_buckets.pop_first() {
+            let mut documents = HashMap::new();
             for id in
                 (bucket as u64 * SEGMENTS_BUCKET_SIZE)..((bucket as u64 + 1) * SEGMENTS_BUCKET_SIZE)
             {
                 if let Some(val) = self.seg_tokens.get(&id) {
-                    segments.insert(id, *val);
+                    documents.insert(id, *val);
                 }
             }
 
-            if segments.is_empty() {
+            if documents.is_empty() {
                 continue;
             }
 
             buf.clear();
-            ciborium::into_writer(&segments, &mut buf).expect("Failed to serialize node");
+            ciborium::into_writer(&documents, &mut buf).expect("Failed to serialize node");
             match f(bucket, &buf).await {
                 Ok(true) => {
                     // continue
                 }
                 Ok(false) => {
                     // stop and refund the unprocessed dirty nodes
-                    self.dirty_segment_buckets
+                    self.dirty_document_buckets
                         .write()
-                        .append(&mut dirty_segment_buckets);
+                        .append(&mut dirty_document_buckets);
                     return Ok(());
                 }
                 Err(err) => {
                     // refund the unprocessed dirty nodes
-                    self.dirty_segment_buckets
+                    self.dirty_document_buckets
                         .write()
-                        .append(&mut dirty_segment_buckets);
+                        .append(&mut dirty_document_buckets);
                     return Err(BM25Error::Generic {
                         name: self.name.clone(),
                         source: err,
@@ -1032,50 +1027,6 @@ where
     }
 }
 
-/// Utility for counting the size of serialized CBOR data
-pub struct CountingWriter {
-    count: usize,
-}
-
-impl Default for CountingWriter {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl CountingWriter {
-    pub fn new() -> Self {
-        CountingWriter { count: 0 }
-    }
-
-    pub fn size(&self) -> usize {
-        self.count
-    }
-
-    // TODO: refactor this function to use a more efficient way to count the size
-    pub fn count_cbor(val: &impl Serialize) -> usize {
-        let mut writer = CountingWriter::new();
-        let _ = ciborium::into_writer(val, &mut writer);
-        writer.count
-    }
-}
-
-impl std::io::Write for CountingWriter {
-    /// Implements the write method for the Write trait
-    /// This simply counts the bytes without actually writing them
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let len = buf.len();
-        self.count += len;
-        Ok(len)
-    }
-
-    /// Implements the flush method for the Write trait
-    /// This is a no-op since we're not actually writing data
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1106,7 +1057,7 @@ mod tests {
 
         // 测试添加新文档
         index
-            .insert(5, "A new segment about cats and dogs", 0)
+            .insert(5, "A new document about cats and dogs", 0)
             .unwrap();
         assert_eq!(index.len(), 5);
 
@@ -1136,7 +1087,7 @@ mod tests {
         assert_eq!(index.len(), 3);
 
         // 测试移除不存在的文档
-        let removed = index.remove(99, "This segment doesn't exist", 0);
+        let removed = index.remove(99, "This document doesn't exist", 0);
         assert!(!removed);
         assert_eq!(index.len(), 3);
     }
@@ -1190,7 +1141,7 @@ mod tests {
 
         // 创建临时文件
         let mut metadata: Vec<u8> = Vec::new();
-        let mut segments: HashMap<u32, Vec<u8>> = HashMap::new();
+        let mut documents: HashMap<u32, Vec<u8>> = HashMap::new();
         let mut postings: HashMap<u32, Vec<u8>> = HashMap::new();
 
         // 保存索引
@@ -1199,7 +1150,7 @@ mod tests {
                 &mut metadata,
                 0,
                 async |id: u32, data: &[u8]| {
-                    segments.insert(id, data.to_vec());
+                    documents.insert(id, data.to_vec());
                     Ok(true)
                 },
                 async |id: u32, data: &[u8]| {
@@ -1215,7 +1166,7 @@ mod tests {
         let loaded_index = BM25Index::load_all(
             tokenizer,
             &metadata[..],
-            async |id| Ok(segments.get(&id).cloned()),
+            async |id| Ok(documents.get(&id).cloned()),
             async |id| Ok(postings.get(&id).cloned()),
         )
         .await

@@ -14,6 +14,7 @@ use anda_db::{
 };
 use anda_db_schema::Fv;
 use anda_db_tfs::jieba_tokenizer;
+use anda_db_utils::UniqueVec;
 use anda_kip::*;
 use async_trait::async_trait;
 use futures::try_join as try_join_await;
@@ -435,7 +436,7 @@ impl CognitiveNexus {
 
         if let TargetEntities::IDs(ids) = result {
             if let Some(var) = clause.variable {
-                ctx.entities.insert(var, ids);
+                ctx.entities.insert(var, ids.into());
             }
         }
 
@@ -447,7 +448,11 @@ impl CognitiveNexus {
         ctx: &mut QueryContext,
         clause: FilterClause,
     ) -> Result<(), KipError> {
-        let mut entities = ctx.entities.clone();
+        let mut entities: HashMap<String, Vec<EntityID>> = ctx
+            .entities
+            .iter()
+            .map(|(var, ids)| (var.clone(), ids.to_vec()))
+            .collect();
 
         loop {
             let mut bindings_snapshot = entities.clone();
@@ -518,7 +523,7 @@ impl CognitiveNexus {
         // 合并 OPTIONAL 子句
         for (var, ids) in optional_context.entities {
             if let Some(existing) = ctx.entities.get_mut(&var) {
-                extend_ne(existing, ids);
+                existing.extend(ids.to_vec());
             } else {
                 ctx.entities.insert(var, ids);
             }
@@ -544,7 +549,7 @@ impl CognitiveNexus {
         // 合并 UNION 子句
         for (var, ids) in union_context.entities {
             if let Some(existing) = ctx.entities.get_mut(&var) {
-                extend_ne(existing, ids);
+                existing.extend(ids.to_vec());
             } else {
                 ctx.entities.insert(var, ids);
             }
@@ -562,7 +567,11 @@ impl CognitiveNexus {
         limit: Option<usize>,
     ) -> Result<(Vec<Json>, Option<String>), KipError> {
         let mut result: Vec<Json> = Vec::with_capacity(clause.expressions.len());
-        let bindings = ctx.entities.clone();
+        let bindings: HashMap<String, Vec<EntityID>> = ctx
+            .entities
+            .iter()
+            .map(|(var, ids)| (var.clone(), ids.to_vec()))
+            .collect();
 
         let order_by = order_by.unwrap_or_default();
         let limit = limit.unwrap_or(0);
@@ -908,7 +917,7 @@ impl CognitiveNexus {
         max: Option<u16>,
         objects: TargetEntities,
     ) -> Result<PropositionsMatchResult, KipError> {
-        let mut result = PropositionsMatchResult::new();
+        let mut result = PropositionsMatchResult::default();
 
         if matches!(&subjects, TargetEntities::IDs(_)) {
             let start_nodes = match subjects {
@@ -932,10 +941,12 @@ impl CognitiveNexus {
                     .await?;
 
                 for path in paths {
-                    push_ne(&mut result.matched_subjects, path.start);
-                    push_ne(&mut result.matched_objects, path.end);
-                    push_ne(&mut result.matched_predicates, predicate.clone());
-                    extend_ne(&mut result.matched_propositions, path.propositions);
+                    result.matched_subjects.push(path.start);
+                    result.matched_objects.push(path.end);
+                    result.matched_predicates.push(predicate.clone());
+                    result
+                        .matched_propositions
+                        .extend(path.propositions.into_vec());
                 }
             }
         } else {
@@ -964,10 +975,12 @@ impl CognitiveNexus {
                     .await?;
 
                 for path in paths {
-                    push_ne(&mut result.matched_subjects, path.end);
-                    push_ne(&mut result.matched_objects, path.start);
-                    push_ne(&mut result.matched_predicates, predicate.clone());
-                    extend_ne(&mut result.matched_propositions, path.propositions);
+                    result.matched_subjects.push(path.end);
+                    result.matched_objects.push(path.start);
+                    result.matched_predicates.push(predicate.clone());
+                    result
+                        .matched_propositions
+                        .extend(path.propositions.into_vec());
                 }
             }
         }
@@ -983,7 +996,7 @@ impl CognitiveNexus {
         object_ids: Vec<EntityID>,
         predicate: PredTerm,
     ) -> Result<PropositionsMatchResult, KipError> {
-        let mut result = PropositionsMatchResult::new();
+        let mut result = PropositionsMatchResult::default();
 
         for subject_id in &subject_ids {
             for object_id in &object_ids {
@@ -1027,7 +1040,7 @@ impl CognitiveNexus {
         predicate: PredTerm,
         any_propositions: bool,
     ) -> Result<PropositionsMatchResult, KipError> {
-        let mut result = PropositionsMatchResult::new();
+        let mut result = PropositionsMatchResult::default();
 
         for subject_id in &subject_ids {
             let ids = self
@@ -1068,7 +1081,7 @@ impl CognitiveNexus {
         predicate: PredTerm,
         any_propositions: bool,
     ) -> Result<PropositionsMatchResult, KipError> {
-        let mut result = PropositionsMatchResult::new();
+        let mut result = PropositionsMatchResult::default();
 
         for object_id in &object_ids {
             let ids = self
@@ -1107,7 +1120,7 @@ impl CognitiveNexus {
         ctx: &QueryContext,
         predicate: PredTerm,
     ) -> Result<PropositionsMatchResult, KipError> {
-        let mut result = PropositionsMatchResult::new();
+        let mut result = PropositionsMatchResult::default();
         let predicates = match &predicate {
             PredTerm::Literal(pred) => vec![pred.clone()],
             PredTerm::Alternative(preds) => preds.clone(),
@@ -1171,7 +1184,7 @@ impl CognitiveNexus {
         queue.push_back(GraphPath {
             start: start.clone(),
             end: start.clone(),
-            propositions: Vec::new(),
+            propositions: UniqueVec::new(),
             hops: 0,
         });
 
@@ -1520,11 +1533,11 @@ impl CognitiveNexus {
         })?;
         let mut updated_concepts: u64 = 0;
         let mut updated_propositions: u64 = 0;
-        for entity_id in target_entities {
+        for entity_id in target_entities.as_ref() {
             match entity_id {
                 EntityID::Concept(id) => {
                     if let Ok(mut concept) = self
-                        .try_get_concept_with(&ctx.cache, id, |concept| Ok(concept.clone()))
+                        .try_get_concept_with(&ctx.cache, *id, |concept| Ok(concept.clone()))
                         .await
                     {
                         let length = concept.attributes.len();
@@ -1535,7 +1548,7 @@ impl CognitiveNexus {
                             && self
                                 .concepts
                                 .update(
-                                    id,
+                                    *id,
                                     BTreeMap::from([(
                                         "attributes".to_string(),
                                         concept.attributes.into(),
@@ -1550,10 +1563,10 @@ impl CognitiveNexus {
                 }
                 EntityID::Proposition(id, predicate) => {
                     if let Ok(mut proposition) = self
-                        .try_get_proposition_with(&ctx.cache, id, |prop| Ok(prop.clone()))
+                        .try_get_proposition_with(&ctx.cache, *id, |prop| Ok(prop.clone()))
                         .await
                     {
-                        if let Some(prop) = proposition.properties.get_mut(&predicate) {
+                        if let Some(prop) = proposition.properties.get_mut(predicate) {
                             let length = prop.attributes.len();
                             for attr in &attributes {
                                 prop.attributes.remove(attr);
@@ -1563,7 +1576,7 @@ impl CognitiveNexus {
                                 && self
                                     .propositions
                                     .update(
-                                        id,
+                                        *id,
                                         BTreeMap::from([(
                                             "properties".to_string(),
                                             proposition.properties.into(),
@@ -1610,11 +1623,11 @@ impl CognitiveNexus {
         })?;
         let mut updated_concepts: u64 = 0;
         let mut updated_propositions: u64 = 0;
-        for entity_id in target_entities {
+        for entity_id in target_entities.as_ref() {
             match entity_id {
                 EntityID::Concept(id) => {
                     if let Ok(mut concept) = self
-                        .try_get_concept_with(&ctx.cache, id, |concept| Ok(concept.clone()))
+                        .try_get_concept_with(&ctx.cache, *id, |concept| Ok(concept.clone()))
                         .await
                     {
                         let length = concept.metadata.len();
@@ -1625,7 +1638,7 @@ impl CognitiveNexus {
                             && self
                                 .concepts
                                 .update(
-                                    id,
+                                    *id,
                                     BTreeMap::from([(
                                         "metadata".to_string(),
                                         concept.metadata.into(),
@@ -1640,10 +1653,10 @@ impl CognitiveNexus {
                 }
                 EntityID::Proposition(id, predicate) => {
                     if let Ok(mut proposition) = self
-                        .try_get_proposition_with(&ctx.cache, id, |prop| Ok(prop.clone()))
+                        .try_get_proposition_with(&ctx.cache, *id, |prop| Ok(prop.clone()))
                         .await
                     {
-                        if let Some(prop) = proposition.properties.get_mut(&predicate) {
+                        if let Some(prop) = proposition.properties.get_mut(predicate) {
                             let length = prop.metadata.len();
                             for name in &keys {
                                 prop.metadata.remove(name);
@@ -1653,7 +1666,7 @@ impl CognitiveNexus {
                                 && self
                                     .propositions
                                     .update(
-                                        id,
+                                        *id,
                                         BTreeMap::from([(
                                             "properties".to_string(),
                                             proposition.properties.into(),
@@ -1698,29 +1711,29 @@ impl CognitiveNexus {
         })?;
 
         let mut deleted_propositions: u64 = 0;
-        for entity_id in target_entities {
+        for entity_id in target_entities.as_ref() {
             match entity_id {
                 EntityID::Concept(_) => {
                     // ignore
                 }
                 EntityID::Proposition(id, predicate) => {
                     if let Ok(mut proposition) = self
-                        .try_get_proposition_with(&ctx.cache, id, |prop| Ok(prop.clone()))
+                        .try_get_proposition_with(&ctx.cache, *id, |prop| Ok(prop.clone()))
                         .await
                     {
                         // Remove specified predicates
-                        proposition.predicates.remove(&predicate);
-                        proposition.properties.remove(&predicate);
+                        proposition.predicates.remove(predicate);
+                        proposition.properties.remove(predicate);
 
                         // If no predicates left, delete the proposition
                         if proposition.predicates.is_empty() {
-                            let _ = self.propositions.remove(id).await;
+                            let _ = self.propositions.remove(*id).await;
                         } else {
                             // Otherwise, update the proposition with remaining predicates
                             if self
                                 .propositions
                                 .update(
-                                    id,
+                                    *id,
                                     BTreeMap::from([
                                         ("predicates".to_string(), proposition.predicates.into()),
                                         ("properties".to_string(), proposition.properties.into()),
@@ -1764,7 +1777,7 @@ impl CognitiveNexus {
         })?;
         let mut deleted_propositions: u64 = 0;
         let mut deleted_concepts: u64 = 0;
-        for entity_id in target_entities {
+        for entity_id in target_entities.as_ref() {
             match &entity_id {
                 EntityID::Concept(id) => {
                     let mut propositions_ids: BTreeSet<u64> = BTreeSet::new();
@@ -2215,7 +2228,7 @@ impl CognitiveNexus {
             ctx.entities.insert(var, result.matched_objects);
         }
 
-        Ok(TargetEntities::IDs(result.matched_propositions))
+        Ok(TargetEntities::IDs(result.matched_propositions.into()))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2318,7 +2331,7 @@ impl CognitiveNexus {
         match target {
             TargetTerm::Variable(var) => {
                 if let Some(ids) = ctx.entities.get(&var) {
-                    Ok(TargetEntities::IDs(ids.clone()))
+                    Ok(TargetEntities::IDs(ids.clone().into()))
                 } else {
                     Ok(TargetEntities::Any)
                 }

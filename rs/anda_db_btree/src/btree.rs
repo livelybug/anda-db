@@ -11,6 +11,7 @@
 //! - Bucket-based storage for better incremental persistent
 //! - Efficient serialization and deserialization in CBOR format
 
+use anda_db_utils::{CountingWriter, UniqueVec};
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -44,7 +45,7 @@ where
     /// - bucket_size: Current size of the bucket in bytes
     /// - is_dirty: Indicates if the bucket has new data that needs to be persisted
     /// - field_values: List of field values stored in this bucket
-    buckets: DashMap<u32, (u32, bool, Vec<FV>)>,
+    buckets: DashMap<u32, (u32, bool, UniqueVec<FV>)>,
 
     /// Inverted index mapping field values to posting values
     postings: DashMap<FV, PostingValue<PK>>,
@@ -74,7 +75,7 @@ where
 /// - bucket_id: The bucket where this posting is stored
 /// - update_version: Version number that increases with each update
 /// - document_ids: List of document IDs associated with this field value
-type PostingValue<PK> = (u32, u64, Vec<PK>);
+type PostingValue<PK> = (u32, u64, UniqueVec<PK>);
 
 /// Configuration parameters for the B-tree index
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -166,7 +167,7 @@ struct BTreeIndexOwnedHelper {
 #[derive(Serialize)]
 struct BTreeIndexRef<'a, PK, FV>
 where
-    PK: Ord + Debug + Clone + Serialize,
+    PK: Ord + Eq + Hash + Debug + Clone + Serialize,
     FV: Eq + Hash + Debug + Clone + Serialize,
 {
     postings: &'a DashMap<FV, PostingValue<PK>>,
@@ -258,8 +259,8 @@ impl<FV> RangeQuery<FV> {
 
 impl<PK, FV> BTreeIndex<PK, FV>
 where
-    PK: Ord + Debug + Clone + Serialize + DeserializeOwned,
-    FV: Eq + Ord + Hash + Debug + Clone + Serialize + DeserializeOwned,
+    PK: Ord + Eq + Hash + Debug + Clone + Serialize + DeserializeOwned,
+    FV: Ord + Eq + Hash + Debug + Clone + Serialize + DeserializeOwned,
 {
     /// Creates a new empty B-tree index with the given configuration
     ///
@@ -282,7 +283,7 @@ where
             name: name.clone(),
             config: config.clone(),
             postings: DashMap::new(),
-            buckets: DashMap::from_iter(vec![(0, (0, true, Vec::new()))]),
+            buckets: DashMap::from_iter(vec![(0, (0, true, UniqueVec::default()))]),
             btree: RwLock::new(BTreeSet::new()),
             metadata: RwLock::new(BTreeMetadata {
                 name,
@@ -343,7 +344,7 @@ where
             name: index.metadata.name.clone(),
             config: index.metadata.config.clone(),
             postings: DashMap::with_capacity(index.metadata.stats.num_elements as usize),
-            buckets: DashMap::from_iter(vec![(0, (0, true, Vec::new()))]),
+            buckets: DashMap::from_iter(vec![(0, (0, true, UniqueVec::default()))]),
             btree: RwLock::new(BTreeSet::new()),
             metadata: RwLock::new(index.metadata),
             bucket_overload_size,
@@ -386,7 +387,8 @@ where
                 self.btree.write().extend(bks.iter().cloned());
                 // Update bucket information
                 // Larger buckets have the most recent state and can override smaller buckets
-                self.buckets.insert(i, (data.len() as u32, false, bks));
+                self.buckets
+                    .insert(i, (data.len() as u32, false, bks.into()));
                 self.postings.extend(postings);
             }
         }
@@ -463,16 +465,15 @@ where
                 }
 
                 let posting = entry.get_mut();
-                // Add segment_id if it doesn't exist
-                if !posting.2.contains(&doc_id) {
+                // Add doc_id if it doesn't exist
+                if posting.2.push(doc_id.clone()) {
                     size_increase = CountingWriter::count_cbor(&doc_id) as u32 + 2;
-                    posting.2.push(doc_id);
                     posting.1 += 1; // increment version
                 }
             }
             dashmap::Entry::Vacant(entry) => {
                 // Create a new posting for this field value
-                let posting = (bucket, 1, vec![doc_id]);
+                let posting = (bucket, 1, vec![doc_id].into());
                 size_increase = CountingWriter::count_cbor(&posting) as u32 + 2;
                 entry.insert(posting);
                 is_new = true;
@@ -502,9 +503,7 @@ where
                 // Mark as dirty, needs to be persisted
                 b.1 = true;
                 // Add field value to bucket if not already present
-                if !b.2.contains(&field_value) {
-                    b.2.push(field_value.clone());
-                }
+                b.2.push(field_value.clone());
             } else {
                 // If the current bucket is full, create a new one
                 let mut size_decrease = 0;
@@ -518,10 +517,9 @@ where
                 }
                 // Remove the current field value from the current bucket
                 // The freed space can still accommodate small growth in other field values
-                if let Some(pos) = b.2.iter().position(|k| &field_value == k) {
+                if b.2.swap_remove_if(|k| &field_value == k).is_some() {
                     b.0 = b.0.saturating_sub(size_decrease);
                     // b.1 = true; // do not need to set dirty
-                    b.2.swap_remove(pos);
                 }
             }
         }
@@ -531,15 +529,13 @@ where
             match self.buckets.entry(new_bucket) {
                 dashmap::Entry::Vacant(entry) => {
                     // Create a new bucket with the initial size
-                    entry.insert((size_increase, true, vec![field_value]));
+                    entry.insert((size_increase, true, vec![field_value].into()));
                 }
                 dashmap::Entry::Occupied(mut entry) => {
                     let bucket_entry = entry.get_mut();
                     bucket_entry.0 += size_increase;
                     bucket_entry.1 = true; // Mark as dirty
-                    if !bucket_entry.2.contains(&field_value) {
-                        bucket_entry.2.push(field_value);
-                    }
+                    bucket_entry.2.push(field_value);
                 }
             }
         }
@@ -574,14 +570,13 @@ where
             if let Some(mut posting) = self.postings.get_mut(&field_value) {
                 removed = true;
                 bucket_id = posting.0;
-                if let Some(pos) = posting.2.iter().position(|id| id == &doc_id) {
+                if posting.2.swap_remove_if(|id| id == &doc_id).is_some() {
                     size_decrease = if posting.2.len() > 1 {
                         CountingWriter::count_cbor(&doc_id) as u32 + 2
                     } else {
                         CountingWriter::count_cbor(&posting) as u32 + 2
                     };
                     posting.1 += 1; // increment version
-                    posting.2.swap_remove(pos);
                     posting_empty = posting.2.is_empty();
                 }
             }
@@ -595,9 +590,7 @@ where
 
                 if posting_empty {
                     // remove FV from the bucket
-                    if let Some(pos) = b.2.iter().position(|k| &field_value == k) {
-                        b.2.swap_remove(pos);
-                    }
+                    b.2.swap_remove_if(|k| &field_value == k);
                 }
             }
 
@@ -670,18 +663,15 @@ where
                 dashmap::Entry::Occupied(mut entry) => {
                     let posting = entry.get_mut();
                     // Only add the doc_id if it's not already present
-                    if !posting.2.contains(&doc_id) {
+                    if posting.2.push(doc_id.clone()) {
                         // Calculate size increase for this insertion
                         size_increase = CountingWriter::count_cbor(&doc_id) as u32 + 2;
-
-                        // Add doc_id to the posting
-                        posting.2.push(doc_id.clone());
                         posting.1 += 1; // Increment version
                     }
                 }
                 dashmap::Entry::Vacant(entry) => {
                     // Create a new posting for this field value
-                    let posting = (bucket_id, 1, vec![doc_id.clone()]);
+                    let posting = (bucket_id, 1, vec![doc_id.clone()].into());
                     size_increase = CountingWriter::count_cbor(&posting) as u32 + 2;
                     // Insert the new posting
                     entry.insert(posting);
@@ -721,9 +711,7 @@ where
 
                     // Update field values contained in the bucket
                     for fv in field_values {
-                        if !bucket_entry.2.contains(&fv) {
-                            bucket_entry.2.push(fv);
-                        }
+                        bucket_entry.2.push(fv);
                     }
                 } else {
                     // Bucket doesn't have enough space, need to migrate these values to a new bucket
@@ -749,7 +737,7 @@ where
             {
                 self.buckets
                     .entry(next_bucket_id)
-                    .or_insert_with(|| (0, true, Vec::new()));
+                    .or_insert_with(|| (0, true, UniqueVec::default()));
                 // release the lock on the entry
             }
 
@@ -759,10 +747,9 @@ where
                 }
 
                 if let Some(mut ob) = self.buckets.get_mut(&old_bucket_id) {
-                    if let Some(pos) = ob.2.iter().position(|k| &field_value == k) {
+                    if ob.2.swap_remove_if(|k| &field_value == k).is_some() {
                         ob.0 = ob.0.saturating_sub(size);
                         // ob.1 = true; // do not need to set dirty
-                        ob.2.swap_remove(pos);
                     }
                 }
 
@@ -771,9 +758,7 @@ where
                     if nb.2.is_empty() || nb.0 + size < self.bucket_overload_size {
                         // Bucket has enough space, update directly
                         nb.0 += size;
-                        if !nb.2.contains(&field_value) {
-                            nb.2.push(field_value.clone());
-                        }
+                        nb.2.push(field_value.clone());
                     } else {
                         // Bucket doesn't have enough space, need to migrate to the next bucket
                         new_bucket = true;
@@ -790,15 +775,13 @@ where
                     match self.buckets.entry(next_bucket_id) {
                         dashmap::Entry::Vacant(entry) => {
                             // Create a new bucket with the initial size
-                            entry.insert((size, true, vec![field_value]));
+                            entry.insert((size, true, vec![field_value].into()));
                         }
                         dashmap::Entry::Occupied(mut entry) => {
                             let bucket_entry = entry.get_mut();
                             bucket_entry.0 += size;
                             bucket_entry.1 = true; // Mark as dirty
-                            if !bucket_entry.2.contains(&field_value) {
-                                bucket_entry.2.push(field_value);
-                            }
+                            bucket_entry.2.push(field_value);
                         }
                     }
                 }
@@ -855,7 +838,7 @@ where
                 bucket_id = posting.0;
 
                 // Check if the document ID exists in the posting
-                if let Some(pos) = posting.2.iter().position(|id| id == &doc_id) {
+                if posting.2.swap_remove_if(|id| id == &doc_id).is_some() {
                     removed = true;
 
                     // Calculate size decrease based on whether this is the last document
@@ -867,7 +850,6 @@ where
 
                     // Remove the document ID from the posting
                     posting.1 += 1; // Increment version
-                    posting.2.swap_remove(pos);
                     posting_empty = posting.2.is_empty();
                 }
             }
@@ -914,9 +896,7 @@ where
                 // Remove field values that are completely removed
                 for fv in &values_to_remove {
                     if field_values.contains(fv) {
-                        if let Some(pos) = bucket.2.iter().position(|k| k == fv) {
-                            bucket.2.swap_remove(pos);
-                        }
+                        bucket.2.swap_remove_if(|k| k == fv);
                     }
                 }
             }
@@ -1439,50 +1419,6 @@ where
         }
 
         results
-    }
-}
-
-/// Utility for counting the size of serialized CBOR data
-pub struct CountingWriter {
-    count: usize,
-}
-
-impl Default for CountingWriter {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl CountingWriter {
-    pub fn new() -> Self {
-        CountingWriter { count: 0 }
-    }
-
-    pub fn size(&self) -> usize {
-        self.count
-    }
-
-    // TODO: refactor this function to use a more efficient way to count the size
-    pub fn count_cbor(val: &impl Serialize) -> usize {
-        let mut writer = CountingWriter::new();
-        let _ = ciborium::into_writer(val, &mut writer);
-        writer.count
-    }
-}
-
-impl std::io::Write for CountingWriter {
-    /// Implements the write method for the Write trait
-    /// This simply counts the bytes without actually writing them
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let len = buf.len();
-        self.count += len;
-        Ok(len)
-    }
-
-    /// Implements the flush method for the Write trait
-    /// This is a no-op since we're not actually writing data
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
     }
 }
 

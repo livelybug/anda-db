@@ -4,6 +4,7 @@
 //! Provides field extraction, sorting, predicate matching, and error conversion utilities.
 
 use anda_db::error::DBError;
+use anda_db_utils::Pipe;
 use anda_kip::{
     EntityType, Json, KipError, Map, OrderByCondition, OrderDirection, PredTerm,
     validate_dot_path_var,
@@ -11,65 +12,6 @@ use anda_kip::{
 use std::borrow::Cow;
 
 use crate::entity::{Concept, EntityID, Properties, Proposition};
-
-/// A trait for functional-style method chaining.
-///
-/// Allows any value to be passed through a function, enabling
-/// fluent interfaces and functional programming patterns.
-pub trait Pipe<T> {
-    /// Passes the value through a function.
-    ///
-    /// # Arguments
-    ///
-    /// * `f` - Function to apply to the value
-    ///
-    /// # Returns
-    ///
-    /// The result of applying the function to the value
-    fn pipe<F, R>(self, f: F) -> R
-    where
-        F: FnOnce(Self) -> R,
-        Self: Sized;
-}
-
-impl<T> Pipe<T> for T {
-    fn pipe<F, R>(self, f: F) -> R
-    where
-        F: FnOnce(Self) -> R,
-    {
-        f(self)
-    }
-}
-
-/// Adds an item to a vector if it doesn't already exist.
-///
-/// # Arguments
-///
-/// * `vec` - The vector to modify
-/// * `item` - The item to add
-pub fn push_ne<T>(vec: &mut Vec<T>, item: T)
-where
-    T: PartialEq,
-{
-    if !vec.contains(&item) {
-        vec.push(item);
-    }
-}
-
-/// Extends a vector with items that don't already exist.
-///
-/// # Arguments
-///
-/// * `vec` - The vector to extend
-/// * `items` - The items to add
-pub fn extend_ne<T>(vec: &mut Vec<T>, items: Vec<T>)
-where
-    T: PartialEq,
-{
-    for item in items {
-        push_ne(vec, item);
-    }
-}
 
 /// Extracts field values from a concept using a dot-notation path.
 ///

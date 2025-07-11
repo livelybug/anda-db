@@ -1,3 +1,4 @@
+use anda_db_utils::UniqueVec;
 use croaring::{Portable, Treemap};
 use futures::{future::try_join_all, try_join as try_join_await};
 use object_store::path::Path;
@@ -1434,7 +1435,6 @@ impl Collection {
         candidates: &[DocumentId],
         limit: usize,
     ) -> Result<Vec<DocumentId>, DBError> {
-        let mut seen = HashSet::new();
         let mut result = Vec::new();
         match filter {
             Filter::Field((index_name, filter)) => {
@@ -1444,23 +1444,14 @@ impl Collection {
                             name: self.name.clone(),
                             source: err,
                         })?;
-                    let ids = self.filter_by_id(filter);
-                    for id in ids {
-                        if candidates.is_empty() || candidates.contains(&id) {
-                            result.push(id);
-                            if limit > 0 && result.len() >= limit {
-                                return Ok(result);
-                            }
-                        }
-                    }
+                    Ok(self.filter_by_id(filter, candidates, limit))
                 } else if let Some(index) =
                     self.btree_indexes.iter().find(|i| i.name() == index_name)
                 {
+                    result.reserve_exact(limit);
                     let _: Vec<()> = index.range_query_with(filter, |_, ids| {
                         for id in ids {
-                            if (candidates.is_empty() || candidates.contains(id))
-                                && seen.insert(*id)
-                            {
+                            if candidates.is_empty() || candidates.contains(id) {
                                 result.push(*id);
                                 if limit > 0 && result.len() >= limit {
                                     return (false, vec![]);
@@ -1469,61 +1460,65 @@ impl Collection {
                         }
                         (true, vec![])
                     });
+                    Ok(result)
                 } else {
-                    return Err(DBError::Index {
+                    Err(DBError::Index {
                         name: self.name.clone(),
                         source: format!("BTree index {index_name:?} not found").into(),
-                    });
+                    })
                 }
             }
             Filter::Or(queries) => {
+                let mut rt: UniqueVec<u64> = UniqueVec::with_capacity(limit);
                 for query in queries {
                     let ids = self.filter_by_field(*query, candidates, limit)?;
-                    for id in ids {
-                        if seen.insert(id) {
-                            result.push(id);
-                        }
+                    rt.extend(ids);
+                    if limit > 0 && rt.len() >= limit {
+                        break;
                     }
                 }
+
+                result = rt.into();
+                if limit > 0 && result.len() > limit {
+                    result.truncate(limit);
+                }
+                Ok(result)
             }
             Filter::And(queries) => {
                 let mut iter = queries.into_iter();
                 if let Some(query) = iter.next() {
-                    let mut intersection: BTreeSet<u64> =
-                        self.filter_by_field(*query, &[], 0)?.into_iter().collect();
+                    let mut rt: UniqueVec<u64> = self.filter_by_field(*query, &[], 0)?.into();
 
                     for query in iter {
-                        let keys: BTreeSet<u64> =
-                            self.filter_by_field(*query, &[], 0)?.into_iter().collect();
-                        intersection = intersection
-                            .intersection(&keys)
-                            .cloned()
-                            .collect::<BTreeSet<_>>();
-                        if intersection.is_empty() {
+                        let keys: UniqueVec<u64> = self.filter_by_field(*query, &[], 0)?.into();
+                        rt.intersect_with(&keys);
+                        if rt.is_empty() {
                             return Ok(vec![]);
                         }
                     }
 
-                    result.extend(intersection);
+                    result = rt.into();
+                    if limit > 0 && result.len() > limit {
+                        result.truncate(limit);
+                    }
                 }
+                Ok(result)
             }
             Filter::Not(query) => {
-                let exclude: Vec<u64> = self.filter_by_field(*query, &[], 0)?;
+                result.reserve_exact(limit);
+                let exclude: HashSet<u64> =
+                    self.filter_by_field(*query, &[], 0)?.into_iter().collect();
                 for id in self.doc_ids_index.read().iter() {
-                    if !exclude.contains(id)
-                        && (candidates.is_empty() || candidates.contains(id))
-                        && seen.insert(*id)
-                    {
+                    if !exclude.contains(id) && (candidates.is_empty() || candidates.contains(id)) {
                         result.push(*id);
                         if limit > 0 && result.len() >= limit {
-                            return Ok(result);
+                            break;
                         }
                     }
                 }
+                Ok(result)
             }
         }
-
-        Ok(result)
     }
 
     /// Filters documents by ID using a range query.
@@ -1533,110 +1528,159 @@ impl Collection {
     ///
     /// # Returns
     /// A vector of document IDs matching the range query
-    fn filter_by_id(&self, query: RangeQuery<DocumentId>) -> Vec<DocumentId> {
-        let mut results: Vec<u64> = Vec::new();
-
+    fn filter_by_id(
+        &self,
+        query: RangeQuery<DocumentId>,
+        candidates: &[DocumentId],
+        limit: usize,
+    ) -> Vec<DocumentId> {
+        let mut result = Vec::new();
         match query {
-            RangeQuery::Eq(key) => {
-                if self.doc_ids_index.read().contains(&key) {
-                    results.push(key);
+            RangeQuery::Eq(id) => {
+                if self.doc_ids_index.read().contains(&id)
+                    && (candidates.is_empty() || candidates.contains(&id))
+                {
+                    result.push(id);
                 }
             }
             RangeQuery::Gt(start_key) => {
+                result.reserve_exact(limit);
                 for id in self
                     .doc_ids_index
                     .read()
                     .range(std::ops::RangeFrom { start: start_key })
                     .filter(|&id| *id > start_key)
                 {
-                    results.push(*id);
+                    if candidates.is_empty() || candidates.contains(id) {
+                        result.push(*id);
+                        if limit > 0 && result.len() >= limit {
+                            return result;
+                        }
+                    }
                 }
             }
             RangeQuery::Ge(start_key) => {
+                result.reserve_exact(limit);
                 for id in self
                     .doc_ids_index
                     .read()
                     .range(std::ops::RangeFrom { start: start_key })
                 {
-                    results.push(*id);
+                    if candidates.is_empty() || candidates.contains(id) {
+                        result.push(*id);
+                        if limit > 0 && result.len() >= limit {
+                            return result;
+                        }
+                    }
                 }
             }
             RangeQuery::Lt(end_key) => {
+                result.reserve_exact(limit);
                 for id in self
                     .doc_ids_index
                     .read()
                     .range(std::ops::RangeTo { end: end_key })
                     .rev()
                 {
-                    results.push(*id);
+                    if candidates.is_empty() || candidates.contains(id) {
+                        result.push(*id);
+                        if limit > 0 && result.len() >= limit {
+                            return result;
+                        }
+                    }
                 }
             }
             RangeQuery::Le(end_key) => {
+                result.reserve_exact(limit);
                 for id in self
                     .doc_ids_index
                     .read()
                     .range(std::ops::RangeToInclusive { end: end_key })
                     .rev()
                 {
-                    results.push(*id);
+                    if candidates.is_empty() || candidates.contains(id) {
+                        result.push(*id);
+                        if limit > 0 && result.len() >= limit {
+                            return result;
+                        }
+                    }
                 }
             }
             RangeQuery::Between(start_key, end_key) => {
+                result.reserve_exact(limit.min((1 + end_key - start_key) as usize));
                 for id in self.doc_ids_index.read().range(start_key..=end_key) {
-                    results.push(*id);
+                    if candidates.is_empty() || candidates.contains(id) {
+                        result.push(*id);
+                        if limit > 0 && result.len() >= limit {
+                            return result;
+                        }
+                    }
                 }
             }
-            RangeQuery::Include(keys) => {
+            RangeQuery::Include(ids) => {
+                result.reserve_exact(limit.min(ids.len()));
                 let doc_ids_index = self.doc_ids_index.read();
-                for k in keys.into_iter() {
-                    if doc_ids_index.contains(&k) {
-                        results.push(k);
+                for id in ids.into_iter() {
+                    if doc_ids_index.contains(&id)
+                        && (candidates.is_empty() || candidates.contains(&id))
+                    {
+                        result.push(id);
+                        if limit > 0 && result.len() >= limit {
+                            return result;
+                        }
                     }
                 }
             }
             RangeQuery::And(queries) => {
                 let mut iter = queries.into_iter();
                 if let Some(query) = iter.next() {
-                    let mut intersection: BTreeSet<u64> =
-                        self.filter_by_id(*query).into_iter().collect();
+                    let mut rt: UniqueVec<u64> = self.filter_by_id(*query, candidates, 0).into();
 
                     for query in iter {
-                        let keys: BTreeSet<u64> = self.filter_by_id(*query).into_iter().collect();
-                        intersection = intersection
-                            .intersection(&keys)
-                            .cloned()
-                            .collect::<BTreeSet<_>>();
-                        if intersection.is_empty() {
+                        let keys: UniqueVec<u64> = self.filter_by_id(*query, candidates, 0).into();
+                        rt.intersect_with(&keys);
+                        if rt.is_empty() {
                             return vec![];
                         }
                     }
 
-                    results.extend(intersection);
-                }
-            }
-            RangeQuery::Or(queries) => {
-                let mut seen = HashSet::new();
-                for query in queries {
-                    let keys = self.filter_by_id(*query);
-                    for k in keys {
-                        if seen.insert(k) {
-                            results.push(k);
-                        }
+                    result = rt.into();
+                    if limit > 0 && result.len() > limit {
+                        result.truncate(limit);
                     }
                 }
             }
+            RangeQuery::Or(queries) => {
+                let mut rt = UniqueVec::new();
+                for query in queries {
+                    let keys = self.filter_by_id(*query, candidates, 0);
+                    rt.extend(keys);
+                    if limit > 0 && rt.len() > limit {
+                        break;
+                    }
+                }
+
+                result = rt.into();
+                if limit > 0 && result.len() > limit {
+                    result.truncate(limit);
+                }
+            }
             RangeQuery::Not(query) => {
+                result.reserve_exact(limit);
                 // 先收集要排除的 key，再遍历全集差集
-                let exclude: Vec<u64> = self.filter_by_id(*query);
+                let exclude: HashSet<u64> = self.filter_by_id(*query, &[], 0).into_iter().collect();
                 for id in self.doc_ids_index.read().iter() {
-                    if !exclude.contains(id) {
-                        results.push(*id);
+                    if !exclude.contains(id) && (candidates.is_empty() || candidates.contains(id)) {
+                        result.push(*id);
+                        if limit > 0 && result.len() >= limit {
+                            return result;
+                        }
                     }
                 }
             }
         }
 
-        results
+        result
     }
 
     /// Updates the collection metadata with the provided function.

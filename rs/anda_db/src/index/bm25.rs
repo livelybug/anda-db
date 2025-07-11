@@ -149,7 +149,7 @@ impl BM25 {
         }
 
         self.index
-            .store_dirty_segments(async |id, data| {
+            .store_dirty_documents(async |id, data| {
                 let path = BM25::segment_path(&self.name, id);
                 let _ = self
                     .storage
