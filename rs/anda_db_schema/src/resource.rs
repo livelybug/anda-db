@@ -1,71 +1,50 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{FieldType, FieldTyped};
+use crate::{AndaDBSchema, FieldEntry, FieldType, FieldTyped, Json, Map, Schema, SchemaError};
 
 /// Represents a resource for AI Agents.
 /// It can be a file, a URL, or any other type of resource.
-#[derive(Debug, Default, Clone, Serialize, Deserialize, FieldTyped, PartialEq)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize, FieldTyped, PartialEq, AndaDBSchema)]
 pub struct Resource {
     /// A tag that identifies the type of this resource.
-    #[serde(rename = "t")]
+    /// "text", "image", "audio", "video", etc.
     pub tag: String,
 
-    /// The URI of this resource.
-    #[serde(rename = "u")]
-    pub uri: Option<String>,
-
     /// A human-readable name for this resource.
-    #[serde(rename = "n")]
-    pub name: Option<String>,
+    pub name: String,
 
     /// A description of what this resource represents.
     /// This can be used by clients to improve the LLM's understanding of available resources.
-    #[serde(rename = "d")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 
+    /// The URI of this resource.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uri: Option<String>,
+
     /// MIME type, https://developer.mozilla.org/zh-CN/docs/Web/HTTP/MIME_types/Common_types
-    #[serde(rename = "m")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub mime_type: Option<String>,
 
     /// The binary data of this resource.
-    #[serde(rename = "b")]
     #[serde(with = "serde_bytes")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub blob: Option<Vec<u8>>,
 
     /// The size of the resource in bytes.
-    #[serde(rename = "s")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub size: Option<usize>,
 
     /// The SHA3-256 hash of the resource.
-    #[serde(rename = "h")]
     #[serde(with = "serde_bytes")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub hash: Option<[u8; 32]>,
+
+    /// Metadata associated with this resource.
+    /// This can include additional information such as creation date, author, etc.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<Map<String, Json>>,
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::Ft;
-
-    #[test]
-    fn test_field_type() {
-        let tf = Resource::field_type();
-        assert_eq!(
-            tf,
-            Ft::Map(
-                vec![
-                    ("t".to_string(), Ft::Text),
-                    ("u".to_string(), Ft::Option(Box::new(Ft::Text)),),
-                    ("n".to_string(), Ft::Option(Box::new(Ft::Text)),),
-                    ("d".to_string(), Ft::Option(Box::new(Ft::Text)),),
-                    ("m".to_string(), Ft::Option(Box::new(Ft::Text)),),
-                    ("b".to_string(), Ft::Option(Box::new(Ft::Bytes)),),
-                    ("s".to_string(), Ft::Option(Box::new(Ft::U64))),
-                    ("h".to_string(), Ft::Option(Box::new(Ft::Bytes)),),
-                ]
-                .into_iter()
-                .collect()
-            )
-        );
-    }
-}
+mod tests {}

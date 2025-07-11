@@ -61,14 +61,12 @@ pub struct ConceptNode {
 
     /// Additional attributes associated with this concept.
     /// Skipped during serialization if empty.
-    #[serde(default)]
-    #[serde(skip_serializing_if = "Map::is_empty")]
+    #[serde(default, skip_serializing_if = "Map::is_empty")]
     pub attributes: Map<String, Json>,
 
     /// Metadata information about this concept.
     /// Skipped during serialization if empty.
-    #[serde(default)]
-    #[serde(skip_serializing_if = "Map::is_empty")]
+    #[serde(default, skip_serializing_if = "Map::is_empty")]
     pub metadata: Map<String, Json>,
 }
 
@@ -111,14 +109,12 @@ pub struct PropositionLink {
 
     /// Additional attributes associated with this relationship.
     /// Skipped during serialization if empty.
-    #[serde(default)]
-    #[serde(skip_serializing_if = "Map::is_empty")]
+    #[serde(default, skip_serializing_if = "Map::is_empty")]
     pub attributes: Map<String, Json>,
 
     /// Metadata information about this relationship.
     /// Skipped during serialization if empty.
-    #[serde(default)]
-    #[serde(skip_serializing_if = "Map::is_empty")]
+    #[serde(default, skip_serializing_if = "Map::is_empty")]
     pub metadata: Map<String, Json>,
 }
 

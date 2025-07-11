@@ -105,7 +105,6 @@ pub enum Response {
 
         // An opaque token representing the pagination position after the last returned result.
         // If present, there may be more results available.
-        #[serde[default]]
         #[serde(skip_serializing_if = "Option::is_none")]
         next_cursor: Option<String>,
     },
@@ -160,7 +159,6 @@ pub struct ErrorObject {
     ///
     /// May contain structured data relevant to the specific error,
     /// such as validation details or context information.
-    #[serde[default]]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<Json>,
 }

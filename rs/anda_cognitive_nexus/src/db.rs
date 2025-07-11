@@ -504,7 +504,7 @@ impl CognitiveNexus {
             if ids.is_empty() {
                 continue;
             }
-            // 如果NOT子句中有变量绑定，则从当前上下文中移除这些绑定
+            // 如果 NOT 子句中有变量绑定，则从当前上下文中移除这些绑定
             if let Some(existing) = ctx.entities.get_mut(&var) {
                 existing.retain(|id| !ids.contains(id));
             }
@@ -514,7 +514,7 @@ impl CognitiveNexus {
             if ids.is_empty() {
                 continue;
             }
-            // 如果NOT子句中有谓词绑定，则从当前上下文中移除这些绑定
+            // 如果 NOT 子句中有谓词绑定，则从当前上下文中移除这些绑定
             if let Some(existing) = ctx.predicates.get_mut(&pred) {
                 existing.retain(|id| !ids.contains(id));
             }
