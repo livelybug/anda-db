@@ -1777,6 +1777,7 @@ mod tests {
                 compress_level: 0,
                 ..Default::default()
             },
+            lock: None,
         };
 
         let db = AndaDB::connect(object_store, db_config).await?;
@@ -1867,6 +1868,7 @@ mod tests {
                     compress_level: 0,
                     ..Default::default()
                 },
+                lock: None,
             },
         )
         .await?;
@@ -2122,6 +2124,7 @@ mod tests {
                     compress_level: 0,
                     ..Default::default()
                 },
+                lock: None,
             },
         )
         .await?;

@@ -1,4 +1,5 @@
 use futures::future::join_all;
+use ic_auth_types::ByteBufB64;
 use object_store::ObjectStore;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -54,6 +55,9 @@ pub struct DBConfig {
 
     /// Storage configuration settings
     pub storage: StorageConfig,
+
+    /// Optional opaque bytes as lock for the database
+    pub lock: Option<ByteBufB64>,
 }
 
 impl Default for DBConfig {
@@ -62,6 +66,7 @@ impl Default for DBConfig {
             name: "anda_db".to_string(),
             description: "Anda DB".to_string(),
             storage: StorageConfig::default(),
+            lock: None,
         }
     }
 }
@@ -162,14 +167,36 @@ impl AndaDB {
         .await?;
 
         match storage.fetch::<DBMetadata>(Self::METADATA_PATH).await {
-            Ok((metadata, _)) => Ok(Self {
-                name: metadata.config.name.clone(),
-                object_store,
-                storage,
-                metadata: RwLock::new(metadata),
-                collections: RwLock::new(BTreeMap::new()),
-                read_only: AtomicBool::new(false),
-            }),
+            Ok((metadata, _)) => {
+                let set_lock = match (&metadata.config.lock, config.lock) {
+                    (None, Some(lock)) => Some(lock),
+                    (Some(existing_lock), lock) => {
+                        if lock.as_ref() != Some(existing_lock) {
+                            return Err(DBError::Storage {
+                                name: config.name.clone(),
+                                source: "Database lock mismatch".into(),
+                            });
+                        }
+                        None
+                    }
+                    _ => None,
+                };
+
+                let this = Self {
+                    name: metadata.config.name.clone(),
+                    object_store,
+                    storage,
+                    metadata: RwLock::new(metadata),
+                    collections: RwLock::new(BTreeMap::new()),
+                    read_only: AtomicBool::new(false),
+                };
+
+                if let Some(lock) = set_lock {
+                    this.set_lock(lock).await?;
+                }
+
+                Ok(this)
+            }
             Err(DBError::NotFound { .. }) => {
                 let metadata = DBMetadata {
                     config,
@@ -470,6 +497,18 @@ impl AndaDB {
         Ok(collection)
     }
 
+    async fn set_lock(&self, lock: ByteBufB64) -> Result<(), DBError> {
+        {
+            self.metadata.write().config.lock = Some(lock);
+        }
+
+        let metadata = self.metadata();
+        self.storage
+            .put(Self::METADATA_PATH, &metadata, None)
+            .await?;
+        Ok(())
+    }
+
     /// Flushes database metadata to storage.
     ///
     /// This method writes the current database metadata to storage and
@@ -521,6 +560,7 @@ mod tests {
             name: "test_db".to_string(),
             description: "Test Database".to_string(),
             storage: StorageConfig::default(),
+            lock: None,
         };
 
         // First create the database

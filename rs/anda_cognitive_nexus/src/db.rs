@@ -2747,6 +2747,7 @@ mod tests {
                 compress_level: 0,
                 ..Default::default()
             },
+            lock: None, // no lock for demo
         };
 
         let db = AndaDB::connect(object_store, db_config)

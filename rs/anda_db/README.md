@@ -102,6 +102,7 @@ async fn main() -> Result<(), DBError> {
             compress_level: 0, // no compression
             ..Default::default()
         },
+        lock: None, // no lock for demo
     };
 
     // connect to the database (create if it doesn't exist)
