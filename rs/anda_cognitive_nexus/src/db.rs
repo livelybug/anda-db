@@ -1896,6 +1896,12 @@ impl CognitiveNexus {
                 // Convert EntityPK to EntityID for searching
                 let subject = self.resolve_entity_id(subject.as_ref(), cached_pks).await?;
                 let object = self.resolve_entity_id(object.as_ref(), cached_pks).await?;
+                if subject == object {
+                    return Err(KipError::InvalidCommand(format!(
+                        "Subject and object cannot be the same: {}",
+                        subject
+                    )));
+                }
 
                 let virtual_name = virtual_field_name(&["subject", "object"]);
                 let virtual_val = virtual_field_value(&[

@@ -69,6 +69,8 @@
 //! For comprehensive examples and usage patterns, see the individual module documentation
 //! and the project's examples directory.
 
+use std::sync::LazyLock;
+
 pub mod ast;
 pub mod capsule;
 pub mod error;
@@ -84,3 +86,9 @@ pub use executor::*;
 pub use parser::*;
 pub use request::*;
 pub use types::*;
+
+pub static SYSTEM_PROMPT: &str = include_str!("../SystemPrompt.md");
+
+/// JSON schema definition for the `execute_kip` function
+pub static KIP_FUNCTION_DEFINITION: LazyLock<Json> =
+    LazyLock::new(|| serde_json::json!(include_str!("../FunctionDefinition.json")));

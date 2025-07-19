@@ -14,10 +14,8 @@ use crate::{
     executor::{Executor, execute_kip},
 };
 
-/// Request structure for KIP command execution
-///
-/// Represents the arguments for the `execute_kip` function as defined in the KIP specification.
-/// LLM-generated KIP commands should be sent to the Cognitive Nexus through this structured request.
+/// Defines the arguments for the `execute_kip` function, which is the standard interface
+/// for an LLM to interact with the Cognitive Nexus.
 ///
 /// # Example
 /// ```json
@@ -30,24 +28,20 @@ use crate::{
 ///   "dry_run": false
 /// }
 /// ```
-#[derive(Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Request {
-    /// Complete, unmodified KIP command text
-    ///
-    /// Contains the full KIP command (KQL, KML, or META) to be executed.
-    /// Placeholders in the format `$key_name` can be used for parameter substitution.
+    /// The complete KIP command string (KQL, KML, or META).
+    /// It can include placeholders like `$param_name` for parameter substitution.
     pub command: String,
 
-    /// Optional key-value pairs for execution context parameters
-    ///
-    /// Used to pass parameters outside of the command text itself.
-    /// Command text can reference these parameters using `$key_name` placeholders.
+    /// An optional map of key-value pairs for parameter substitution.
+    /// Keys in this map correspond to placeholders in the `command` string.
+    #[serde(default)]
     pub parameters: Map<String, Json>,
 
-    /// Dry run flag for command validation
-    ///
-    /// If `true`, only validates the command's syntax and logic without executing
-    /// or persisting any changes. Useful for testing and validation purposes.
+    /// If true, the command is validated for syntax and logic but not executed.
+    /// No changes will be persisted to the knowledge graph.
+    #[serde(default)]
     pub dry_run: bool,
 }
 
@@ -93,7 +87,7 @@ impl Request {
 ///
 /// All responses from the Cognitive Nexus are JSON objects with this structure.
 /// Either `result` or `error` must be present, but never both.
-#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum Response {
     /// Successful response containing the request results
@@ -142,7 +136,7 @@ impl Response {
 ///
 /// Provides comprehensive error information including error type,
 /// human-readable message, and optional additional data.
-#[derive(Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ErrorObject {
     /// Error type/category name
     ///

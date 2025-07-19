@@ -27,7 +27,10 @@ pub static GENESIS_KIP: &str = include_str!("../capsules/Genesis.kip");
 /// The Person type definition capsule.
 pub static PERSON_KIP: &str = include_str!("../capsules/Person.kip");
 
-/// The $self capsule representing the agent itself.
+/// The Event type definition capsule.
+pub static EVENT_KIP: &str = include_str!("../capsules/Event.kip");
+
+/// The $self capsule representing the agent itself (should replace $self_reserved_principal_id).
 pub static PERSON_SELF_KIP: &str = include_str!("../capsules/persons/self.kip");
 
 /// The $system capsule representing the system itself.

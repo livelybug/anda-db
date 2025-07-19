@@ -54,14 +54,11 @@ async fn main() -> Result<(), KipError> {
             .await
         {
             let kml = &[
-                PERSON_SELF_KIP.replace(
+                &PERSON_SELF_KIP.replace(
                     "$self_reserved_principal_id",
                     "gcxml-rtxjo-ib7ov-5si5r-5jluv-zek7y-hvody-nneuz-hcg5i-6notx-aae",
                 ),
-                PERSON_SYSTEM_KIP.replace(
-                    "$system_reserved_principal_id",
-                    "i2gam-uue3y-uxwyd-mzyhb-nirhd-hz3l4-2hw3f-4fzvw-lpvvc-dqdrg-7qe",
-                ),
+                PERSON_SYSTEM_KIP,
             ]
             .join("\n");
 

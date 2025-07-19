@@ -1,6 +1,6 @@
 [package]
 name = "anda_cognitive_nexus"
-version = "0.2.2"
+version = "0.2.3"
 description = "A Rust implementation of KIP (Knowledge Interaction Protocol) base on Anda DB."
 keywords = ["KIP", "KAG", "knowledge-graph", "persistent-memory", "ai-agent"]
 categories = ["database", "data-structures", "text-processing"]

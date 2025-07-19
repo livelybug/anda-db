@@ -6,6 +6,9 @@ use crate::{AndaDBSchema, FieldEntry, FieldType, FieldTyped, Json, Map, Schema, 
 /// It can be a file, a URL, or any other type of resource.
 #[derive(Debug, Default, Clone, Serialize, Deserialize, FieldTyped, PartialEq, AndaDBSchema)]
 pub struct Resource {
+    /// The unique identifier for this resource in the Anda DB collection.
+    pub _id: u64,
+
     /// A tag that identifies the type of this resource.
     /// "text", "image", "audio", "video", etc.
     pub tag: String,
