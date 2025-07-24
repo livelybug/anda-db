@@ -51,7 +51,7 @@ pub struct CognitiveNexus {
 ///
 /// This trait implementation allows the cognitive nexus to process KIP commands,
 /// including queries (KQL), markup language statements (KML), and meta commands.
-#[async_trait(?Send)]
+#[async_trait]
 impl Executor for CognitiveNexus {
     /// Executes a KIP command and returns the appropriate response.
     ///

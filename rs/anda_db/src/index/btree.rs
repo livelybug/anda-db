@@ -562,16 +562,22 @@ where
             *self.metadata_version.write() = ver;
         }
 
-        self.index
-            .store_dirty_postings(async |id, data| {
-                let path = BTree::posting_path(&self.name, id);
-                let _ = self
-                    .storage
-                    .put_bytes(&path, Bytes::copy_from_slice(data), PutMode::Overwrite)
-                    .await?;
-                Ok(true)
-            })
-            .await?;
+        // 收集需要保存的数据
+        let dirty_data = self.index.collect_dirty_postings()?;
+        let mut saved_buckets = Vec::new();
+
+        // 异步保存每个桶的数据
+        for (id, data) in dirty_data {
+            let path = BTree::posting_path(&self.name, id);
+            let _ = self
+                .storage
+                .put_bytes(&path, Bytes::from(data), PutMode::Overwrite)
+                .await?;
+            saved_buckets.push(id);
+        }
+
+        // 标记已成功保存的桶
+        self.index.mark_buckets_as_saved(&saved_buckets);
 
         Ok(true)
     }

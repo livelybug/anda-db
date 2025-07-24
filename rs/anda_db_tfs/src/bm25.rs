@@ -958,6 +958,31 @@ where
         Ok(())
     }
 
+    pub fn collect_dirty_documents(&self) -> Result<Vec<(u32, Vec<u8>)>, BM25Error> {
+        let mut results = Vec::new();
+        let mut buf = Vec::with_capacity(8192);
+        for bucket in self.dirty_document_buckets.read().iter() {
+            let bucket = *bucket as u64;
+            let mut documents = HashMap::new();
+            for id in (bucket * SEGMENTS_BUCKET_SIZE)..((bucket + 1) * SEGMENTS_BUCKET_SIZE) {
+                if let Some(val) = self.seg_tokens.get(&id) {
+                    documents.insert(id, *val);
+                }
+            }
+
+            if documents.is_empty() {
+                continue;
+            }
+
+            buf.clear();
+            ciborium::into_writer(&documents, &mut buf).expect("Failed to serialize node");
+
+            results.push((bucket as u32, buf.clone()));
+        }
+
+        Ok(results)
+    }
+
     /// Stores dirty postings to persistent storage using the provided async function
     ///
     /// This method iterates through all posting buckets and persists those that have been modified
@@ -1011,6 +1036,55 @@ where
         }
 
         Ok(())
+    }
+
+    pub fn collect_dirty_postings(&self) -> Result<Vec<(u32, Vec<u8>)>, BM25Error> {
+        let mut results = Vec::new();
+        let mut buf = Vec::with_capacity(8192);
+        for bucket in self.buckets.iter() {
+            if bucket.1 {
+                // If the bucket is dirty, it needs to be persisted
+                let mut postings = HashMap::with_capacity(bucket.2.len());
+                for k in bucket.2.iter() {
+                    if let Some(posting) = self.postings.get(k) {
+                        postings.insert(
+                            k,
+                            ciborium::cbor!(posting).map_err(|err| BM25Error::Serialization {
+                                name: self.name.clone(),
+                                source: err.into(),
+                            })?,
+                        );
+                    }
+                }
+
+                buf.clear();
+                ciborium::into_writer(&postings, &mut buf).map_err(|err| {
+                    BM25Error::Serialization {
+                        name: self.name.clone(),
+                        source: err.into(),
+                    }
+                })?;
+
+                results.push((*bucket.key(), buf.clone()));
+            }
+        }
+
+        Ok(results)
+    }
+
+    pub fn mark_document_buckets_as_saved(&self, bucket_ids: &[u32]) {
+        self.dirty_document_buckets
+            .write()
+            .retain(|x| !bucket_ids.contains(x));
+    }
+
+    /// 标记指定的桶为已保存状态
+    pub fn mark_posting_buckets_as_saved(&self, bucket_ids: &[u32]) {
+        for bucket_id in bucket_ids {
+            if let Some(mut bucket) = self.buckets.get_mut(bucket_id) {
+                bucket.1 = false; // 标记为不脏
+            }
+        }
     }
 
     /// Updates the index metadata

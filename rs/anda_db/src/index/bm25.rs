@@ -47,8 +47,8 @@ impl BM25 {
         format!("bm25_indexes/{name}/meta.cbor")
     }
 
-    fn segment_path(name: &str, bucket: u32) -> String {
-        format!("bm25_indexes/{name}/s_{bucket}.cbor")
+    fn document_path(name: &str, bucket: u32) -> String {
+        format!("bm25_indexes/{name}/d_{bucket}.cbor")
     }
 
     fn posting_path(name: &str, bucket: u32) -> String {
@@ -105,7 +105,7 @@ impl BM25 {
             tokenizer,
             &metadata[..],
             async |id: u32| {
-                let path = BM25::segment_path(&name, id);
+                let path = BM25::document_path(&name, id);
                 match storage.fetch_bytes(&path).await {
                     Ok((data, _)) => Ok(Some(data.into())),
                     Err(DBError::NotFound { .. }) => Ok(None),
@@ -148,26 +148,29 @@ impl BM25 {
             *self.metadata_version.write() = ver;
         }
 
-        self.index
-            .store_dirty_documents(async |id, data| {
-                let path = BM25::segment_path(&self.name, id);
-                let _ = self
-                    .storage
-                    .put_bytes(&path, Bytes::copy_from_slice(data), PutMode::Overwrite)
-                    .await?;
-                Ok(true)
-            })
-            .await?;
-        self.index
-            .store_dirty_postings(async |id, data| {
-                let path = BM25::posting_path(&self.name, id);
-                let _ = self
-                    .storage
-                    .put_bytes(&path, Bytes::copy_from_slice(data), PutMode::Overwrite)
-                    .await?;
-                Ok(true)
-            })
-            .await?;
+        let dirty_data = self.index.collect_dirty_documents()?;
+        let mut saved_buckets = Vec::new();
+        for (id, data) in dirty_data {
+            let path = BM25::document_path(&self.name, id);
+            let _ = self
+                .storage
+                .put_bytes(&path, Bytes::from(data), PutMode::Overwrite)
+                .await?;
+            saved_buckets.push(id);
+        }
+        self.index.mark_document_buckets_as_saved(&saved_buckets);
+
+        let dirty_data = self.index.collect_dirty_postings()?;
+        let mut saved_buckets = Vec::new();
+        for (id, data) in dirty_data {
+            let path = BM25::posting_path(&self.name, id);
+            let _ = self
+                .storage
+                .put_bytes(&path, Bytes::from(data), PutMode::Overwrite)
+                .await?;
+            saved_buckets.push(id);
+        }
+        self.index.mark_document_buckets_as_saved(&saved_buckets);
 
         Ok(true)
     }

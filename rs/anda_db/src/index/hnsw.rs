@@ -141,16 +141,17 @@ impl Hnsw {
             *self.ids_version.write() = ids_version;
         }
 
-        self.index
-            .store_dirty_nodes(async |id, data| {
-                let path = Hnsw::node_path(&self.name, id);
-                let _ = self
-                    .storage
-                    .put_bytes(&path, Bytes::copy_from_slice(data), PutMode::Overwrite)
-                    .await?;
-                Ok(true)
-            })
-            .await?;
+        let dirty_data = self.index.collect_dirty_nodes()?;
+        let mut saved_nodes = Vec::new();
+        for (id, data) in dirty_data {
+            let path = Hnsw::node_path(&self.name, id);
+            let _ = self
+                .storage
+                .put_bytes(&path, Bytes::from(data), PutMode::Overwrite)
+                .await?;
+            saved_nodes.push(id);
+        }
+        self.index.mark_nodes_as_saved(&saved_nodes);
 
         Ok(true)
     }

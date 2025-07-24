@@ -36,7 +36,7 @@ use crate::{Command, Response, parse_kip};
 ///     // Your knowledge graph implementation
 /// }
 ///
-/// #[async_trait(?Send)]
+/// #[async_trait]
 /// impl Executor for MyKnowledgeGraph {
 ///     async fn execute(&self, command: Command, dry_run: bool) -> Response {
 ///         match command {
@@ -56,7 +56,7 @@ use crate::{Command, Response, parse_kip};
 ///     }
 /// }
 /// ```
-#[async_trait(?Send)]
+#[async_trait]
 pub trait Executor: Send + Sync {
     /// Executes a parsed KIP command and returns the result.
     ///
@@ -169,21 +169,21 @@ pub async fn execute_kip(executor: &impl Executor, command: &str, dry_run: bool)
     }
 }
 
-#[async_trait(?Send)]
+#[async_trait]
 impl Executor for Box<dyn Executor> {
     async fn execute(&self, command: Command, dry_run: bool) -> Response {
         (**self).execute(command, dry_run).await
     }
 }
 
-#[async_trait(?Send)]
+#[async_trait]
 impl Executor for Arc<dyn Executor> {
     async fn execute(&self, command: Command, dry_run: bool) -> Response {
         (**self).execute(command, dry_run).await
     }
 }
 
-#[async_trait(?Send)]
+#[async_trait]
 impl Executor for &dyn Executor {
     async fn execute(&self, command: Command, dry_run: bool) -> Response {
         (**self).execute(command, dry_run).await
@@ -195,9 +195,10 @@ mod tests {
     use super::*;
     use crate::{Command, Json};
 
+    #[derive(Debug, Clone)]
     struct MyKnowledgeGraph {}
 
-    #[async_trait(?Send)]
+    #[async_trait]
     impl Executor for MyKnowledgeGraph {
         async fn execute(&self, command: Command, _dry_run: bool) -> Response {
             match command {
