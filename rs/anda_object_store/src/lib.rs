@@ -274,7 +274,7 @@ impl<T: ObjectStore> ObjectStore for MetaStore<T> {
     async fn put_multipart_opts(
         &self,
         location: &Path,
-        opts: PutMultipartOpts,
+        opts: PutMultipartOptions,
     ) -> Result<Box<dyn MultipartUpload>> {
         let full_path = self.inner.full_path(location);
         let inner = self
