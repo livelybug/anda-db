@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 
 use crate::{
-    Json, Map,
+    CommandType, Json, Map,
     error::KipError,
     executor::{Executor, execute_kip},
 };
@@ -77,7 +77,7 @@ impl Request {
     }
 
     /// Executes the KIP command using the provided executor
-    pub async fn execute(&self, nexus: &impl Executor) -> Response {
+    pub async fn execute(&self, nexus: &impl Executor) -> (CommandType, Response) {
         let command = self.to_command();
         execute_kip(nexus, &command, self.dry_run).await
     }

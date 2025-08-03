@@ -171,6 +171,90 @@ impl Value {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CommandType {
+    /// KQL (Knowledge Query Language) - for knowledge retrieval and reasoning
+    Kql,
+    /// KML (Knowledge Manipulation Language) - for knowledge evolution and updates
+    Kml,
+    /// META commands - for knowledge exploration and grounding
+    Meta,
+    /// Unknown command type
+    Unknown,
+}
+
+impl CommandType {
+    pub fn from(val: &Command) -> CommandType {
+        match val {
+            Command::Kql(_) => CommandType::Kql,
+            Command::Kml(_) => CommandType::Kml,
+            Command::Meta(_) => CommandType::Meta,
+        }
+    }
+}
+
+impl fmt::Display for CommandType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CommandType::Kql => write!(f, "KQL"),
+            CommandType::Kml => write!(f, "KML"),
+            CommandType::Meta => write!(f, "META"),
+            CommandType::Unknown => write!(f, "UNKNOWN"),
+        }
+    }
+}
+
+impl FromStr for CommandType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_uppercase().as_str() {
+            "KQL" => Ok(CommandType::Kql),
+            "KML" => Ok(CommandType::Kml),
+            "META" => Ok(CommandType::Meta),
+            _ => Ok(CommandType::Unknown),
+        }
+    }
+}
+
+impl Serialize for CommandType {
+    /// Serializes the CommandType as a string.
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+/// Visitor for deserializing CommandType from strings.
+struct CommandTypeVisitor;
+
+impl serde::de::Visitor<'_> for CommandTypeVisitor {
+    type Value = CommandType;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        write!(formatter, "a string")
+    }
+
+    fn visit_str<E>(self, s: &str) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        CommandType::from_str(s).map_err(|err| E::custom(err))
+    }
+}
+
+impl<'de> Deserialize<'de> for CommandType {
+    /// Deserializes a CommandType from a string.
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_str(CommandTypeVisitor)
+    }
+}
+
 /// Top-level command enum representing the three main KIP instruction sets.
 /// Each command type serves a specific purpose in the knowledge interaction workflow.
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]

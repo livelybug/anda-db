@@ -10,7 +10,7 @@
 use async_trait::async_trait;
 use std::sync::Arc;
 
-use crate::{Command, Response, parse_kip};
+use crate::{Command, CommandType, Response, parse_kip};
 
 /// The core trait that defines how KIP commands are executed.
 ///
@@ -158,14 +158,19 @@ pub trait Executor: Send + Sync {
 /// - Parsing is performed synchronously before execution
 /// - Consider caching parsed commands for repeated execution
 /// - The executor implementation determines overall performance characteristics
-pub async fn execute_kip(executor: &impl Executor, command: &str, dry_run: bool) -> Response {
+pub async fn execute_kip(
+    executor: &impl Executor,
+    command: &str,
+    dry_run: bool,
+) -> (CommandType, Response) {
     // Parse the raw command string into a structured Command AST
     match parse_kip(command) {
         Ok(cmd) => {
             // Delegate execution to the provided executor
-            executor.execute(cmd, dry_run).await
+            let ty = CommandType::from(&cmd);
+            (ty, executor.execute(cmd, dry_run).await)
         }
-        Err(err) => err.into(),
+        Err(err) => (CommandType::Unknown, err.into()),
     }
 }
 
@@ -215,7 +220,8 @@ mod tests {
 
         // Test KQL command execution
         let kql_command = "FIND(?drug) WHERE { ?drug {type: \"Drug\"} }";
-        let response = execute_kip(&executor, kql_command, false).await;
-        assert!(matches!(response, Response::Ok { .. }));
+        let (ty, res) = execute_kip(&executor, kql_command, false).await;
+        assert_eq!(ty, CommandType::Kql);
+        assert!(matches!(res, Response::Ok { .. }));
     }
 }
