@@ -1206,14 +1206,14 @@ impl Collection {
     /// * `id` - The ID of the document to remove
     ///
     /// # Returns
-    /// Ok(()) if successful, or an error if removal fails
+    /// Ok(Some(Document)) if successful, or Ok(None) if the document was not found, or an error if removal fails
     ///
     /// # Errors
     /// Returns an error if:
     /// - The collection is in read-only mode
     /// - Any index update fails
     /// - Storage operations fail
-    pub async fn remove(&self, id: DocumentId) -> Result<(), DBError> {
+    pub async fn remove(&self, id: DocumentId) -> Result<Option<Document>, DBError> {
         if self.read_only.load(Ordering::Relaxed) {
             return Err(DBError::Generic {
                 name: self.name.clone(),
@@ -1224,7 +1224,7 @@ impl Collection {
         let now_ms = unix_ms();
         {
             if !self.doc_ids_index.write().remove(&id) {
-                return Ok(());
+                return Ok(None);
             }
 
             self.doc_ids.write().remove(id);
@@ -1258,9 +1258,10 @@ impl Collection {
                 }
             }
             let _ = self.storage.delete(&Self::doc_path(id)).await;
+            return Ok(Some(doc));
         }
 
-        Ok(())
+        Ok(None)
     }
 
     /// Searches for documents matching the given query and returns them.
