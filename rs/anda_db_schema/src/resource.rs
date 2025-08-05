@@ -9,9 +9,9 @@ pub struct Resource {
     /// The unique identifier for this resource in the Anda DB collection.
     pub _id: u64,
 
-    /// A tag that identifies the type of this resource.
+    /// A list of tags that identifies the type of this resource.
     /// "text", "image", "audio", "video", etc.
-    pub tag: String,
+    pub tags: Vec<String>,
 
     /// A human-readable name for this resource.
     pub name: String,
