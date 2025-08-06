@@ -1316,7 +1316,7 @@ impl Collection {
     /// A vector of matching document IDs, or an error if the search fails
     pub async fn search_ids(&self, query: Query) -> Result<Vec<DocumentId>, DBError> {
         let limit = query.limit.unwrap_or(10).min(1000);
-        let top_k = limit * 3;
+        let top_k = limit * 10;
         let mut candidates = Vec::with_capacity(top_k);
         let mut result = Vec::new();
 

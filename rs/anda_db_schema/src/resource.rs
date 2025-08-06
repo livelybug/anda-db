@@ -1,3 +1,4 @@
+use ic_auth_types::{ByteArrayB64, ByteBufB64};
 use serde::{Deserialize, Serialize};
 
 use crate::{AndaDBSchema, FieldEntry, FieldType, FieldTyped, Json, Map, Schema, SchemaError};
@@ -30,19 +31,17 @@ pub struct Resource {
     pub mime_type: Option<String>,
 
     /// The binary data of this resource.
-    #[serde(with = "serde_bytes")]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub blob: Option<Vec<u8>>,
+    pub blob: Option<ByteBufB64>,
 
     /// The size of the resource in bytes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub size: Option<usize>,
 
     /// The SHA3-256 hash of the resource.
-    #[serde(with = "serde_bytes")]
     #[serde(skip_serializing_if = "Option::is_none")]
     #[unique]
-    pub hash: Option<[u8; 32]>,
+    pub hash: Option<ByteArrayB64<32>>,
 
     /// Metadata associated with this resource.
     /// This can include additional information such as creation date, author, etc.
