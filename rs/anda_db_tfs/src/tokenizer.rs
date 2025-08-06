@@ -132,7 +132,7 @@ pub fn collect_tokens<T: Tokenizer>(
     tokens
 }
 
-/// Performs a simple full-text search by finding matching tokens in a segment
+/// Performs a simple full-text search by finding matching tokens in a document
 ///
 /// # Arguments
 ///

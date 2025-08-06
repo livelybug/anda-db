@@ -29,6 +29,7 @@ pub enum DBError {
         name: String,
         path: String,
         source: BoxError,
+        _id: u64,
     },
 
     #[error("Object {name} at location {path} already exists: {source:?}")]
@@ -36,6 +37,7 @@ pub enum DBError {
         name: String,
         path: String,
         source: BoxError,
+        _id: u64,
     },
 
     #[error("Serialization error: {source:?}")]
@@ -49,11 +51,13 @@ impl From<object_store::Error> for DBError {
                 name: "unknown".to_string(),
                 path,
                 source,
+                _id: 0,
             },
             object_store::Error::AlreadyExists { path, source } => DBError::AlreadyExists {
                 name: "unknown".to_string(),
                 path,
                 source,
+                _id: 0,
             },
             err => DBError::Storage {
                 name: "unknown".to_string(),
@@ -83,12 +87,16 @@ impl From<BTreeError> for DBError {
                 name: name.clone(),
                 source: err.into(),
             },
-            BTreeError::NotFound { name, .. } => DBError::Index {
+            BTreeError::NotFound { name, id, .. } => DBError::NotFound {
                 name: name.clone(),
+                path: "unknown".to_string(),
+                _id: id.as_u64().unwrap_or(0),
                 source: err.into(),
             },
-            BTreeError::AlreadyExists { name, .. } => DBError::Index {
+            BTreeError::AlreadyExists { name, id, .. } => DBError::AlreadyExists {
                 name: name.clone(),
+                path: "unknown".to_string(),
+                _id: id.as_u64().unwrap_or(0),
                 source: err.into(),
             },
         }
@@ -106,16 +114,20 @@ impl From<HnswError> for DBError {
                 name: name.clone(),
                 source: err.into(),
             },
-            HnswError::NotFound { name, .. } => DBError::Index {
-                name: name.clone(),
-                source: err.into(),
-            },
-            HnswError::AlreadyExists { name, .. } => DBError::Index {
-                name: name.clone(),
-                source: err.into(),
-            },
             HnswError::DimensionMismatch { name, .. } => DBError::Index {
                 name: name.clone(),
+                source: err.into(),
+            },
+            HnswError::NotFound { name, id, .. } => DBError::NotFound {
+                name: name.clone(),
+                path: "unknown".to_string(),
+                _id: *id,
+                source: err.into(),
+            },
+            HnswError::AlreadyExists { name, id, .. } => DBError::AlreadyExists {
+                name: name.clone(),
+                path: "unknown".to_string(),
+                _id: *id,
                 source: err.into(),
             },
         }
@@ -133,16 +145,20 @@ impl From<BM25Error> for DBError {
                 name: name.clone(),
                 source: err.into(),
             },
-            BM25Error::NotFound { name, .. } => DBError::Index {
-                name: name.clone(),
-                source: err.into(),
-            },
-            BM25Error::AlreadyExists { name, .. } => DBError::Index {
-                name: name.clone(),
-                source: err.into(),
-            },
             BM25Error::TokenizeFailed { name, .. } => DBError::Index {
                 name: name.clone(),
+                source: err.into(),
+            },
+            BM25Error::NotFound { name, id, .. } => DBError::NotFound {
+                name: name.clone(),
+                path: "unknown".to_string(),
+                _id: *id,
+                source: err.into(),
+            },
+            BM25Error::AlreadyExists { name, id, .. } => DBError::AlreadyExists {
+                name: name.clone(),
+                path: "unknown".to_string(),
+                _id: *id,
                 source: err.into(),
             },
         }

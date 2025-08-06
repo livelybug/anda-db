@@ -1,3 +1,4 @@
+use serde_json::Value;
 use thiserror::Error;
 
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -14,14 +15,18 @@ pub enum BTreeError {
     Serialization { name: String, source: BoxError },
 
     /// Error when a token is not found.
-    #[error("BTree index {name:?}, value not found: {value:?}")]
-    NotFound { name: String, value: String },
+    #[error("BTree index {name:?}, value {value:?} not found in document {id}")]
+    NotFound {
+        name: String,
+        id: Value,
+        value: Value,
+    },
 
-    /// Error when trying to add a segment with an ID that already exists
+    /// Error when trying to add a document with an ID that already exists
     #[error("BTree index {name:?}, value {value} already exists in document {id}")]
     AlreadyExists {
         name: String,
-        id: String,
-        value: String,
+        id: Value,
+        value: Value,
     },
 }

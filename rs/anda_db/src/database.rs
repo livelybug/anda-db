@@ -380,6 +380,7 @@ impl AndaDB {
                     name: config.name,
                     path: self.name.clone(),
                     source: "collection already exists".into(),
+                    _id: 0,
                 });
             }
         }
@@ -482,6 +483,7 @@ impl AndaDB {
                     name,
                     path: self.name.clone(),
                     source: "collection not found".into(),
+                    _id: 0,
                 });
             }
         }

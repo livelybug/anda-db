@@ -2,7 +2,7 @@
 //!
 //! This library implements a full-text search engine based on the BM25 ranking algorithm.
 //! BM25 (Best Matching 25) is a ranking function used by search engines to estimate the relevance
-//! of segments to a given search query. It's an extension of the TF-IDF model.
+//! of documents to a given search query. It's an extension of the TF-IDF model.
 //!
 //! ## Features
 //!

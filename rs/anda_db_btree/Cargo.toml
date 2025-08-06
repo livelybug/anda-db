@@ -2,7 +2,7 @@
 name = "anda_db_btree"
 description = "A B-tree index library in Rust."
 repository = "https://github.com/ldclabs/anda_db/tree/main/rs/anda_db_btree"
-version = "0.4.3"
+version = "0.4.4"
 publish = true
 edition.workspace = true
 keywords.workspace = true
@@ -15,6 +15,7 @@ ciborium = { workspace = true }
 dashmap = { workspace = true, features = ["serde"] }
 futures = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 parking_lot = { workspace = true }
 

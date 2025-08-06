@@ -186,6 +186,7 @@ impl Collection {
                 name: config.name,
                 path: base_path.to_string(),
                 source: "".into(),
+                _id: 0,
             });
         }
 
@@ -659,6 +660,7 @@ impl Collection {
                     name: name.to_string(),
                     path: self.name.clone(),
                     source: "BTree index already exists".into(),
+                    _id: 0,
                 });
             }
         }
@@ -740,6 +742,7 @@ impl Collection {
                     name: name.clone(),
                     path: self.name.clone(),
                     source: "BM25 index already exists".into(),
+                    _id: 0,
                 });
             }
         }
@@ -810,6 +813,7 @@ impl Collection {
                     name: name.clone(),
                     path: self.name.clone(),
                     source: "HNSW index already exists".into(),
+                    _id: 0,
                 });
             }
         }
@@ -821,6 +825,7 @@ impl Collection {
                 name: field.to_string(),
                 path: self.name.clone(),
                 source: "field not found".into(),
+                _id: 0,
             })?;
         if field.r#type() != &FieldType::Vector {
             return Err(DBError::Schema {
@@ -927,9 +932,9 @@ impl Collection {
             });
         }
 
+        self.schema.validate(doc.fields())?;
         let id = self.max_document_id.fetch_add(1, Ordering::Acquire) + 1;
         doc.set_id(id);
-        self.schema.validate(doc.fields())?;
 
         let now_ms = unix_ms();
         #[allow(clippy::mutable_key_type)]
@@ -1055,9 +1060,10 @@ impl Collection {
 
         if !self.doc_ids.read().contains(id) {
             return Err(DBError::NotFound {
-                name: id.to_string(),
+                name: "document".to_string(),
                 path: self.name.clone(),
                 source: format!("Document with ID {id} not found").into(),
+                _id: id,
             });
         }
 
@@ -1198,9 +1204,8 @@ impl Collection {
     ///
     /// This method:
     /// 1. Removes the document ID from the bitmap
-    /// 2. Removes document segments from memory
-    /// 3. Updates all relevant indexes
-    /// 4. Deletes the document from storage
+    /// 2. Updates all relevant indexes
+    /// 3. Deletes the document from storage
     ///
     /// # Arguments
     /// * `id` - The ID of the document to remove
@@ -1395,10 +1400,12 @@ impl Collection {
                 return Ok(doc);
             }
         }
+
         Err(DBError::NotFound {
-            name: id.to_string(),
+            name: "document".to_string(),
             path: self.name.clone(),
-            source: format!("Document with ID {id} not found").into(),
+            source: format!("Document {id} not found").into(),
+            _id: id,
         })
     }
 

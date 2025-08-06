@@ -15,6 +15,7 @@ use anda_db_utils::{CountingWriter, UniqueVec};
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde_json::json;
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
     fmt::Debug,
@@ -459,8 +460,8 @@ where
                 if !self.config.allow_duplicates {
                     return Err(BTreeError::AlreadyExists {
                         name: self.name.clone(),
-                        id: format!("{doc_id:?}"),
-                        value: format!("{field_value:?}"),
+                        id: json!(doc_id),
+                        value: json!(field_value),
                     });
                 }
 
@@ -650,8 +651,8 @@ where
                 if self.postings.contains_key(field_value) {
                     return Err(BTreeError::AlreadyExists {
                         name: self.name.clone(),
-                        id: format!("{doc_id:?}"),
-                        value: format!("{field_value:?}"),
+                        id: json!(doc_id),
+                        value: json!(field_value),
                     });
                 }
             }

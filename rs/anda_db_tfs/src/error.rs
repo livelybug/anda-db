@@ -14,14 +14,14 @@ pub enum BM25Error {
     Serialization { name: String, source: BoxError },
 
     /// Error when a token is not found.
-    #[error("BM25 index {name:?}, token not found: {token:?}")]
-    NotFound { name: String, token: String },
+    #[error("BM25 index {name:?}, document {id} not found")]
+    NotFound { name: String, id: u64 },
 
-    /// Error when trying to add a segment with an ID that already exists
-    #[error("BM25 index {name:?}, segment {id} already exists")]
+    /// Error when trying to add a document with an ID that already exists
+    #[error("BM25 index {name:?}, document {id} already exists")]
     AlreadyExists { name: String, id: u64 },
 
-    /// Error when tokenization produces no tokens for a segment
-    #[error("BM25 index {name:?}, segment {id} tokenization failed: {text:?}")]
+    /// Error when tokenization produces no tokens for a document
+    #[error("BM25 index {name:?}, document {id} tokenization failed: {text:?}")]
     TokenizeFailed { name: String, id: u64, text: String },
 }
