@@ -1,6 +1,6 @@
 //! # Anda-DB BM25 Full-Text Search Library
 
-use anda_db_utils::{CountingWriter, UniqueVec};
+use anda_db_utils::{UniqueVec, estimate_cbor_size};
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -470,7 +470,7 @@ where
                     match self.postings.entry(token.clone()) {
                         dashmap::Entry::Occupied(mut entry) => {
                             let val = (id, freq);
-                            let size_increase = CountingWriter::count_cbor(&val) + 2;
+                            let size_increase = estimate_cbor_size(&val) + 2;
                             let e = entry.get_mut();
                             e.1.push(val);
                             let b = buckets_to_update.entry(e.0).or_default();
@@ -479,7 +479,7 @@ where
                         dashmap::Entry::Vacant(entry) => {
                             // Create new posting
                             let val = (bucket, vec![(id, freq)].into());
-                            let size_increase = CountingWriter::count_cbor(&val) + 2;
+                            let size_increase = estimate_cbor_size(&val) + 2;
                             entry.insert(val);
                             let b = buckets_to_update.entry(bucket).or_default();
                             b.insert(token, size_increase as u32);
@@ -613,9 +613,9 @@ where
             if let Some(mut posting) = self.postings.get_mut(&token) {
                 // Remove document from postings list
                 if let Some(val) = posting.1.swap_remove_if(|&(idx, _)| idx == id) {
-                    let mut size_decrease = CountingWriter::count_cbor(&val) + 2;
+                    let mut size_decrease = estimate_cbor_size(&val) + 2;
                     if posting.1.is_empty() {
-                        size_decrease += CountingWriter::count_cbor(&token) + 2;
+                        size_decrease += estimate_cbor_size(&token) + 2;
                         tokens_to_remove.push(token.clone());
                     }
                     let b = buckets_to_update.entry(posting.0).or_default();

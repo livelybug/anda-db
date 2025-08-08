@@ -5,6 +5,10 @@ use serde::{
 };
 use std::{collections::HashSet, hash::Hash};
 
+mod cbor_size;
+
+pub use cbor_size::estimate_cbor_size;
+
 /// A trait for functional-style method chaining.
 ///
 /// Allows any value to be passed through a function, enabling
@@ -299,22 +303,6 @@ impl CountingWriter {
     pub fn size(&self) -> usize {
         self.count
     }
-
-    /// Counts the size of a serializable value in CBOR format.
-    ///
-    /// # Arguments
-    ///
-    /// * `val` - The value to serialize and count.
-    ///
-    /// # Returns
-    ///
-    /// The size of the serialized value in bytes.
-    pub fn count_cbor(val: &impl Serialize) -> usize {
-        let mut writer = CountingWriter::new();
-        // Errors are ignored as CountingWriter::write never fails.
-        let _ = ciborium::into_writer(val, &mut writer);
-        writer.count
-    }
 }
 
 impl std::io::Write for CountingWriter {
@@ -604,26 +592,6 @@ mod tests {
         let result = writer.flush();
         assert!(result.is_ok());
         assert_eq!(writer.size(), 0); // Flush doesn't change size
-    }
-
-    #[test]
-    fn test_counting_writer_count_cbor() {
-        // Test with simple values
-        let size = CountingWriter::count_cbor(&42i32);
-        assert!(size > 0);
-
-        let size = CountingWriter::count_cbor(&"hello");
-        assert!(size > 0);
-
-        // Test with complex structure
-        let data = vec![1, 2, 3, 4, 5];
-        let size = CountingWriter::count_cbor(&data);
-        assert!(size > 0);
-
-        // Larger data should have larger size
-        let larger_data = vec![1; 100];
-        let larger_size = CountingWriter::count_cbor(&larger_data);
-        assert!(larger_size > size);
     }
 
     #[test]

@@ -11,7 +11,7 @@
 //! - Bucket-based storage for better incremental persistent
 //! - Efficient serialization and deserialization in CBOR format
 
-use anda_db_utils::{CountingWriter, UniqueVec};
+use anda_db_utils::{UniqueVec, estimate_cbor_size};
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -60,11 +60,6 @@ where
     /// Maximum bucket ID currently in use
     max_bucket_id: AtomicU32,
 
-    /// Maximum size of a bucket before creating a new one
-    /// When a bucket's stored data exceeds this size,
-    /// a new bucket should be created for new data
-    bucket_overload_size: u32,
-
     /// Number of query operations performed
     query_count: AtomicU64,
 
@@ -81,10 +76,12 @@ type PostingValue<PK> = (u32, u64, UniqueVec<PK>);
 /// Configuration parameters for the B-tree index
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BTreeConfig {
-    /// Maximum size of a bucket before creating a new one (in bytes)
+    /// Maximum size of a bucket before creating a new one
+    /// When a bucket's stored data exceeds this size,
+    /// a new bucket should be created for new data
     pub bucket_overload_size: u32,
 
-    /// Whether to allow duplicate keys
+    /// Whether to allow duplicate primary keys in an indexed field value
     /// If false, attempting to insert a duplicate key will result in an error
     pub allow_duplicates: bool,
 }
@@ -275,7 +272,6 @@ where
     /// * `BTreeIndex` - A new instance of the B-tree index
     pub fn new(name: String, config: Option<BTreeConfig>) -> Self {
         let config = config.unwrap_or_default();
-        let bucket_overload_size = config.bucket_overload_size;
         let stats = BTreeStats {
             version: 1,
             ..Default::default()
@@ -291,7 +287,6 @@ where
                 config,
                 stats,
             }),
-            bucket_overload_size,
             max_bucket_id: AtomicU32::new(0),
             query_count: AtomicU64::new(0),
             last_saved_version: AtomicU64::new(0),
@@ -336,7 +331,6 @@ where
             })?;
 
         // Extract configuration values
-        let bucket_overload_size = index.metadata.config.bucket_overload_size;
         let max_bucket_id = AtomicU32::new(index.metadata.stats.max_bucket_id);
         let query_count = AtomicU64::new(index.metadata.stats.query_count);
         let last_saved_version = AtomicU64::new(index.metadata.stats.version);
@@ -348,7 +342,6 @@ where
             buckets: DashMap::from_iter(vec![(0, (0, true, UniqueVec::default()))]),
             btree: RwLock::new(BTreeSet::new()),
             metadata: RwLock::new(index.metadata),
-            bucket_overload_size,
             query_count,
             max_bucket_id,
             last_saved_version,
@@ -449,7 +442,7 @@ where
     /// * `Ok(bool)` if the document_id-field_value pair was successfully added
     /// * `Err(BTreeError)` if failed
     pub fn insert(&self, doc_id: PK, field_value: FV, now_ms: u64) -> Result<bool, BTreeError> {
-        let bucket = self.max_bucket_id.load(Ordering::Acquire);
+        let bucket = self.max_bucket_id.load(Ordering::Relaxed);
 
         // Calculate the size increase for this insertion
         let mut is_new = false;
@@ -468,14 +461,14 @@ where
                 let posting = entry.get_mut();
                 // Add doc_id if it doesn't exist
                 if posting.2.push(doc_id.clone()) {
-                    size_increase = CountingWriter::count_cbor(&doc_id) as u32 + 2;
+                    size_increase = estimate_cbor_size(&doc_id) as u32 + 2;
                     posting.1 += 1; // increment version
                 }
             }
             dashmap::Entry::Vacant(entry) => {
                 // Create a new posting for this field value
                 let posting = (bucket, 1, vec![doc_id].into());
-                size_increase = CountingWriter::count_cbor(&posting) as u32 + 2;
+                size_increase = estimate_cbor_size(&posting) as u32 + 2;
                 entry.insert(posting);
                 is_new = true;
             }
@@ -499,7 +492,7 @@ where
                 })?;
 
             // Check if the bucket has enough space
-            if b.2.is_empty() || b.0 + size_increase < self.bucket_overload_size {
+            if b.2.is_empty() || b.0 + size_increase < self.config.bucket_overload_size {
                 b.0 += size_increase;
                 // Mark as dirty, needs to be persisted
                 b.1 = true;
@@ -508,12 +501,13 @@ where
             } else {
                 // If the current bucket is full, create a new one
                 let mut size_decrease = 0;
-                new_bucket = self.max_bucket_id.fetch_add(1, Ordering::Release) + 1;
+                new_bucket = self.max_bucket_id.fetch_add(1, Ordering::Relaxed) + 1;
                 {
                     if let Some(mut posting) = self.postings.get_mut(&field_value) {
                         // Update the posting's bucket ID
                         posting.0 = new_bucket;
-                        size_decrease = CountingWriter::count_cbor(&posting) as u32 + 2;
+                        size_decrease = estimate_cbor_size(&posting) as u32 + 2;
+                        size_increase = size_decrease;
                     }
                 }
                 // Remove the current field value from the current bucket
@@ -573,9 +567,9 @@ where
                 bucket_id = posting.0;
                 if posting.2.swap_remove_if(|id| id == &doc_id).is_some() {
                     size_decrease = if posting.2.len() > 1 {
-                        CountingWriter::count_cbor(&doc_id) as u32 + 2
+                        estimate_cbor_size(&doc_id) as u32 + 2
                     } else {
-                        CountingWriter::count_cbor(&posting) as u32 + 2
+                        estimate_cbor_size(&posting) as u32 + 2
                     };
                     posting.1 += 1; // increment version
                     posting_empty = posting.2.is_empty();
@@ -641,7 +635,7 @@ where
         // New values that need to be added to the B-tree
         let mut new_btree_values = Vec::new();
 
-        let bucket_id = self.max_bucket_id.load(Ordering::Acquire);
+        let bucket_id = self.max_bucket_id.load(Ordering::Relaxed);
 
         // Phase 1: collect existing postings and prepare modifications
         // Skip duplicate field values if not allowed
@@ -666,14 +660,14 @@ where
                     // Only add the doc_id if it's not already present
                     if posting.2.push(doc_id.clone()) {
                         // Calculate size increase for this insertion
-                        size_increase = CountingWriter::count_cbor(&doc_id) as u32 + 2;
+                        size_increase = estimate_cbor_size(&doc_id) as u32 + 2;
                         posting.1 += 1; // Increment version
                     }
                 }
                 dashmap::Entry::Vacant(entry) => {
                     // Create a new posting for this field value
                     let posting = (bucket_id, 1, vec![doc_id.clone()].into());
-                    size_increase = CountingWriter::count_cbor(&posting) as u32 + 2;
+                    size_increase = estimate_cbor_size(&posting) as u32 + 2;
                     // Insert the new posting
                     entry.insert(posting);
                     // Remember to add this to the B-tree for range queries
@@ -704,7 +698,7 @@ where
             if let Some(mut bucket_entry) = self.buckets.get_mut(&bucket_id) {
                 // Check if the bucket would overflow
                 if bucket_entry.2.is_empty()
-                    || bucket_entry.0 + size_increase < self.bucket_overload_size
+                    || bucket_entry.0 + size_increase < self.config.bucket_overload_size
                 {
                     // Bucket has enough space, update directly
                     bucket_entry.0 += size_increase;
@@ -718,7 +712,7 @@ where
                     // Bucket doesn't have enough space, need to migrate these values to a new bucket
                     for fv in field_values {
                         let size = if let Some(posting) = self.postings.get(&fv) {
-                            CountingWriter::count_cbor(&posting) as u32 + 2
+                            estimate_cbor_size(&posting) as u32 + 2
                         } else {
                             0
                         };
@@ -733,7 +727,7 @@ where
 
         // Phase 3: Create new buckets if needed
         if !field_values_to_migrate.is_empty() {
-            let mut next_bucket_id = self.max_bucket_id.fetch_add(1, Ordering::Release) + 1;
+            let mut next_bucket_id = self.max_bucket_id.fetch_add(1, Ordering::Relaxed) + 1;
 
             {
                 self.buckets
@@ -756,7 +750,7 @@ where
 
                 let mut new_bucket = false;
                 if let Some(mut nb) = self.buckets.get_mut(&next_bucket_id) {
-                    if nb.2.is_empty() || nb.0 + size < self.bucket_overload_size {
+                    if nb.2.is_empty() || nb.0 + size < self.config.bucket_overload_size {
                         // Bucket has enough space, update directly
                         nb.0 += size;
                         nb.2.push(field_value.clone());
@@ -767,7 +761,7 @@ where
                 }
 
                 if new_bucket {
-                    next_bucket_id = self.max_bucket_id.fetch_add(1, Ordering::Release) + 1;
+                    next_bucket_id = self.max_bucket_id.fetch_add(1, Ordering::Relaxed) + 1;
                     // update the posting's bucket_id again
                     if let Some(mut posting) = self.postings.get_mut(&field_value) {
                         posting.0 = next_bucket_id;
@@ -844,9 +838,9 @@ where
 
                     // Calculate size decrease based on whether this is the last document
                     size_decrease = if posting.2.len() > 1 {
-                        CountingWriter::count_cbor(&doc_id) as u32 + 2
+                        estimate_cbor_size(&doc_id) as u32 + 2
                     } else {
-                        CountingWriter::count_cbor(&posting) as u32 + 2
+                        estimate_cbor_size(&posting) as u32 + 2
                     };
 
                     // Remove the document ID from the posting
@@ -969,14 +963,10 @@ where
                 }
             }
             RangeQuery::Gt(start_key) => {
-                for k in self
-                    .btree
-                    .read()
-                    .range(std::ops::RangeFrom {
-                        start: start_key.clone(),
-                    })
-                    .filter(|&k| k > &start_key)
-                {
+                for k in self.btree.read().range((
+                    std::ops::Bound::Excluded(start_key.clone()),
+                    std::ops::Bound::Unbounded,
+                )) {
                     if let Some(posting) = self.postings.get(k) {
                         let (conti, rt) = f(k, &posting.2);
                         results.extend(rt);
@@ -1082,7 +1072,7 @@ where
             }
             RangeQuery::Not(query) => {
                 // 先收集要排除的 key，再遍历全集差集
-                let exclude: BTreeSet<FV> = self.range_keys(*query).into_iter().collect();
+                let exclude: HashSet<FV> = self.range_keys(*query).into_iter().collect();
 
                 for k in self.btree.read().iter() {
                     if exclude.contains(k) {
@@ -1119,20 +1109,20 @@ where
             (Some(cursor), Some(limit)) => self
                 .btree
                 .read()
-                .range(std::ops::RangeFrom {
-                    start: cursor.clone(),
-                })
-                .filter(|&k| k > &cursor)
+                .range((
+                    std::ops::Bound::Excluded(cursor.clone()),
+                    std::ops::Bound::Unbounded,
+                ))
                 .take(limit)
                 .cloned()
                 .collect(),
             (Some(cursor), None) => self
                 .btree
                 .read()
-                .range(std::ops::RangeFrom {
-                    start: cursor.clone(),
-                })
-                .filter(|&k| k > &cursor)
+                .range((
+                    std::ops::Bound::Excluded(cursor.clone()),
+                    std::ops::Bound::Unbounded,
+                ))
                 .cloned()
                 .collect(),
             (None, Some(limit)) => self.btree.read().iter().take(limit).cloned().collect(),
@@ -1150,14 +1140,10 @@ where
                 }
             }
             RangeQuery::Gt(start_key) => {
-                for k in self
-                    .btree
-                    .read()
-                    .range(std::ops::RangeFrom {
-                        start: start_key.clone(),
-                    })
-                    .filter(|&k| k > &start_key)
-                {
+                for k in self.btree.read().range((
+                    std::ops::Bound::Excluded(start_key.clone()),
+                    std::ops::Bound::Unbounded,
+                )) {
                     results.push(k.clone());
                 }
             }
@@ -1235,7 +1221,7 @@ where
                 }
             }
             RangeQuery::Not(query) => {
-                let exclude: Vec<FV> = self.range_keys(*query);
+                let exclude: HashSet<FV> = self.range_keys(*query).into_iter().collect();
                 for k in self.btree.read().iter() {
                     if !exclude.contains(k) {
                         results.push(k.clone());
@@ -1279,7 +1265,7 @@ where
         let mut meta = self.metadata();
         let prev_saved_version = self
             .last_saved_version
-            .fetch_max(meta.stats.version, Ordering::Release);
+            .fetch_max(meta.stats.version, Ordering::Relaxed);
         if prev_saved_version >= meta.stats.version {
             // No need to save if the version is not updated
             return Ok(false);
@@ -1447,20 +1433,36 @@ where
         }
 
         self.query_count.fetch_add(1, Ordering::Relaxed);
-        // Use prefix query
-        for k in self
-            .btree
-            .read()
-            .range(prefix.to_string()..)
-            .take_while(|k| k.starts_with(prefix))
-        {
+        // 空前缀：遍历全部键
+        if prefix.is_empty() {
+            for k in self.btree.read().iter() {
+                if let Some(posting) = self.postings.get(k) {
+                    let (con, rt) = f(k, &posting.2);
+                    if let Some(r) = rt {
+                        results.push(r);
+                    }
+                    if !con {
+                        break;
+                    }
+                }
+            }
+            return results;
+        }
+
+        // [lower, upper] 区间：upper = prefix + char::MAX，覆盖所有以 prefix 开头的字符串
+        let lower = prefix.to_string();
+        let mut upper = String::with_capacity(prefix.len() + 4);
+        upper.push_str(prefix);
+        upper.push(char::MAX);
+
+        for k in self.btree.read().range(lower..=upper) {
             if let Some(posting) = self.postings.get(k) {
                 let (con, rt) = f(k, &posting.2);
                 if let Some(r) = rt {
                     results.push(r);
                 }
                 if !con {
-                    return results;
+                    break;
                 }
             }
         }
@@ -2421,26 +2423,5 @@ mod tests {
         let stats = index.stats();
         assert_eq!(stats.num_elements, 1);
         assert_eq!(stats.delete_count, 1);
-    }
-
-    #[test]
-    fn test_counting_writer() {
-        // 测试 CountingWriter
-        let mut writer = CountingWriter::new();
-        assert_eq!(writer.size(), 0);
-
-        // 写入一些数据
-        let data = b"Hello, world!";
-        let result = std::io::Write::write(&mut writer, data);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), data.len());
-        assert_eq!(writer.size(), data.len());
-
-        // 测试 count_cbor 函数
-        let size = CountingWriter::count_cbor(&"test string".to_string());
-        assert!(size > 0);
-
-        let size_complex = CountingWriter::count_cbor(&vec![1, 2, 3, 4, 5]);
-        assert!(size_complex > 0);
     }
 }

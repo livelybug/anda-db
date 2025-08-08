@@ -58,7 +58,7 @@ struct MyData {
 }
 
 let data = MyData { id: 1, name: "test".to_string() };
-let size = CountingWriter::count_cbor(&data);
+let size = estimate_cbor_size(&data);
 
 println!("Serialized size: {} bytes", size);
 ```
