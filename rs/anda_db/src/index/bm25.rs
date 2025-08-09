@@ -1,7 +1,7 @@
 use anda_db_tfs::BM25Index;
 use bytes::Bytes;
 use parking_lot::RwLock;
-use std::{fmt::Debug, hash::Hash};
+use std::{fmt::Debug, hash::Hash, sync::Arc};
 
 use super::from_virtual_field_name;
 pub use anda_db_tfs::{
@@ -101,20 +101,24 @@ impl BM25 {
     ) -> Result<Self, DBError> {
         let fields = from_virtual_field_name(&name);
         let (metadata, ver) = storage.fetch_bytes(&BM25::metadata_path(&name)).await?;
+        let n = Arc::new(name.clone());
+        let s = Arc::new(storage.clone());
+        let n2 = n.clone();
+        let s2 = s.clone();
         let index = BM25Index::load_all(
             tokenizer,
             &metadata[..],
-            async |id: u32| {
-                let path = BM25::document_path(&name, id);
-                match storage.fetch_bytes(&path).await {
+            async move |id: u32| {
+                let path = BM25::document_path(n.clone().as_str(), id);
+                match s.clone().fetch_bytes(&path).await {
                     Ok((data, _)) => Ok(Some(data.into())),
                     Err(DBError::NotFound { .. }) => Ok(None),
                     Err(e) => Err(e.into()),
                 }
             },
-            async |id: u32| {
-                let path = BM25::posting_path(&name, id);
-                match storage.fetch_bytes(&path).await {
+            async move |id: u32| {
+                let path = BM25::posting_path(n2.clone().as_str(), id);
+                match s2.clone().fetch_bytes(&path).await {
                     Ok((data, _)) => Ok(Some(data.into())),
                     Err(DBError::NotFound { .. }) => Ok(None),
                     Err(e) => Err(e.into()),
@@ -148,29 +152,31 @@ impl BM25 {
             *self.metadata_version.write() = ver;
         }
 
-        let dirty_data = self.index.collect_dirty_documents()?;
-        let mut saved_buckets = Vec::new();
-        for (id, data) in dirty_data {
-            let path = BM25::document_path(&self.name, id);
-            let _ = self
-                .storage
-                .put_bytes(&path, Bytes::from(data), PutMode::Overwrite)
-                .await?;
-            saved_buckets.push(id);
-        }
-        self.index.mark_document_buckets_as_saved(&saved_buckets);
+        let n = Arc::new(self.name.clone());
+        let s = Arc::new(self.storage.clone());
+        self.index
+            .store_dirty_documents(async move |id, data| {
+                let path = BM25::document_path(n.clone().as_str(), id);
+                let _ = s
+                    .clone()
+                    .put_bytes(&path, Bytes::copy_from_slice(data), PutMode::Overwrite)
+                    .await?;
+                Ok(true)
+            })
+            .await?;
 
-        let dirty_data = self.index.collect_dirty_postings()?;
-        let mut saved_buckets = Vec::new();
-        for (id, data) in dirty_data {
-            let path = BM25::posting_path(&self.name, id);
-            let _ = self
-                .storage
-                .put_bytes(&path, Bytes::from(data), PutMode::Overwrite)
-                .await?;
-            saved_buckets.push(id);
-        }
-        self.index.mark_document_buckets_as_saved(&saved_buckets);
+        let n = Arc::new(self.name.clone());
+        let s = Arc::new(self.storage.clone());
+        self.index
+            .store_dirty_postings(async move |id, data| {
+                let path = BM25::posting_path(n.clone().as_str(), id);
+                let _ = s
+                    .clone()
+                    .put_bytes(&path, Bytes::copy_from_slice(data), PutMode::Overwrite)
+                    .await?;
+                Ok(true)
+            })
+            .await?;
 
         Ok(true)
     }

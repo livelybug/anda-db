@@ -1272,24 +1272,6 @@ impl HnswIndex {
         Ok(())
     }
 
-    pub fn collect_dirty_nodes(&self) -> Result<Vec<(u64, Vec<u8>)>, HnswError> {
-        let mut results = Vec::new();
-        let mut buf = Vec::with_capacity(8192);
-        let nodes = self.nodes.pin();
-        for id in self.dirty_nodes.read().iter() {
-            if let Some(node) = nodes.get(id) {
-                buf.clear();
-                ciborium::into_writer(&node, &mut buf).expect("Failed to serialize node");
-                results.push((*id, buf.clone()));
-            }
-        }
-        Ok(results)
-    }
-
-    pub fn mark_nodes_as_saved(&self, node_ids: &[u64]) {
-        self.dirty_nodes.write().retain(|x| !node_ids.contains(x));
-    }
-
     /// Updates the entry point after a node deletion
     ///
     /// # Arguments

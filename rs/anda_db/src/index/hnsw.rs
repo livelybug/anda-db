@@ -1,7 +1,7 @@
 use anda_db_hnsw::HnswIndex;
 use bytes::Bytes;
 use parking_lot::RwLock;
-use std::{fmt::Debug, hash::Hash};
+use std::{fmt::Debug, hash::Hash, sync::Arc};
 
 pub use anda_db_hnsw::{HnswConfig, HnswMetadata, HnswStats};
 
@@ -86,9 +86,11 @@ impl Hnsw {
     pub async fn bootstrap(name: String, storage: Storage) -> Result<Self, DBError> {
         let (metadata, metadata_version) = storage.fetch_bytes(&Hnsw::metadata_path(&name)).await?;
         let (ids, ids_version) = storage.fetch_bytes(&Hnsw::ids_path(&name)).await?;
-        let index = HnswIndex::load_all(&metadata[..], &ids[..], async |id: u64| {
-            let path = Hnsw::node_path(&name, id);
-            match storage.fetch_bytes(&path).await {
+        let n = Arc::new(name.clone());
+        let s = Arc::new(storage.clone());
+        let index = HnswIndex::load_all(&metadata[..], &ids[..], async move |id: u64| {
+            let path = Hnsw::node_path(n.clone().as_str(), id);
+            match s.clone().fetch_bytes(&path).await {
                 Ok((data, _)) => Ok(Some(data.into())),
                 Err(DBError::NotFound { .. }) => Ok(None),
                 Err(e) => Err(e.into()),
@@ -141,17 +143,18 @@ impl Hnsw {
             *self.ids_version.write() = ids_version;
         }
 
-        let dirty_data = self.index.collect_dirty_nodes()?;
-        let mut saved_nodes = Vec::new();
-        for (id, data) in dirty_data {
-            let path = Hnsw::node_path(&self.name, id);
-            let _ = self
-                .storage
-                .put_bytes(&path, Bytes::from(data), PutMode::Overwrite)
-                .await?;
-            saved_nodes.push(id);
-        }
-        self.index.mark_nodes_as_saved(&saved_nodes);
+        let n = Arc::new(self.name.clone());
+        let s = Arc::new(self.storage.clone());
+        self.index
+            .store_dirty_nodes(async move |id, data| {
+                let path = Hnsw::node_path(n.clone().as_str(), id);
+                let _ = s
+                    .clone()
+                    .put_bytes(&path, Bytes::copy_from_slice(data), PutMode::Overwrite)
+                    .await?;
+                Ok(true)
+            })
+            .await?;
 
         Ok(true)
     }

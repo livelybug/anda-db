@@ -4,7 +4,7 @@ use ciborium::from_reader;
 use ic_auth_types::{ByteBufB64, canonical_cbor_into_vec};
 use parking_lot::RwLock;
 use serde::{Serialize, de::DeserializeOwned};
-use std::{fmt::Debug, hash::Hash, str::FromStr};
+use std::{fmt::Debug, hash::Hash, str::FromStr, sync::Arc};
 
 pub use anda_db_btree::{BTreeConfig, BTreeMetadata, BTreeStats, RangeQuery};
 
@@ -527,9 +527,11 @@ where
         let fields: Vec<String> = from_virtual_field_name(&name);
         let path = BTree::metadata_path(&name);
         let (metadata, ver) = storage.fetch_bytes(&path).await?;
-        let index = BTreeIndex::<DocumentId, FV>::load_all(&metadata[..], async |id: u32| {
-            let path = BTree::posting_path(&name, id);
-            match storage.fetch_bytes(&path).await {
+        let n = Arc::new(name.clone());
+        let s = Arc::new(storage.clone());
+        let index = BTreeIndex::<DocumentId, FV>::load_all(&metadata[..], async move |id: u32| {
+            let path = BTree::posting_path(n.clone().as_str(), id);
+            match s.clone().fetch_bytes(&path).await {
                 Ok((data, _)) => Ok(Some(data.into())),
                 Err(DBError::NotFound { .. }) => Ok(None),
                 Err(e) => Err(e.into()),
@@ -562,22 +564,18 @@ where
             *self.metadata_version.write() = ver;
         }
 
-        // 收集需要保存的数据
-        let dirty_data = self.index.collect_dirty_postings()?;
-        let mut saved_buckets = Vec::new();
-
-        // 异步保存每个桶的数据
-        for (id, data) in dirty_data {
-            let path = BTree::posting_path(&self.name, id);
-            let _ = self
-                .storage
-                .put_bytes(&path, Bytes::from(data), PutMode::Overwrite)
-                .await?;
-            saved_buckets.push(id);
-        }
-
-        // 标记已成功保存的桶
-        self.index.mark_buckets_as_saved(&saved_buckets);
+        let n = Arc::new(self.name.clone());
+        let s = Arc::new(self.storage.clone());
+        self.index
+            .store_dirty_postings(async move |id, data| {
+                let path = BTree::posting_path(n.clone().as_str(), id);
+                let _ = s
+                    .clone()
+                    .put_bytes(&path, Bytes::copy_from_slice(data), PutMode::Overwrite)
+                    .await?;
+                Ok(true)
+            })
+            .await?;
 
         Ok(true)
     }

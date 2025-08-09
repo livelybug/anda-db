@@ -27,7 +27,12 @@ use crate::{
 /// AndaDB provides a high-level interface for creating, opening, and managing
 /// collections of documents. It handles persistence through an object store
 /// and maintains metadata about the database and its collections.
+#[derive(Clone)]
 pub struct AndaDB {
+    inner: Arc<InnerDB>,
+}
+
+struct InnerDB {
     /// Database name
     name: String,
     /// Underlying object storage implementation
@@ -86,7 +91,7 @@ pub struct DBMetadata {
 
 impl Debug for AndaDB {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "AndaDB({})", self.name)
+        write!(f, "AndaDB({})", self.inner.name)
     }
 }
 
@@ -133,12 +138,14 @@ impl AndaDB {
         }
 
         Ok(Self {
-            name: metadata.config.name.clone(),
-            object_store,
-            storage,
-            metadata: RwLock::new(metadata),
-            collections: RwLock::new(BTreeMap::new()),
-            read_only: AtomicBool::new(false),
+            inner: Arc::new(InnerDB {
+                name: metadata.config.name.clone(),
+                object_store,
+                storage,
+                metadata: RwLock::new(metadata),
+                collections: RwLock::new(BTreeMap::new()),
+                read_only: AtomicBool::new(false),
+            }),
         })
     }
 
@@ -183,12 +190,14 @@ impl AndaDB {
                 };
 
                 let this = Self {
-                    name: metadata.config.name.clone(),
-                    object_store,
-                    storage,
-                    metadata: RwLock::new(metadata),
-                    collections: RwLock::new(BTreeMap::new()),
-                    read_only: AtomicBool::new(false),
+                    inner: Arc::new(InnerDB {
+                        name: metadata.config.name.clone(),
+                        object_store,
+                        storage,
+                        metadata: RwLock::new(metadata),
+                        collections: RwLock::new(BTreeMap::new()),
+                        read_only: AtomicBool::new(false),
+                    }),
                 };
 
                 if let Some(lock) = set_lock {
@@ -212,12 +221,14 @@ impl AndaDB {
                 }
 
                 Ok(Self {
-                    name: metadata.config.name.clone(),
-                    object_store,
-                    storage,
-                    metadata: RwLock::new(metadata),
-                    collections: RwLock::new(BTreeMap::new()),
-                    read_only: AtomicBool::new(false),
+                    inner: Arc::new(InnerDB {
+                        name: metadata.config.name.clone(),
+                        object_store,
+                        storage,
+                        metadata: RwLock::new(metadata),
+                        collections: RwLock::new(BTreeMap::new()),
+                        read_only: AtomicBool::new(false),
+                    }),
                 })
             }
             Err(err) => Err(err),
@@ -226,12 +237,12 @@ impl AndaDB {
 
     /// Returns the name of the database.
     pub fn name(&self) -> &str {
-        &self.name
+        &self.inner.name
     }
 
     /// Returns a clone of the database metadata.
     pub fn metadata(&self) -> DBMetadata {
-        self.metadata.read().clone()
+        self.inner.metadata.read().clone()
     }
 
     /// Sets the database to read-only mode.
@@ -242,14 +253,14 @@ impl AndaDB {
     /// # Arguments
     /// * `read_only` - Whether to enable read-only mode
     pub fn set_read_only(&self, read_only: bool) {
-        self.read_only.store(read_only, Ordering::Release);
+        self.inner.read_only.store(read_only, Ordering::Release);
         log::info!(
             action = "set_read_only",
-            database = self.name;
+            database = self.inner.name;
             "Database is set to read-only: {read_only}"
         );
 
-        for collection in self.collections.read().values() {
+        for collection in self.inner.collections.read().values() {
             collection.set_read_only(read_only);
         }
     }
@@ -264,6 +275,7 @@ impl AndaDB {
     pub async fn close(&self) -> Result<(), DBError> {
         self.set_read_only(true);
         let collections = self
+            .inner
             .collections
             .read()
             .values()
@@ -276,7 +288,7 @@ impl AndaDB {
                 let elapsed = start.elapsed();
                 log::info!(
                     action = "close",
-                    database = self.name,
+                    database = self.inner.name,
                     elapsed = elapsed.as_millis();
                     "Database closed successfully in {elapsed:?}",
                 );
@@ -285,7 +297,7 @@ impl AndaDB {
                 let elapsed = start.elapsed();
                 log::error!(
                     action = "close",
-                    database = self.name,
+                    database = self.inner.name,
                     elapsed = elapsed.as_millis();
                     "Failed to close database: {err:?}",
                 );
@@ -316,6 +328,7 @@ impl AndaDB {
             };
 
             let collections = self
+                .inner
                 .collections
                 .read()
                 .values()
@@ -328,7 +341,7 @@ impl AndaDB {
                     let elapsed = start.elapsed();
                     log::info!(
                         action = "auto_flush",
-                        database = self.name,
+                        database = self.inner.name,
                         elapsed = elapsed.as_millis();
                         "Database auto-flushed successfully in {elapsed:?}",
                     );
@@ -337,7 +350,7 @@ impl AndaDB {
                     let elapsed = start.elapsed();
                     log::error!(
                         action = "auto_flush",
-                        database = self.name,
+                        database = self.inner.name,
                         elapsed = elapsed.as_millis();
                         "Failed to auto-flush database: {err:?}",
                     );
@@ -367,18 +380,18 @@ impl AndaDB {
     where
         F: AsyncFnOnce(&mut Collection) -> Result<(), DBError>,
     {
-        if self.read_only.load(Ordering::Relaxed) {
+        if self.inner.read_only.load(Ordering::Relaxed) {
             return Err(DBError::Generic {
-                name: self.name.clone(),
+                name: self.inner.name.clone(),
                 source: "database is read-only".into(),
             });
         }
 
         {
-            if self.collections.read().contains_key(&config.name) {
+            if self.inner.collections.read().contains_key(&config.name) {
                 return Err(DBError::AlreadyExists {
                     name: config.name,
-                    path: self.name.clone(),
+                    path: self.inner.name.clone(),
                     source: "collection already exists".into(),
                     _id: 0,
                 });
@@ -387,13 +400,14 @@ impl AndaDB {
 
         let start = Instant::now();
         // self.metadata.collections will check it exists again in Collection::create
-        let mut collection = Collection::create(self, schema, config).await?;
+        let mut collection = Collection::create(self.clone(), schema, config).await?;
         f(&mut collection).await?;
         let collection = Arc::new(collection);
         {
-            let mut collections = self.collections.write();
+            let mut collections = self.inner.collections.write();
             collections.insert(collection.name().to_string(), collection.clone());
-            self.metadata
+            self.inner
+                .metadata
                 .write()
                 .collections
                 .insert(collection.name().to_string());
@@ -405,7 +419,7 @@ impl AndaDB {
         let elapsed = start.elapsed();
         log::info!(
             action = "create_collection",
-            database = self.name,
+            database = self.inner.name,
             collection = collection.name(),
             elapsed = elapsed.as_millis();
             "Create a collection successfully in {elapsed:?}",
@@ -435,21 +449,27 @@ impl AndaDB {
     where
         F: AsyncFnOnce(&mut Collection) -> Result<(), DBError>,
     {
-        if self.read_only.load(Ordering::Relaxed) {
+        if self.inner.read_only.load(Ordering::Relaxed) {
             return Err(DBError::Generic {
-                name: self.name.clone(),
+                name: self.inner.name.clone(),
                 source: "database is read-only".into(),
             });
         }
 
         {
-            if let Some(collection) = self.collections.read().get(&config.name) {
+            if let Some(collection) = self.inner.collections.read().get(&config.name) {
                 return Ok(collection.clone());
             }
         }
 
         {
-            if !self.metadata.read().collections.contains(&config.name) {
+            if !self
+                .inner
+                .metadata
+                .read()
+                .collections
+                .contains(&config.name)
+            {
                 return self.create_collection(schema, config, f).await;
             }
         }
@@ -473,25 +493,25 @@ impl AndaDB {
         F: AsyncFnOnce(&mut Collection) -> Result<(), DBError>,
     {
         {
-            if let Some(collection) = self.collections.read().get(&name) {
+            if let Some(collection) = self.inner.collections.read().get(&name) {
                 return Ok(collection.clone());
             }
         }
         {
-            if !self.metadata.read().collections.contains(&name) {
+            if !self.inner.metadata.read().collections.contains(&name) {
                 return Err(DBError::NotFound {
                     name,
-                    path: self.name.clone(),
+                    path: self.inner.name.clone(),
                     source: "collection not found".into(),
                     _id: 0,
                 });
             }
         }
 
-        let collection = Collection::open(self, name, f).await?;
+        let collection = Collection::open(self.clone(), name, f).await?;
         let collection = Arc::new(collection);
         {
-            let mut collections = self.collections.write();
+            let mut collections = self.inner.collections.write();
             collections.insert(collection.name().to_string(), collection.clone());
         }
         let now = unix_ms();
@@ -501,11 +521,12 @@ impl AndaDB {
 
     async fn set_lock(&self, lock: ByteBufB64) -> Result<(), DBError> {
         {
-            self.metadata.write().config.lock = Some(lock);
+            self.inner.metadata.write().config.lock = Some(lock);
         }
 
         let metadata = self.metadata();
-        self.storage
+        self.inner
+            .storage
             .put(Self::METADATA_PATH, &metadata, None)
             .await?;
         Ok(())
@@ -524,10 +545,11 @@ impl AndaDB {
     async fn flush(&self, now_ms: u64) -> Result<(), DBError> {
         let metadata = self.metadata();
 
-        self.storage
+        self.inner
+            .storage
             .put(Self::METADATA_PATH, &metadata, None)
             .await?;
-        self.storage.store_metadata(0, now_ms).await?;
+        self.inner.storage.store_metadata(0, now_ms).await?;
         Ok(())
     }
 
@@ -535,7 +557,7 @@ impl AndaDB {
     ///
     /// This method is used internally by collections to access the object store.
     pub(crate) fn object_store(&self) -> Arc<dyn ObjectStore> {
-        self.object_store.clone()
+        self.inner.object_store.clone()
     }
 }
 
@@ -734,6 +756,6 @@ mod tests {
         db.close().await.unwrap();
 
         // Database should be in read-only mode after closing
-        assert!(db.read_only.load(Ordering::Relaxed));
+        assert!(db.inner.read_only.load(Ordering::Relaxed));
     }
 }

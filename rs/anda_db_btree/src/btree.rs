@@ -1360,52 +1360,6 @@ where
         let mut metadata = self.metadata.write();
         f(&mut metadata);
     }
-
-    /// 收集所有需要持久化的脏桶数据
-    pub fn collect_dirty_postings(&self) -> Result<Vec<(u32, Vec<u8>)>, BTreeError> {
-        let mut results = Vec::new();
-        let mut buf = Vec::with_capacity(8192);
-
-        for bucket in self.buckets.iter() {
-            if bucket.1 {
-                // 如果桶是脏的，需要持久化
-                let mut postings: HashMap<&FV, ciborium::Value> =
-                    HashMap::with_capacity(bucket.2.len());
-                for k in bucket.2.iter() {
-                    if let Some(posting) = self.postings.get(k) {
-                        postings.insert(
-                            k,
-                            ciborium::cbor!(posting).map_err(|err| BTreeError::Serialization {
-                                name: self.name.clone(),
-                                source: err.into(),
-                            })?,
-                        );
-                    }
-                }
-
-                buf.clear();
-                ciborium::into_writer(&postings, &mut buf).map_err(|err| {
-                    BTreeError::Serialization {
-                        name: self.name.clone(),
-                        source: err.into(),
-                    }
-                })?;
-
-                results.push((*bucket.key(), buf.clone()));
-            }
-        }
-
-        Ok(results)
-    }
-
-    /// 标记指定的桶为已保存状态
-    pub fn mark_buckets_as_saved(&self, bucket_ids: &[u32]) {
-        for bucket_id in bucket_ids {
-            if let Some(mut bucket) = self.buckets.get_mut(bucket_id) {
-                bucket.1 = false; // 标记为不脏
-            }
-        }
-    }
 }
 
 impl<PK> BTreeIndex<PK, String>

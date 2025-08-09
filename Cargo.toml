@@ -30,7 +30,6 @@ license = "MIT"
 [workspace.dependencies]
 aes-gcm = "0.10"
 async-trait = "0.1"
-async-recursion = "1.1"
 async-stream = "0.3"
 bytes = "1"
 base64 = "0.22"

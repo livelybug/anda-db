@@ -18,6 +18,9 @@ pub static DOMAIN_TYPE: &str = "Domain";
 /// The type identifier for person entities.
 pub static PERSON_TYPE: &str = "Person";
 
+/// The type identifier for event entities.
+pub static EVENT_TYPE: &str = "Event";
+
 /// The predicate type for domain membership relationships.
 pub static BELONGS_TO_DOMAIN_TYPE: &str = "belongs_to_domain";
 

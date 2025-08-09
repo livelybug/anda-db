@@ -173,7 +173,7 @@ impl Collection {
     /// # Returns
     /// A new Collection instance or an error if creation fails
     pub(crate) async fn create(
-        db: &AndaDB,
+        db: AndaDB,
         schema: Schema,
         config: CollectionConfig,
     ) -> Result<Self, DBError> {
@@ -252,7 +252,7 @@ impl Collection {
     ///
     /// # Returns
     /// The opened Collection instance or an error if opening fails
-    pub(crate) async fn open<F>(db: &AndaDB, name: String, f: F) -> Result<Self, DBError>
+    pub(crate) async fn open<F>(db: AndaDB, name: String, f: F) -> Result<Self, DBError>
     where
         F: AsyncFnOnce(&mut Collection) -> Result<(), DBError>,
     {
@@ -298,8 +298,6 @@ impl Collection {
             ids_version: RwLock::new(ids_version),
             index_hooks: Arc::new(DefaultIndexHooks),
         };
-
-        f(&mut collection).await?;
         collection.load_indexes().await?;
         let fixed = collection.auto_repair_indexes().await?;
         if fixed > 0 {
@@ -308,10 +306,9 @@ impl Collection {
                 collection = collection.name;
                 "Auto-repaired {fixed} documents",
             );
-
-            // flush the fixed documents
-            collection.flush(unix_ms()).await?;
         }
+
+        f(&mut collection).await?;
         Ok(collection)
     }
 
@@ -320,7 +317,7 @@ impl Collection {
     /// # Returns
     /// Ok(()) if successful, or an error if loading fails
     async fn load_indexes(&mut self) -> Result<(), DBError> {
-        let meta = self.metadata.read().clone();
+        let meta = { self.metadata.read().clone() };
         let (btree_indexes, bm25_indexes, hnsw_indexes) = try_join_await!(
             async {
                 let mut btree_indexes = Vec::new();
