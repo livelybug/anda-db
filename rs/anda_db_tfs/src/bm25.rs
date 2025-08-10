@@ -3,9 +3,10 @@
 use anda_db_utils::{UniqueVec, estimate_cbor_size};
 use dashmap::DashMap;
 use parking_lot::RwLock;
+use rustc_hash::{FxBuildHasher, FxHashMap};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet},
     io::{Read, Write},
     sync::atomic::{AtomicU32, AtomicU64, Ordering},
 };
@@ -37,6 +38,9 @@ pub struct BM25Index<T: Tokenizer + Clone> {
     /// - tokens: List of tokens stored in this bucket
     buckets: DashMap<u32, (u32, bool, UniqueVec<String>)>,
 
+    /// Maps document IDs to their bucket IDs
+    document_bucket_ids: DashMap<u32, BTreeSet<u64>>,
+
     /// Inverted index mapping tokens to (bucket id, Vec<(document_id, term_frequency)>)
     postings: DashMap<String, PostingValue>,
 
@@ -59,6 +63,9 @@ pub struct BM25Index<T: Tokenizer + Clone> {
 
     /// Average number of tokens per document
     avg_seg_tokens: RwLock<f32>,
+
+    /// Total number of tokens indexed.
+    total_tokens: AtomicU64,
 
     /// Number of search operations performed.
     search_count: AtomicU64,
@@ -163,15 +170,13 @@ pub struct BM25Stats {
 /// Serializable BM25 index structure (owned version).
 #[derive(Clone, Serialize, Deserialize)]
 struct BM25IndexOwned {
-    seg_tokens: DashMap<u64, usize>,
-    postings: DashMap<String, PostingValue>,
+    // postings: DashMap<String, PostingValue>,
     metadata: BM25Metadata,
 }
 
 #[derive(Clone, Serialize)]
 struct BM25IndexRef<'a> {
-    seg_tokens: &'a DashMap<u64, usize>,
-    postings: &'a DashMap<String, PostingValue>,
+    // postings: &'a DashMap<String, PostingValue>,
     metadata: &'a BM25Metadata,
 }
 
@@ -203,6 +208,7 @@ where
             config: config.clone(),
             seg_tokens: DashMap::new(),
             postings: DashMap::new(),
+            document_bucket_ids: DashMap::new(),
             buckets: DashMap::from_iter(vec![(0, (0, true, UniqueVec::default()))]),
             metadata: RwLock::new(BM25Metadata {
                 name,
@@ -214,6 +220,7 @@ where
             max_document_id: AtomicU64::new(0),
             dirty_document_buckets: RwLock::new(BTreeSet::new()),
             avg_seg_tokens: RwLock::new(0.0),
+            total_tokens: AtomicU64::new(0),
             search_count: AtomicU64::new(0),
             last_saved_version: AtomicU64::new(0),
         }
@@ -275,8 +282,9 @@ where
             name: index.metadata.name.clone(),
             tokenizer,
             config: index.metadata.config.clone(),
-            seg_tokens: index.seg_tokens,
-            postings: index.postings,
+            seg_tokens: DashMap::new(),
+            postings: DashMap::new(),
+            document_bucket_ids: DashMap::new(),
             buckets: DashMap::from_iter(vec![(0, (0, true, UniqueVec::new()))]),
             metadata: RwLock::new(index.metadata),
             dirty_document_buckets: RwLock::new(BTreeSet::new()),
@@ -286,6 +294,7 @@ where
             avg_seg_tokens,
             search_count,
             last_saved_version,
+            total_tokens: AtomicU64::new(0),
         })
     }
 
@@ -313,15 +322,23 @@ where
                 source: err,
             })?;
             if let Some(data) = data {
-                let documents: HashMap<u64, usize> =
+                let documents: FxHashMap<u64, usize> =
                     ciborium::from_reader(&data[..]).map_err(|err| BM25Error::Serialization {
                         name: self.name.clone(),
                         source: err.into(),
                     })?;
 
-                self.seg_tokens.extend(documents);
+                if !documents.is_empty() {
+                    let bucket_ids: BTreeSet<u64> = documents.keys().cloned().collect();
+                    self.document_bucket_ids.insert(i as u32, bucket_ids);
+                    self.seg_tokens.extend(documents);
+                }
             }
         }
+
+        let total_tokens: usize = self.seg_tokens.iter().map(|r| *r.value()).sum();
+        self.total_tokens
+            .store(total_tokens as u64, Ordering::Relaxed);
 
         Ok(())
     }
@@ -350,7 +367,7 @@ where
                 source: err,
             })?;
             if let Some(data) = data {
-                let postings: HashMap<String, PostingValue> = ciborium::from_reader(&data[..])
+                let postings: FxHashMap<String, PostingValue> = ciborium::from_reader(&data[..])
                     .map_err(|err| BM25Error::Serialization {
                         name: self.name.clone(),
                         source: err.into(),
@@ -450,9 +467,8 @@ where
 
         // Phase 1: Update the postings collection
         let bucket = self.max_bucket_id.load(Ordering::Acquire);
-        let docs = self.seg_tokens.len();
+        let prev_docs = self.seg_tokens.len();
         let tokens: usize = token_freqs.values().sum();
-        let total_tokens: usize = self.seg_tokens.iter().map(|r| *r.value()).sum();
         // buckets_to_update: BTreeMap<bucketid, BTreeMap<token, size_increase>>
         let mut buckets_to_update: BTreeMap<u32, BTreeMap<String, u32>> = BTreeMap::new();
         match self.seg_tokens.entry(id) {
@@ -464,6 +480,15 @@ where
             }
             dashmap::Entry::Vacant(v) => {
                 v.insert(tokens);
+
+                {
+                    // Calculate new average document length
+                    let prev_total = self
+                        .total_tokens
+                        .fetch_add(tokens as u64, Ordering::Relaxed);
+                    let new_avg = (prev_total + tokens as u64) as f32 / (prev_docs + 1) as f32;
+                    *self.avg_seg_tokens.write() = new_avg;
+                }
 
                 // Update inverted index
                 for (token, freq) in token_freqs {
@@ -487,12 +512,12 @@ where
                     };
                 }
 
-                // Calculate new average document length
-                let avg_seg_tokens = (total_tokens + tokens) as f32 / (docs + 1) as f32;
-                *self.avg_seg_tokens.write() = avg_seg_tokens;
-                self.dirty_document_buckets
-                    .write()
-                    .insert((id / SEGMENTS_BUCKET_SIZE) as u32);
+                let bucket_id = (id / SEGMENTS_BUCKET_SIZE) as u32;
+                self.document_bucket_ids
+                    .entry(bucket_id)
+                    .or_default()
+                    .insert(id);
+                self.dirty_document_buckets.write().insert(bucket_id);
 
                 self.update_metadata(|m| {
                     m.stats.version += 1;
@@ -539,7 +564,7 @@ where
                 if let Some(mut ob) = self.buckets.get_mut(&old_bucket_id) {
                     if ob.2.swap_remove_if(|k| &token == k).is_some() {
                         ob.0 = ob.0.saturating_sub(size);
-                        // ob.1 = true; // do not need to set dirty
+                        ob.1 = true;
                     }
                 }
 
@@ -594,9 +619,24 @@ where
     /// * `true` if the document was found and removed
     /// * `false` if the document was not found
     pub fn remove(&self, id: u64, text: &str, now_ms: u64) -> bool {
-        if self.seg_tokens.remove(&id).is_none() {
-            // Segment not found
-            return false;
+        let removed_tokens = match self.seg_tokens.remove(&id) {
+            Some((_k, v)) => v,
+            None => return false,
+        };
+
+        {
+            // Recalculate average document length
+            let prev_total = self
+                .total_tokens
+                .fetch_sub(removed_tokens as u64, Ordering::Relaxed);
+            let new_total = prev_total.saturating_sub(removed_tokens as u64);
+            let remaining = self.seg_tokens.len();
+            let new_avg = if remaining == 0 {
+                0.0
+            } else {
+                new_total as f32 / remaining as f32
+            };
+            *self.avg_seg_tokens.write() = new_avg;
         }
 
         // Tokenize the document
@@ -641,17 +681,15 @@ where
             self.postings.remove(&token);
         }
 
-        // Recalculate average document length
-        let total_tokens: usize = self.seg_tokens.iter().map(|r| *r.value()).sum();
-        let avg_seg_tokens = if self.seg_tokens.is_empty() {
-            0.0
-        } else {
-            total_tokens as f32 / self.seg_tokens.len() as f32
-        };
-        *self.avg_seg_tokens.write() = avg_seg_tokens;
-        self.dirty_document_buckets
-            .write()
-            .insert((id / SEGMENTS_BUCKET_SIZE) as u32);
+        let bucket_id = (id / SEGMENTS_BUCKET_SIZE) as u32;
+        if let Some(mut bucket_set) = self.document_bucket_ids.get_mut(&bucket_id) {
+            bucket_set.remove(&id);
+            if bucket_set.is_empty() {
+                drop(bucket_set);
+                self.document_bucket_ids.remove(&bucket_id);
+            }
+        }
+        self.dirty_document_buckets.write().insert(bucket_id);
 
         self.update_metadata(|m| {
             m.stats.version += 1;
@@ -703,7 +741,7 @@ where
     ) -> Vec<(u64, f32)> {
         let query_expr = QueryType::parse(query);
         let params = params.as_ref().unwrap_or(&self.config.bm25);
-        let scored_docs = self.execute_query(&query_expr, params);
+        let scored_docs = self.execute_query(&query_expr, params, false);
 
         self.search_count.fetch_add(1, Ordering::Relaxed);
         // Convert to vector and sort by score (descending)
@@ -715,39 +753,50 @@ where
     }
 
     /// Execute a query expression, returning a mapping of document IDs to scores
-    fn execute_query(&self, query: &QueryType, params: &BM25Params) -> HashMap<u64, f32> {
+    fn execute_query(
+        &self,
+        query: &QueryType,
+        params: &BM25Params,
+        negated_not: bool,
+    ) -> FxHashMap<u64, f32> {
         match query {
             QueryType::Term(term) => self.score_term(term, params),
             QueryType::And(subqueries) => self.score_and(subqueries, params),
             QueryType::Or(subqueries) => self.score_or(subqueries, params),
-            QueryType::Not(subquery) => self.score_not(subquery, params),
+            QueryType::Not(subquery) => self.score_not(subquery, params, negated_not),
         }
     }
 
     /// Scores a single term
-    fn score_term(&self, term: &str, params: &BM25Params) -> HashMap<u64, f32> {
+    fn score_term(&self, term: &str, params: &BM25Params) -> FxHashMap<u64, f32> {
         if self.postings.is_empty() {
-            return HashMap::new();
+            return FxHashMap::default();
         }
 
         let mut tokenizer = self.tokenizer.clone();
         let query_terms = collect_tokens(&mut tokenizer, term, None);
         if query_terms.is_empty() {
-            return HashMap::new();
+            return FxHashMap::default();
         }
 
-        let mut scores: HashMap<u64, f32> = HashMap::with_capacity(self.seg_tokens.len().min(1000));
+        let mut scores: FxHashMap<u64, f32> = FxHashMap::with_capacity_and_hasher(
+            self.seg_tokens.len().min(1000),
+            FxBuildHasher,
+        );
         let seg_tokens = self.seg_tokens.len() as f32;
         let avg_seg_tokens = self.avg_seg_tokens.read().max(1.0);
-        let term_scores: Vec<HashMap<u64, f32>> = query_terms
+        let term_scores: Vec<FxHashMap<u64, f32>> = query_terms
             .iter()
             .filter_map(|(term, _)| {
                 self.postings.get(term).map(|postings| {
                     let df = postings.1.len() as f32;
-                    let idf = ((seg_tokens - df + 0.5) / (df + 0.5) + 1.0).ln();
+                    let idf_raw = (seg_tokens - df + 0.5) / (df + 0.5);
+                    // 避免数值问题并注释说明：经典 BM25 使用 ln(idf_raw)
+                    // let idf = idf_raw.max(1e-6).ln();
+                    let idf = (idf_raw + 1.0).ln();
 
                     // compute BM25 score for each document
-                    let mut term_scores = HashMap::new();
+                    let mut term_scores = FxHashMap::default();
                     for (doc_id, tf) in postings.1.iter() {
                         let tokens = self
                             .seg_tokens
@@ -778,15 +827,15 @@ where
     }
 
     /// Scores an OR query
-    fn score_or(&self, subqueries: &[Box<QueryType>], params: &BM25Params) -> HashMap<u64, f32> {
-        let mut result = HashMap::new();
+    fn score_or(&self, subqueries: &[Box<QueryType>], params: &BM25Params) -> FxHashMap<u64, f32> {
+        let mut result = FxHashMap::default();
         if subqueries.is_empty() {
             return result;
         }
 
         // Execute all subqueries and merge results
         for subquery in subqueries {
-            let sub_result = self.execute_query(subquery, params);
+            let sub_result = self.execute_query(subquery, params, false);
 
             for (doc_id, score) in sub_result {
                 *result.entry(doc_id).or_insert(0.0) += score;
@@ -797,20 +846,20 @@ where
     }
 
     /// Scores an AND query
-    fn score_and(&self, subqueries: &[Box<QueryType>], params: &BM25Params) -> HashMap<u64, f32> {
+    fn score_and(&self, subqueries: &[Box<QueryType>], params: &BM25Params) -> FxHashMap<u64, f32> {
         if subqueries.is_empty() {
-            return HashMap::new();
+            return FxHashMap::default();
         }
 
         // Execute the first subquery
-        let mut result = self.execute_query(&subqueries[0], params);
+        let mut result = self.execute_query(&subqueries[0], params, false);
         if result.is_empty() {
-            return HashMap::new();
+            return FxHashMap::default();
         }
 
         // Execute the remaining subqueries and intersect the results
         for subquery in &subqueries[1..] {
-            let sub_result = self.execute_query(subquery, params);
+            let sub_result = self.execute_query(subquery, params, true);
             if matches!(subquery.as_ref(), QueryType::Not(_)) {
                 // handle NOT query, remove it from the result
                 for doc_id in sub_result.keys() {
@@ -822,7 +871,7 @@ where
             // Retain only documents that are in both results
             result.retain(|k, _| sub_result.contains_key(k));
             if result.is_empty() {
-                return HashMap::new();
+                return FxHashMap::default();
             }
 
             // Merge scores
@@ -835,8 +884,25 @@ where
     }
 
     /// Scores a NOT query
-    fn score_not(&self, subquery: &QueryType, params: &BM25Params) -> HashMap<u64, f32> {
-        self.execute_query(subquery, params)
+    fn score_not(
+        &self,
+        subquery: &QueryType,
+        params: &BM25Params,
+        negated_not: bool,
+    ) -> FxHashMap<u64, f32> {
+        let exclude = self.execute_query(subquery, params, negated_not);
+        if negated_not {
+            return exclude;
+        }
+
+        let mut result = FxHashMap::default();
+        for entry in self.seg_tokens.iter() {
+            let doc_id = *entry.key();
+            if !exclude.contains_key(&doc_id) {
+                result.insert(doc_id, 0.0);
+            }
+        }
+        result
     }
 
     /// Stores the index metadata, IDs and nodes to persistent storage.
@@ -884,8 +950,6 @@ where
 
         ciborium::into_writer(
             &BM25IndexRef {
-                seg_tokens: &self.seg_tokens,
-                postings: &DashMap::new(),
                 metadata: &self.metadata(),
             },
             w,
@@ -907,21 +971,21 @@ where
     where
         F: AsyncFnMut(u32, &[u8]) -> Result<bool, BoxError>,
     {
-        let mut dirty_document_buckets = BTreeSet::new();
-        {
+        let mut dirty_document_buckets = {
             // move the dirty nodes into a temporary variable
             // and release the lock
-            dirty_document_buckets.append(&mut self.dirty_document_buckets.write());
-        }
+            let mut guard = self.dirty_document_buckets.write();
+            std::mem::take(&mut *guard)
+        };
 
         let mut buf = Vec::with_capacity(1024 * 256);
         while let Some(bucket) = dirty_document_buckets.pop_first() {
-            let mut documents = HashMap::new();
-            for id in
-                (bucket as u64 * SEGMENTS_BUCKET_SIZE)..((bucket as u64 + 1) * SEGMENTS_BUCKET_SIZE)
-            {
-                if let Some(val) = self.seg_tokens.get(&id) {
-                    documents.insert(id, *val);
+            let mut documents = FxHashMap::default();
+            if let Some(doc_ids) = self.document_bucket_ids.get(&bucket) {
+                for &id in doc_ids.iter() {
+                    if let Some(val) = self.seg_tokens.get(&id) {
+                        documents.insert(id, *val);
+                    }
                 }
             }
 
@@ -979,7 +1043,8 @@ where
         for mut bucket in self.buckets.iter_mut() {
             if bucket.1 {
                 // If the bucket is dirty, it needs to be persisted
-                let mut postings = HashMap::with_capacity(bucket.2.len());
+                let mut postings =
+                    FxHashMap::with_capacity_and_hasher(bucket.2.len(), FxBuildHasher);
                 for k in bucket.2.iter() {
                     if let Some(posting) = self.postings.get(k) {
                         postings.insert(
@@ -1013,6 +1078,11 @@ where
         Ok(())
     }
 
+    /// Gets the number of tokens for a document by its ID
+    pub fn get_doc_tokens(&self, id: u64) -> Option<usize> {
+        self.seg_tokens.get(&id).map(|v| *v)
+    }
+
     /// Updates the index metadata
     ///
     /// # Arguments
@@ -1030,6 +1100,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     // 创建一个简单的测试索引
     fn create_test_index() -> BM25Index<TokenizerChain> {
@@ -1331,5 +1402,14 @@ mod tests {
         for id in simple_ids {
             assert!(advanced_ids.contains(&id));
         }
+    }
+
+    #[test]
+    fn test_search_not_alone() {
+        let index = create_test_index();
+        // NOT fox => 返回所有不含 fox 的文档 (文档3)
+        let results = index.search_advanced("NOT fox", 10, None);
+        let ids: Vec<u64> = results.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids, vec![3]);
     }
 }

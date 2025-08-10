@@ -1,9 +1,10 @@
 use core::ops::Deref;
+use rustc_hash::{FxBuildHasher, FxHashSet};
 use serde::{
     de::{Deserialize, DeserializeOwned, Deserializer},
     ser::{Serialize, Serializer},
 };
-use std::{collections::HashSet, hash::Hash};
+use std::hash::Hash;
 
 mod cbor_size;
 
@@ -66,7 +67,7 @@ impl<T> Pipe<T> for T {
 /// ```
 #[derive(Clone, Debug)]
 pub struct UniqueVec<T> {
-    set: HashSet<T>,
+    set: FxHashSet<T>,
     vec: Vec<T>,
 }
 
@@ -74,7 +75,7 @@ impl<T> Default for UniqueVec<T> {
     /// Creates an empty `UniqueVec`.
     fn default() -> Self {
         Self {
-            set: HashSet::new(),
+            set: FxHashSet::default(),
             vec: Vec::new(),
         }
     }
@@ -88,7 +89,7 @@ where
     ///
     /// The extender is initialized with all the unique items from the vector.
     fn from(vec: Vec<T>) -> Self {
-        let set: HashSet<T> = vec.iter().cloned().collect();
+        let set: FxHashSet<T> = vec.iter().cloned().collect();
         if set.len() == vec.len() {
             return Self { set, vec };
         };
@@ -144,7 +145,7 @@ where
     /// Creates a new, empty `UniqueVec` with a specified capacity.
     pub fn with_capacity(capacity: usize) -> Self {
         UniqueVec {
-            set: HashSet::with_capacity(capacity),
+            set: FxHashSet::with_capacity_and_hasher(capacity, FxBuildHasher),
             vec: Vec::with_capacity(capacity),
         }
     }
@@ -242,8 +243,8 @@ where
         self.vec
     }
 
-    /// Returns the inner `HashSet` of the `UniqueVec`.
-    pub fn into_set(self) -> HashSet<T> {
+    /// Returns the inner `FxHashSet` of the `UniqueVec`.
+    pub fn into_set(self) -> FxHashSet<T> {
         self.set
     }
 
@@ -252,8 +253,8 @@ where
         self.vec.clone()
     }
 
-    /// Converts the `UniqueVec` to a `HashSet`.
-    pub fn to_set(&self) -> HashSet<T> {
+    /// Converts the `UniqueVec` to a `FxHashSet`.
+    pub fn to_set(&self) -> FxHashSet<T> {
         self.set.clone()
     }
 }

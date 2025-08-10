@@ -18,9 +18,10 @@ use anda_db_utils::UniqueVec;
 use anda_kip::*;
 use async_trait::async_trait;
 use futures::try_join as try_join_await;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde_json::json;
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet},
     str::FromStr,
     sync::Arc,
 };
@@ -448,7 +449,7 @@ impl CognitiveNexus {
         ctx: &mut QueryContext,
         clause: FilterClause,
     ) -> Result<(), KipError> {
-        let mut entities: HashMap<String, Vec<EntityID>> = ctx
+        let mut entities: FxHashMap<String, Vec<EntityID>> = ctx
             .entities
             .iter()
             .map(|(var, ids)| (var.clone(), ids.to_vec()))
@@ -456,7 +457,7 @@ impl CognitiveNexus {
 
         loop {
             let mut bindings_snapshot = entities.clone();
-            let mut bindings_cursor = HashMap::new();
+            let mut bindings_cursor = FxHashMap::default();
             match self
                 .evaluate_filter_expression(
                     ctx,
@@ -585,7 +586,7 @@ impl CognitiveNexus {
         limit: Option<usize>,
     ) -> Result<(Vec<Json>, Option<String>), KipError> {
         let mut result: Vec<Json> = Vec::with_capacity(clause.expressions.len());
-        let bindings: HashMap<String, Vec<EntityID>> = ctx
+        let bindings: FxHashMap<String, Vec<EntityID>> = ctx
             .entities
             .iter()
             .map(|(var, ids)| (var.clone(), ids.to_vec()))
@@ -1196,7 +1197,7 @@ impl CognitiveNexus {
 
         let mut queue: VecDeque<GraphPath> = VecDeque::new();
         let mut results: Vec<GraphPath> = Vec::new();
-        let mut visited: HashSet<(EntityID, u16)> = HashSet::new(); // (node, depth) 防止循环
+        let mut visited: FxHashSet<(EntityID, u16)> = FxHashSet::default(); // (node, depth) 防止循环
 
         // 初始化队列
         queue.push_back(GraphPath {
@@ -1285,8 +1286,8 @@ impl CognitiveNexus {
         let mut concept_nodes: Vec<EntityID> = Vec::new();
         let mut proposition_links: Vec<EntityID> = Vec::new();
         for block in upsert_blocks {
-            let mut handle_map: HashMap<String, EntityID> = HashMap::new();
-            let mut cached_pks: HashMap<EntityPK, EntityID> = HashMap::new();
+            let mut handle_map: FxHashMap<String, EntityID> = FxHashMap::default();
+            let mut cached_pks: FxHashMap<EntityPK, EntityID> = FxHashMap::default();
             let default_metadata: Map<String, Json> = block.metadata.unwrap_or_default();
 
             for item in block.items {
@@ -1343,8 +1344,8 @@ impl CognitiveNexus {
         &self,
         concept_block: ConceptBlock,
         default_metadata: &Map<String, Json>,
-        handle_map: &mut HashMap<String, EntityID>,
-        cached_pks: &mut HashMap<EntityPK, EntityID>,
+        handle_map: &mut FxHashMap<String, EntityID>,
+        cached_pks: &mut FxHashMap<EntityPK, EntityID>,
         dry_run: bool,
     ) -> Result<Option<EntityID>, KipError> {
         let concept_pk = ConceptPK::try_from(concept_block.concept)?;
@@ -1410,8 +1411,8 @@ impl CognitiveNexus {
         &self,
         proposition_block: PropositionBlock,
         default_metadata: &Map<String, Json>,
-        handle_map: &mut HashMap<String, EntityID>,
-        cached_pks: &mut HashMap<EntityPK, EntityID>,
+        handle_map: &mut FxHashMap<String, EntityID>,
+        cached_pks: &mut FxHashMap<EntityPK, EntityID>,
         dry_run: bool,
     ) -> Result<Option<EntityID>, KipError> {
         let proposition_pk = PropositionPK::try_from(proposition_block.proposition)?;
@@ -1458,8 +1459,8 @@ impl CognitiveNexus {
         subject: &EntityID,
         set_prop: SetProposition,
         default_metadata: &Map<String, Json>,
-        handle_map: &HashMap<String, EntityID>,
-        cached_pks: &mut HashMap<EntityPK, EntityID>,
+        handle_map: &FxHashMap<String, EntityID>,
+        cached_pks: &mut FxHashMap<EntityPK, EntityID>,
     ) -> Result<EntityID, KipError> {
         let object_id = self
             .resolve_target_term(set_prop.object, handle_map, cached_pks)
@@ -1880,7 +1881,7 @@ impl CognitiveNexus {
         pk: PropositionPK,
         attributes: Map<String, Json>,
         metadata: Map<String, Json>,
-        cached_pks: &mut HashMap<EntityPK, EntityID>,
+        cached_pks: &mut FxHashMap<EntityPK, EntityID>,
     ) -> Result<EntityID, KipError> {
         match pk {
             PropositionPK::ID(id, predicate) => {
@@ -2165,8 +2166,8 @@ impl CognitiveNexus {
         &self,
         ctx: &mut QueryContext,
         operand: FilterOperand,
-        bindings_snapshot: &mut HashMap<String, Vec<EntityID>>,
-        bindings_cursor: &mut HashMap<String, EntityID>,
+        bindings_snapshot: &mut FxHashMap<String, Vec<EntityID>>,
+        bindings_cursor: &mut FxHashMap<String, EntityID>,
     ) -> Result<Option<Json>, KipError> {
         match operand {
             FilterOperand::Variable(dot_path) => {
@@ -2259,7 +2260,7 @@ impl CognitiveNexus {
     async fn resolve_result(
         &self,
         cache: &QueryCache,
-        bindings: &HashMap<String, Vec<EntityID>>,
+        bindings: &FxHashMap<String, Vec<EntityID>>,
         var: &str,
         fields: &[String],
         order_by: &[OrderByCondition],
@@ -2402,8 +2403,8 @@ impl CognitiveNexus {
         &self,
         cache: &QueryCache,
         dot_path: DotPathVar,
-        bindings_snapshot: &mut HashMap<String, Vec<EntityID>>,
-        bindings_cursor: &mut HashMap<String, EntityID>,
+        bindings_snapshot: &mut FxHashMap<String, Vec<EntityID>>,
+        bindings_cursor: &mut FxHashMap<String, EntityID>,
     ) -> Result<Option<Json>, KipError> {
         let entity_id = match bindings_cursor.get(&dot_path.var) {
             Some(id) => id.clone(),
@@ -2489,8 +2490,8 @@ impl CognitiveNexus {
         &self,
         ctx: &mut QueryContext,
         expr: FilterExpression,
-        bindings_snapshot: &mut HashMap<String, Vec<EntityID>>,
-        bindings_cursor: &mut HashMap<String, EntityID>,
+        bindings_snapshot: &mut FxHashMap<String, Vec<EntityID>>,
+        bindings_cursor: &mut FxHashMap<String, EntityID>,
     ) -> Result<Option<bool>, KipError> {
         match expr {
             FilterExpression::Comparison {
@@ -2570,8 +2571,8 @@ impl CognitiveNexus {
         ctx: &mut QueryContext,
         func: FilterFunction,
         mut args: Vec<FilterOperand>,
-        bindings_snapshot: &mut HashMap<String, Vec<EntityID>>,
-        bindings_cursor: &mut HashMap<String, EntityID>,
+        bindings_snapshot: &mut FxHashMap<String, Vec<EntityID>>,
+        bindings_cursor: &mut FxHashMap<String, EntityID>,
     ) -> Result<Option<bool>, KipError> {
         if args.len() != 2 {
             return Err(KipError::InvalidCommand(
@@ -2616,7 +2617,7 @@ impl CognitiveNexus {
     fn check_target_term_for_kml(
         &self,
         target: &TargetTerm,
-        handle_map: &HashMap<String, EntityID>,
+        handle_map: &FxHashMap<String, EntityID>,
     ) -> Result<(), KipError> {
         match target {
             TargetTerm::Variable(handle) => {
@@ -2640,8 +2641,8 @@ impl CognitiveNexus {
     async fn resolve_target_term(
         &self,
         target: TargetTerm,
-        handle_map: &HashMap<String, EntityID>,
-        cached_pks: &mut HashMap<EntityPK, EntityID>,
+        handle_map: &FxHashMap<String, EntityID>,
+        cached_pks: &mut FxHashMap<EntityPK, EntityID>,
     ) -> Result<EntityID, KipError> {
         match target {
             TargetTerm::Variable(handle) => handle_map
@@ -2665,7 +2666,7 @@ impl CognitiveNexus {
     async fn resolve_entity_id(
         &self,
         entity_pk: &EntityPK,
-        cached_pks: &mut HashMap<EntityPK, EntityID>,
+        cached_pks: &mut FxHashMap<EntityPK, EntityID>,
     ) -> Result<EntityID, KipError> {
         {
             if let Some(id) = cached_pks.get(entity_pk) {

@@ -3,6 +3,7 @@ use croaring::{Portable, Treemap};
 use futures::{future::try_join_all, try_join as try_join_await};
 use object_store::path::Path;
 use parking_lot::RwLock;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::sync::{
@@ -11,7 +12,7 @@ use std::sync::{
 };
 use std::{borrow::Cow, time::Instant};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet},
     fmt::Debug,
 };
 
@@ -935,11 +936,11 @@ impl Collection {
 
         let now_ms = unix_ms();
         #[allow(clippy::mutable_key_type)]
-        let mut btree_inserted: HashMap<&BTree, Cow<FieldValue>> = HashMap::new();
+        let mut btree_inserted: FxHashMap<&BTree, Cow<FieldValue>> = FxHashMap::default();
         #[allow(clippy::mutable_key_type)]
-        let mut bm25_inserted: HashMap<&BM25, (u64, Cow<str>)> = HashMap::new();
+        let mut bm25_inserted: FxHashMap<&BM25, (u64, Cow<str>)> = FxHashMap::default();
         #[allow(clippy::mutable_key_type)]
-        let mut hnsw_inserted: HashMap<&Hnsw, u64> = HashMap::new();
+        let mut hnsw_inserted: FxHashMap<&Hnsw, u64> = FxHashMap::default();
 
         let rt: Result<(), DBError> = (|| {
             for index in &self.btree_indexes {
@@ -1076,7 +1077,7 @@ impl Collection {
         let old_doc = doc.clone();
 
         // apply the new values
-        let mut fields_keys = HashSet::new();
+        let mut fields_keys = FxHashSet::default();
         for (field_name, fv) in fields {
             doc.set_field(&field_name, fv)?;
             fields_keys.insert(field_name);
@@ -1089,17 +1090,17 @@ impl Collection {
 
         // record the updated and removed indexes for rollback
         #[allow(clippy::mutable_key_type)]
-        let mut btree_inserted: HashMap<&BTree, Cow<FieldValue>> = HashMap::new();
+        let mut btree_inserted: FxHashMap<&BTree, Cow<FieldValue>> = FxHashMap::default();
         #[allow(clippy::mutable_key_type)]
-        let mut bm25_inserted: HashMap<&BM25, (u64, Cow<str>)> = HashMap::new();
+        let mut bm25_inserted: FxHashMap<&BM25, (u64, Cow<str>)> = FxHashMap::default();
         #[allow(clippy::mutable_key_type)]
-        let mut hnsw_inserted: HashMap<&Hnsw, u64> = HashMap::new();
+        let mut hnsw_inserted: FxHashMap<&Hnsw, u64> = FxHashMap::default();
         #[allow(clippy::mutable_key_type)]
-        let mut btree_removed: HashMap<&BTree, Cow<FieldValue>> = HashMap::new();
+        let mut btree_removed: FxHashMap<&BTree, Cow<FieldValue>> = FxHashMap::default();
         #[allow(clippy::mutable_key_type)]
-        let mut bm25_removed: HashMap<&BM25, (u64, Cow<str>)> = HashMap::new();
+        let mut bm25_removed: FxHashMap<&BM25, (u64, Cow<str>)> = FxHashMap::default();
         #[allow(clippy::mutable_key_type)]
-        let mut hnsw_removed: HashMap<&Hnsw, (u64, Cow<Vector>)> = HashMap::new();
+        let mut hnsw_removed: FxHashMap<&Hnsw, (u64, Cow<Vector>)> = FxHashMap::default();
 
         // update the indexes
         let rt: Result<(), DBError> = (|| {
@@ -1511,7 +1512,7 @@ impl Collection {
             }
             Filter::Not(query) => {
                 result.reserve_exact(limit);
-                let exclude: HashSet<u64> =
+                let exclude: FxHashSet<u64> =
                     self.filter_by_field(*query, &[], 0)?.into_iter().collect();
                 for id in self.doc_ids_index.read().iter() {
                     if !exclude.contains(id) && (candidates.is_empty() || candidates.contains(id)) {
@@ -1673,7 +1674,8 @@ impl Collection {
             RangeQuery::Not(query) => {
                 result.reserve_exact(limit);
                 // 先收集要排除的 key，再遍历全集差集
-                let exclude: HashSet<u64> = self.filter_by_id(*query, &[], 0).into_iter().collect();
+                let exclude: FxHashSet<u64> =
+                    self.filter_by_id(*query, &[], 0).into_iter().collect();
                 for id in self.doc_ids_index.read().iter() {
                     if !exclude.contains(id) && (candidates.is_empty() || candidates.contains(id)) {
                         result.push(*id);

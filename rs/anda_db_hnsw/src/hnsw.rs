@@ -5,12 +5,13 @@ use half::bf16;
 use ordered_float::OrderedFloat;
 use papaya::HashMap as CoHashMap;
 use parking_lot::RwLock;
+use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::{
     borrow::Cow,
     cmp::{self, Reverse},
-    collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, BinaryHeap},
     io::{Read, Write},
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -200,7 +201,6 @@ pub struct HnswStats {
 /// Serializable HNSW index structure (owned version).
 #[derive(Clone, Serialize, Deserialize)]
 struct HnswIndexOwned {
-    pub nodes: CoHashMap<u64, HnswNode>,
     pub entry_point: (u64, u8),
     pub metadata: HnswMetadata,
 }
@@ -208,7 +208,6 @@ struct HnswIndexOwned {
 /// Serializable HNSW index structure (reference version).
 #[derive(Clone, Serialize)]
 struct HnswIndexRef<'a> {
-    nodes: &'a HashMap<u64, HnswNode>,
     entry_point: (u64, u8),
     metadata: &'a HnswMetadata,
 }
@@ -295,7 +294,7 @@ impl HnswIndex {
             name: index.metadata.name.clone(),
             config: index.metadata.config.clone(),
             layer_gen,
-            nodes: index.nodes,
+            nodes: CoHashMap::new(),
             entry_point: RwLock::new(index.entry_point),
             metadata: RwLock::new(index.metadata),
             dirty_nodes: RwLock::new(BTreeSet::new()),
@@ -464,6 +463,13 @@ impl HnswIndex {
             });
         }
 
+        if vector.iter().any(|v| !v.is_finite()) {
+            return Err(HnswError::Generic {
+                name: self.name.clone(),
+                source: "Vector contains invalid values (NaN or infinity)".into(),
+            });
+        }
+
         let nodes = self.nodes.pin();
         // Check if ID already exists.
         if nodes.contains_key(&id) {
@@ -509,7 +515,7 @@ impl HnswIndex {
         }
 
         // --- 阶段一：搜索与信息收集 ---
-        let mut distance_cache = HashMap::with_capacity(self.config.ef_construction * 2);
+        let mut distance_cache = FxHashMap::default();
         let mut entry_point_node = initial_entry_point_node;
         let mut entry_point_layer = current_max_layer;
         let mut entry_point_dist = f32::MAX;
@@ -534,7 +540,7 @@ impl HnswIndex {
         }
 
         #[allow(clippy::type_complexity)]
-        let mut multi_distance_cache: HashMap<(u64, u64), f32> = HashMap::new(); // For select_neighbors heuristic
+        let mut multi_distance_cache: FxHashMap<(u64, u64), f32> = FxHashMap::default(); // For select_neighbors heuristic
         // 存储邻居节点需要添加的反向连接信息: neighbor_id -> [(layer, (new_node_id, dist))]
         #[allow(clippy::type_complexity)]
         let mut neighbor_updates_required: BTreeMap<u64, Vec<(u8, (u64, bf16))>> = BTreeMap::new();
@@ -808,7 +814,7 @@ impl HnswIndex {
             return Ok(vec![]);
         }
 
-        let mut distance_cache = HashMap::new();
+        let mut distance_cache = FxHashMap::default();
         let mut current_dist = f32::MAX;
         let (mut current_node, mut current_node_layer) = { *self.entry_point.read() };
         // 从最高层向下搜索入口点
@@ -893,9 +899,10 @@ impl HnswIndex {
         entry_point_layer: u8,
         layer: u8,
         ef: usize,
-        distance_cache: &mut HashMap<u64, f32>,
+        distance_cache: &mut FxHashMap<u64, f32>,
     ) -> Result<Vec<(u64, f32, u8)>, HnswError> {
-        let mut visited: HashSet<u64> = HashSet::with_capacity(ef * 2);
+        let mut visited: FxHashSet<u64> =
+            FxHashSet::with_capacity_and_hasher(ef * 2, FxBuildHasher);
         let mut candidates: BinaryHeap<(Reverse<OrderedFloat<f32>>, u64, u8)> =
             BinaryHeap::with_capacity(ef * 2);
         let mut results: BinaryHeap<(OrderedFloat<f32>, u64, u8)> =
@@ -1011,7 +1018,7 @@ impl HnswIndex {
         candidates: Vec<(u64, f32, u8)>,
         m: usize,
         strategy: SelectNeighborsStrategy,
-        distance_cache: &mut HashMap<(u64, u64), f32>,
+        distance_cache: &mut FxHashMap<(u64, u64), f32>,
     ) -> Result<Vec<(u64, f32, u8)>, HnswError> {
         if candidates.len() <= m {
             return Ok(candidates);
@@ -1095,6 +1102,82 @@ impl HnswIndex {
         }
     }
 
+    // TODO: use improved version
+    #[allow(dead_code)]
+    fn select_neighbors_heuristic(
+        &self,
+        candidates: Vec<(u64, f32, u8)>,
+        m: usize,
+        distance_cache: &mut FxHashMap<(u64, u64), f32>,
+    ) -> Result<Vec<(u64, f32, u8)>, HnswError> {
+        if candidates.len() <= m {
+            return Ok(candidates);
+        }
+
+        let nodes = self.nodes.pin();
+        let mut selected: Vec<(u64, f32, u8)> = Vec::with_capacity(m);
+        let mut remaining = candidates;
+        remaining.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(cmp::Ordering::Equal));
+
+        // 首先选择最近的节点
+        if !remaining.is_empty() {
+            selected.push(remaining.remove(0));
+        }
+
+        // 使用改进的多样性度量
+        while selected.len() < m && !remaining.is_empty() {
+            let mut best_idx = 0;
+            let mut best_score = f32::MIN;
+
+            for (i, &(cand_id, cand_dist, _)) in remaining.iter().enumerate() {
+                let mut diversity_score = 0.0;
+                let mut valid_comparisons = 0;
+
+                for &(sel_id, _, _) in &selected {
+                    let cache_key = if cand_id < sel_id {
+                        (cand_id, sel_id)
+                    } else {
+                        (sel_id, cand_id)
+                    };
+
+                    if let Some(&cached_dist) = distance_cache.get(&cache_key) {
+                        diversity_score += cached_dist;
+                        valid_comparisons += 1;
+                    } else if let (Some(cand_node), Some(sel_node)) =
+                        (nodes.get(&cand_id), nodes.get(&sel_id))
+                    {
+                        let dist = self
+                            .config
+                            .distance_metric
+                            .compute(&cand_node.vector, &sel_node.vector)?;
+                        distance_cache.insert(cache_key, dist);
+                        diversity_score += dist;
+                        valid_comparisons += 1;
+                    }
+                }
+
+                if valid_comparisons > 0 {
+                    diversity_score /= valid_comparisons as f32;
+                    // 平衡距离和多样性：更高的多样性分数和更低的查询距离
+                    let combined_score = diversity_score - cand_dist * 0.5;
+
+                    if combined_score > best_score {
+                        best_score = combined_score;
+                        best_idx = i;
+                    }
+                }
+            }
+
+            if best_idx < remaining.len() {
+                selected.push(remaining.swap_remove(best_idx));
+            } else {
+                break;
+            }
+        }
+
+        Ok(selected)
+    }
+
     /// Gets the distance between a query vector and a node, using cache when available
     ///
     /// # Arguments
@@ -1108,7 +1191,7 @@ impl HnswIndex {
     /// * `Result<f32, HnswError>` - Computed distance
     fn get_distance_with_cache(
         &self,
-        cache: &mut HashMap<u64, f32>,
+        cache: &mut FxHashMap<u64, f32>,
         query: &[bf16],
         neighbor: &HnswNode,
     ) -> Result<f32, HnswError> {
@@ -1167,7 +1250,6 @@ impl HnswIndex {
         meta.stats.last_saved = now_ms.max(meta.stats.last_saved);
         ciborium::into_writer(
             &HnswIndexRef {
-                nodes: &HashMap::new(),
                 entry_point: *self.entry_point.read(),
                 metadata: &meta,
             },
@@ -1225,12 +1307,12 @@ impl HnswIndex {
     where
         F: AsyncFnMut(u64, &[u8]) -> Result<bool, BoxError>,
     {
-        let mut dirty_nodes = BTreeSet::new();
-        {
+        let mut dirty_nodes = {
             // move the dirty nodes into a temporary variable
             // and release the lock
-            dirty_nodes.append(&mut self.dirty_nodes.write());
-        }
+            let mut guard = self.dirty_nodes.write();
+            std::mem::take(&mut *guard)
+        };
 
         let mut buf = Vec::with_capacity(4096);
         while let Some(id) = dirty_nodes.pop_first() {
@@ -1340,6 +1422,7 @@ impl HnswIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     #[tokio::test]
     async fn test_hnsw_basic() {

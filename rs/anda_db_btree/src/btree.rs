@@ -14,10 +14,11 @@
 use anda_db_utils::{UniqueVec, estimate_cbor_size};
 use dashmap::DashMap;
 use parking_lot::RwLock;
+use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::json;
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::BTreeSet,
     fmt::Debug,
     hash::Hash,
     io::{Read, Write},
@@ -139,36 +140,16 @@ pub struct BTreeStats {
     pub max_bucket_id: u32,
 }
 
-/// Serializable B-tree index structure (owned version)
-// #[derive(Debug, Clone, Serialize, Deserialize)]
-// struct BTreeIndexOwned<PK, FV>
-// where
-//     FV: Eq + Ord + Hash + Debug + Clone + Serialize + DeserializeOwned,
-//     PK: Ord + Debug + Clone + Serialize + DeserializeOwned,
-// {
-//     // #[serde(skip)]
-//     postings: DashMap<String, PostingValue<PK>>,
-//     metadata: BTreeMetadata,
-// }
-
 // Helper structure for serialization and deserialization of index metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct BTreeIndexOwnedHelper {
-    // Serialized postings map (not used for actual data, just for structure)
-    postings: HashMap<String, String>,
-
+struct BTreeIndexOwned {
     // Index metadata
     metadata: BTreeMetadata,
 }
 
 // Reference structure for serializing the index
 #[derive(Serialize)]
-struct BTreeIndexRef<'a, PK, FV>
-where
-    PK: Ord + Eq + Hash + Debug + Clone + Serialize,
-    FV: Eq + Hash + Debug + Clone + Serialize,
-{
-    postings: &'a DashMap<FV, PostingValue<PK>>,
+struct BTreeIndexRef<'a> {
     metadata: &'a BTreeMetadata,
 }
 
@@ -324,7 +305,7 @@ where
     /// * `Result<Self, Error>` - Loaded index or error
     pub fn load_metadata<R: Read>(r: R) -> Result<Self, BTreeError> {
         // Deserialize the index metadata
-        let index: BTreeIndexOwnedHelper =
+        let index: BTreeIndexOwned =
             ciborium::from_reader(r).map_err(|err| BTreeError::Serialization {
                 name: "unknown".to_string(),
                 source: err.into(),
@@ -372,7 +353,7 @@ where
                 source: err,
             })?;
             if let Some(data) = data {
-                let postings: HashMap<FV, PostingValue<PK>> = ciborium::from_reader(&data[..])
+                let postings: FxHashMap<FV, PostingValue<PK>> = ciborium::from_reader(&data[..])
                     .map_err(|err| BTreeError::Serialization {
                         name: self.name.clone(),
                         source: err.into(),
@@ -631,7 +612,7 @@ where
         // Track which values were successfully inserted
         let mut inserted_count = 0;
         // Track which buckets were modified and need updates
-        let mut bucket_updates: HashMap<u32, (u32, HashSet<FV>)> = HashMap::new();
+        let mut bucket_updates: FxHashMap<u32, (u32, FxHashSet<FV>)> = FxHashMap::default();
         // New values that need to be added to the B-tree
         let mut new_btree_values = Vec::new();
 
@@ -679,7 +660,7 @@ where
                 // Update the bucket size tracking
                 let bucket_entry = bucket_updates
                     .entry(bucket_id)
-                    .or_insert_with(|| (0, HashSet::new()));
+                    .or_insert_with(|| (0, FxHashSet::default()));
                 bucket_entry.0 += size_increase;
                 bucket_entry.1.insert(field_value);
                 inserted_count += 1;
@@ -817,7 +798,7 @@ where
         // Track removal statistics
         let mut removed_count = 0;
         // Track which buckets were modified
-        let mut bucket_updates: HashMap<u32, (u32, HashSet<FV>)> = HashMap::new();
+        let mut bucket_updates: FxHashMap<u32, (u32, FxHashSet<FV>)> = FxHashMap::default();
         // Track which field values are completely removed
         let mut values_to_remove = Vec::new();
 
@@ -858,7 +839,7 @@ where
                 // Update bucket tracking
                 let bucket_entry = bucket_updates
                     .entry(bucket_id)
-                    .or_insert_with(|| (0, HashSet::new()));
+                    .or_insert_with(|| (0, FxHashSet::default()));
                 bucket_entry.0 += size_decrease;
                 bucket_entry.1.insert(field_value);
 
@@ -1072,7 +1053,7 @@ where
             }
             RangeQuery::Not(query) => {
                 // 先收集要排除的 key，再遍历全集差集
-                let exclude: HashSet<FV> = self.range_keys(*query).into_iter().collect();
+                let exclude: FxHashSet<FV> = self.range_keys(*query).into_iter().collect();
 
                 for k in self.btree.read().iter() {
                     if exclude.contains(k) {
@@ -1210,7 +1191,7 @@ where
                 }
             }
             RangeQuery::Or(queries) => {
-                let mut seen = HashSet::new();
+                let mut seen = FxHashSet::default();
                 for query in queries {
                     let keys = self.range_keys(*query);
                     for k in keys {
@@ -1221,7 +1202,7 @@ where
                 }
             }
             RangeQuery::Not(query) => {
-                let exclude: HashSet<FV> = self.range_keys(*query).into_iter().collect();
+                let exclude: FxHashSet<FV> = self.range_keys(*query).into_iter().collect();
                 for k in self.btree.read().iter() {
                     if !exclude.contains(k) {
                         results.push(k.clone());
@@ -1272,17 +1253,11 @@ where
         }
 
         meta.stats.last_saved = now_ms.max(meta.stats.last_saved);
-        let postings: DashMap<FV, PostingValue<PK>> = DashMap::new();
-        ciborium::into_writer(
-            &BTreeIndexRef {
-                postings: &postings,
-                metadata: &meta,
-            },
-            w,
-        )
-        .map_err(|err| BTreeError::Serialization {
-            name: self.name.clone(),
-            source: err.into(),
+        ciborium::into_writer(&BTreeIndexRef { metadata: &meta }, w).map_err(|err| {
+            BTreeError::Serialization {
+                name: self.name.clone(),
+                source: err.into(),
+            }
         })?;
 
         self.update_metadata(|m| {
@@ -1313,8 +1288,8 @@ where
         for mut bucket in self.buckets.iter_mut() {
             if bucket.1 {
                 // If the bucket is dirty, it needs to be persisted
-                let mut postings: HashMap<&FV, ciborium::Value> =
-                    HashMap::with_capacity(bucket.2.len());
+                let mut postings: FxHashMap<&FV, ciborium::Value> =
+                    FxHashMap::with_capacity_and_hasher(bucket.2.len(), FxBuildHasher);
                 for k in bucket.2.iter() {
                     if let Some(posting) = self.postings.get(k) {
                         postings.insert(

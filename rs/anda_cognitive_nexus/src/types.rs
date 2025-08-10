@@ -14,7 +14,8 @@
 use anda_db_utils::UniqueVec;
 use anda_kip::*;
 use parking_lot::RwLock;
-use std::{collections::HashMap, fmt, hash::Hash, str::FromStr, sync::Arc};
+use rustc_hash::FxHashMap;
+use std::{fmt, hash::Hash, str::FromStr, sync::Arc};
 
 use crate::entity::*;
 
@@ -251,13 +252,13 @@ pub struct QueryContext {
     ///
     /// Maps variable names (e.g., "?person", "?location") to lists of entity IDs
     /// that match the variable's constraints in the current query context.
-    pub entities: HashMap<String, UniqueVec<EntityID>>,
+    pub entities: FxHashMap<String, UniqueVec<EntityID>>,
 
     /// Variable name to predicate mappings
     ///
     /// Maps variable names to lists of predicate strings that match
     /// the variable's constraints in the current query context.
-    pub predicates: HashMap<String, UniqueVec<String>>,
+    pub predicates: FxHashMap<String, UniqueVec<String>>,
 
     /// Shared cache for loaded entities
     ///
@@ -280,12 +281,12 @@ pub struct QueryCache {
     /// Cache for loaded concept entities
     ///
     /// Maps concept IDs to their loaded `Concept` instances.
-    pub concepts: RwLock<HashMap<u64, Concept>>,
+    pub concepts: RwLock<FxHashMap<u64, Concept>>,
 
     /// Cache for loaded proposition entities
     ///
     /// Maps proposition IDs to their loaded `Proposition` instances.
-    pub propositions: RwLock<HashMap<u64, Proposition>>,
+    pub propositions: RwLock<FxHashMap<u64, Proposition>>,
 }
 
 /// Specifies the target entities for query operations.

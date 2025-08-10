@@ -1,6 +1,6 @@
 [package]
 name = "anda_cognitive_nexus"
-version = "0.2.7"
+version = "0.2.8"
 description = "A Rust implementation of KIP (Knowledge Interaction Protocol) base on Anda DB."
 keywords = [
   "KIP",
@@ -28,6 +28,7 @@ parking_lot = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 regex = { workspace = true }
+rustc-hash = { workspace = true }
 
 [dev-dependencies]
 anda_object_store = { path = "../anda_object_store", version = "0.1" }

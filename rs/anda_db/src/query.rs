@@ -1,5 +1,5 @@
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 pub use anda_db_btree::RangeQuery;
 pub use anda_db_schema::{Fv, bf16};
@@ -125,7 +125,7 @@ impl RRFReranker {
     /// # Returns
     /// A Vec of (document_id, score) pairs, sorted by descending score.
     pub fn rerank(&self, ranked_lists: &[Vec<u64>]) -> Vec<(u64, f32)> {
-        let mut scores: HashMap<u64, f32> = HashMap::new();
+        let mut scores: FxHashMap<u64, f32> = FxHashMap::default();
 
         for ranked in ranked_lists {
             for (rank, &doc_id) in ranked.iter().enumerate() {
