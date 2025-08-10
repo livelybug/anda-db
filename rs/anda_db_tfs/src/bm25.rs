@@ -3,10 +3,9 @@
 use anda_db_utils::{UniqueVec, estimate_cbor_size};
 use dashmap::DashMap;
 use parking_lot::RwLock;
-use rustc_hash::{FxBuildHasher, FxHashMap};
+use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeSet,
     io::{Read, Write},
     sync::atomic::{AtomicU32, AtomicU64, Ordering},
 };
@@ -30,14 +29,7 @@ pub struct BM25Index<T: Tokenizer + Clone> {
     doc_tokens: DashMap<u64, usize>,
 
     /// Buckets store information about where posting entries are stored and their current state
-    /// The mapping is: bucket_id -> (bucket_size, is_dirty, vec<tokens>)
-    /// - bucket_size: Current size of the bucket in bytes
-    /// - is_dirty: Indicates if the bucket has new data that needs to be persisted
-    /// - tokens: List of tokens stored in this bucket
-    buckets: DashMap<u32, (u32, bool, UniqueVec<String>)>,
-
-    /// Maps document IDs to their bucket IDs
-    bucket_doc_ids: DashMap<u32, BTreeSet<u64>>,
+    buckets: DashMap<u32, Bucket>,
 
     /// Inverted index mapping tokens to (bucket id, Vec<(document_id, term_frequency)>)
     postings: DashMap<String, PostingValue>,
@@ -51,14 +43,6 @@ pub struct BM25Index<T: Tokenizer + Clone> {
     /// Maximum document ID currently in use
     max_document_id: AtomicU64,
 
-    /// Set of dirty document buckets that need to be persisted
-    dirty_doc_buckets: RwLock<BTreeSet<u32>>,
-
-    /// Maximum size of a bucket before creating a new one
-    /// When a bucket's stored data exceeds this size,
-    /// a new bucket should be created for new data
-    bucket_overload_size: u32,
-
     /// Average number of tokens per document
     avg_doc_tokens: RwLock<f32>,
 
@@ -70,6 +54,18 @@ pub struct BM25Index<T: Tokenizer + Clone> {
 
     /// Last saved version of the index
     last_saved_version: AtomicU64,
+}
+
+#[derive(Default)]
+struct Bucket {
+    // Indicates if the bucket has new data that needs to be persisted
+    is_dirty: bool,
+    // Current size of the bucket in bytes
+    size: usize,
+    // List of tokens stored in this bucket
+    tokens: UniqueVec<String>,
+    // Set of document IDs associated with this bucket
+    doc_ids: FxHashSet<u64>,
 }
 
 /// Parameters for the BM25 ranking algorithm
@@ -96,8 +92,10 @@ impl Default for BM25Params {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BM25Config {
     pub bm25: BM25Params,
-    /// Maximum size of a bucket before creating a new one (in bytes)
-    pub bucket_overload_size: u32,
+    /// Maximum size of a bucket before creating a new one
+    /// When a bucket's stored data exceeds this size,
+    /// a new bucket should be created for new data
+    pub bucket_overload_size: usize,
 }
 
 impl Default for BM25Config {
@@ -178,6 +176,26 @@ struct BM25IndexRef<'a> {
     metadata: &'a BM25Metadata,
 }
 
+// Helper structure for serialization and deserialization of bucket
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BucketOwned {
+    #[serde(rename = "p")]
+    postings: FxHashMap<String, PostingValue>,
+
+    #[serde(rename = "d")]
+    doc_tokens: FxHashMap<u64, usize>,
+}
+
+// Reference structure for serializing bucket
+#[derive(Serialize)]
+struct BucketRef<'a> {
+    #[serde(rename = "p")]
+    postings: &'a FxHashMap<&'a String, dashmap::mapref::one::Ref<'a, String, PostingValue>>,
+
+    #[serde(rename = "d")]
+    doc_tokens: &'a FxHashMap<u64, usize>,
+}
+
 impl<T> BM25Index<T>
 where
     T: Tokenizer + Clone,
@@ -195,7 +213,6 @@ where
     /// * `BM25Index` - A new instance of the BM25 index
     pub fn new(name: String, tokenizer: T, config: Option<BM25Config>) -> Self {
         let config = config.unwrap_or_default();
-        let bucket_overload_size = config.bucket_overload_size;
         let stats = BM25Stats {
             version: 1,
             ..Default::default()
@@ -206,17 +223,14 @@ where
             config: config.clone(),
             doc_tokens: DashMap::new(),
             postings: DashMap::new(),
-            bucket_doc_ids: DashMap::new(),
-            buckets: DashMap::from_iter(vec![(0, (0, true, UniqueVec::default()))]),
+            buckets: DashMap::from_iter(vec![(0, Bucket::default())]),
             metadata: RwLock::new(BM25Metadata {
                 name,
                 config,
                 stats,
             }),
-            bucket_overload_size,
             max_bucket_id: AtomicU32::new(0),
             max_document_id: AtomicU64::new(0),
-            dirty_doc_buckets: RwLock::new(BTreeSet::new()),
             avg_doc_tokens: RwLock::new(0.0),
             total_tokens: AtomicU64::new(0),
             search_count: AtomicU64::new(0),
@@ -236,19 +250,12 @@ where
     /// # Returns
     ///
     /// * `Result<Self, HnswError>` - Loaded index or error.
-    pub async fn load_all<R: Read, F1, F2>(
-        tokenizer: T,
-        metadata: R,
-        documents_fn: F1,
-        postings_fn: F2,
-    ) -> Result<Self, BM25Error>
+    pub async fn load_all<R: Read, F>(tokenizer: T, metadata: R, f: F) -> Result<Self, BM25Error>
     where
-        F1: AsyncFnMut(u32) -> Result<Option<Vec<u8>>, BoxError>,
-        F2: AsyncFnMut(u32) -> Result<Option<Vec<u8>>, BoxError>,
+        F: AsyncFnMut(u32) -> Result<Option<Vec<u8>>, BoxError>,
     {
         let mut index = Self::load_metadata(tokenizer, metadata)?;
-        index.load_documents(documents_fn).await?;
-        index.load_postings(postings_fn).await?;
+        index.load_buckets(f).await?;
         Ok(index)
     }
 
@@ -269,7 +276,6 @@ where
                 name: "unknown".to_string(),
                 source: err.into(),
             })?;
-        let bucket_overload_size = index.metadata.config.bucket_overload_size;
         let max_bucket_id = AtomicU32::new(index.metadata.stats.max_bucket_id);
         let max_document_id = AtomicU64::new(index.metadata.stats.max_document_id);
         let search_count = AtomicU64::new(index.metadata.stats.search_count);
@@ -282,11 +288,8 @@ where
             config: index.metadata.config.clone(),
             doc_tokens: DashMap::new(),
             postings: DashMap::new(),
-            bucket_doc_ids: DashMap::new(),
-            buckets: DashMap::from_iter(vec![(0, (0, true, UniqueVec::new()))]),
+            buckets: DashMap::from_iter(vec![(0, Bucket::default())]),
             metadata: RwLock::new(index.metadata),
-            dirty_doc_buckets: RwLock::new(BTreeSet::new()),
-            bucket_overload_size,
             max_bucket_id,
             max_document_id,
             avg_doc_tokens,
@@ -296,7 +299,7 @@ where
         })
     }
 
-    /// Loads documents from buckets using the provided async function
+    /// Loads data from buckets using the provided async function
     /// This function should be called during database startup to load all document data
     /// and form a complete document index
     ///
@@ -305,57 +308,13 @@ where
     /// * `f` - Async function that reads posting data from a specified bucket.
     ///   `F: AsyncFn(u64) -> Result<Option<Vec<u8>>, BTreeError>`
     ///   The function should take a bucket ID as input and return a vector of bytes
-    ///   containing the serialized document data.
+    ///   containing the serialized bucket data. If the bucket does not exist,
+    ///   it should return `Ok(None)`.
     ///
     /// # Returns
     ///
     /// * `Result<(), BTreeError>` - Success or error
-    pub async fn load_documents<F>(&mut self, mut f: F) -> Result<(), BM25Error>
-    where
-        F: AsyncFnMut(u32) -> Result<Option<Vec<u8>>, BoxError>,
-    {
-        for i in 0..=self.max_bucket_id.load(Ordering::Relaxed) {
-            let data = f(i as u32).await.map_err(|err| BM25Error::Generic {
-                name: self.name.clone(),
-                source: err,
-            })?;
-            if let Some(data) = data {
-                let documents: FxHashMap<u64, usize> =
-                    ciborium::from_reader(&data[..]).map_err(|err| BM25Error::Serialization {
-                        name: self.name.clone(),
-                        source: err.into(),
-                    })?;
-
-                if !documents.is_empty() {
-                    let document_ids: BTreeSet<u64> = documents.keys().cloned().collect();
-                    self.bucket_doc_ids.insert(i as u32, document_ids);
-                    self.doc_tokens.extend(documents);
-                }
-            }
-        }
-
-        let total_tokens: usize = self.doc_tokens.iter().map(|r| *r.value()).sum();
-        self.total_tokens
-            .store(total_tokens as u64, Ordering::Relaxed);
-
-        Ok(())
-    }
-
-    /// Loads posting data from buckets using the provided async function
-    /// This function should be called during database startup to load all bucket posting data
-    /// and form a complete posting index
-    ///
-    /// # Arguments
-    ///
-    /// * `f` - Async function that reads posting data from a specified bucket.
-    ///   `F: AsyncFn(u32) -> Result<Option<Vec<u8>>, BTreeError>`
-    ///   The function should take a bucket ID as input and return a vector of bytes
-    ///   containing the serialized posting data.
-    ///
-    /// # Returns
-    ///
-    /// * `Result<(), BTreeError>` - Success or error
-    pub async fn load_postings<F>(&mut self, mut f: F) -> Result<(), BM25Error>
+    pub async fn load_buckets<F>(&mut self, mut f: F) -> Result<(), BM25Error>
     where
         F: AsyncFnMut(u32) -> Result<Option<Vec<u8>>, BoxError>,
     {
@@ -365,19 +324,33 @@ where
                 source: err,
             })?;
             if let Some(data) = data {
-                let postings: FxHashMap<String, PostingValue> = ciborium::from_reader(&data[..])
-                    .map_err(|err| BM25Error::Serialization {
+                let bucket: BucketOwned =
+                    ciborium::from_reader(&data[..]).map_err(|err| BM25Error::Serialization {
                         name: self.name.clone(),
                         source: err.into(),
                     })?;
-                let bks = postings.keys().cloned().collect::<Vec<_>>();
-                // Update bucket information
-                // Larger buckets have the most recent state and can override smaller buckets
-                self.buckets
-                    .insert(i, (data.len() as u32, false, bks.into()));
-                self.postings.extend(postings);
+
+                let mut b = Bucket {
+                    size: data.len(),
+                    ..Default::default()
+                };
+                if !bucket.doc_tokens.is_empty() {
+                    b.doc_ids = bucket.doc_tokens.keys().cloned().collect();
+                    self.doc_tokens.extend(bucket.doc_tokens);
+                }
+
+                if !bucket.postings.is_empty() {
+                    b.tokens = bucket.postings.keys().cloned().collect();
+                    self.postings.extend(bucket.postings);
+                }
+
+                self.buckets.insert(i, b);
             }
         }
+
+        let total_tokens: usize = self.doc_tokens.iter().map(|r| *r.value()).sum();
+        self.total_tokens
+            .store(total_tokens as u64, Ordering::Relaxed);
 
         Ok(())
     }
@@ -464,8 +437,8 @@ where
         let bucket_id = self.max_bucket_id.load(Ordering::Acquire);
         let prev_docs = self.doc_tokens.len();
         let tokens: usize = token_freqs.values().sum();
-        // buckets_to_update: BTreeMap<bucketid, BTreeMap<token, size_increase>>
-        let mut buckets_to_update: FxHashMap<u32, FxHashMap<String, u32>> = FxHashMap::default();
+        // buckets_to_update: BTreeMap<bucketid, FxHashMap<token, size_increase>>
+        let mut buckets_to_update: FxHashMap<u32, FxHashMap<String, usize>> = FxHashMap::default();
         match self.doc_tokens.entry(id) {
             dashmap::Entry::Occupied(_) => {
                 return Err(BM25Error::AlreadyExists {
@@ -494,7 +467,7 @@ where
                             let e = entry.get_mut();
                             e.1.push(val);
                             let b = buckets_to_update.entry(e.0).or_default();
-                            b.insert(token, size_increase as u32);
+                            b.insert(token, size_increase);
                         }
                         dashmap::Entry::Vacant(entry) => {
                             // Create new posting
@@ -503,7 +476,7 @@ where
                                 estimate_cbor_size(&(&token, (bucket_id, &[(id, freq)]))) + 2;
                             entry.insert(val);
                             let b = buckets_to_update.entry(bucket_id).or_default();
-                            b.insert(token, size_increase as u32);
+                            b.insert(token, size_increase);
                         }
                     };
                 }
@@ -512,15 +485,16 @@ where
 
         // Phase 2: Update bucket states
         // tokens_to_migrate: (old_bucket_id, token, size)
-        let mut tokens_to_migrate: Vec<(u32, String, u32)> = Vec::new();
+        let mut tokens_to_migrate: Vec<(u32, String, usize)> = Vec::new();
         for (id, val) in buckets_to_update {
             let mut bucket = self.buckets.entry(id).or_default();
             // Mark as dirty, needs to be persisted
-            bucket.1 = true;
+            bucket.is_dirty = true;
             for (token, size) in val {
-                if bucket.2.is_empty() || bucket.0 + size < self.bucket_overload_size {
-                    if bucket.2.push(token) {
-                        bucket.0 += size;
+                if bucket.tokens.is_empty() || bucket.size + size < self.config.bucket_overload_size
+                {
+                    if bucket.tokens.push(token) {
+                        bucket.size += size;
                     }
                 } else {
                     tokens_to_migrate.push((id, token, size));
@@ -532,31 +506,28 @@ where
         if !tokens_to_migrate.is_empty() {
             let mut next_bucket_id = self.max_bucket_id.fetch_add(1, Ordering::Release) + 1;
 
-            {
-                self.buckets
-                    .entry(next_bucket_id)
-                    .or_insert_with(|| (0, true, UniqueVec::new()));
-                // release the lock on the entry
-            }
-
             for (old_bucket_id, token, size) in tokens_to_migrate {
                 if let Some(mut posting) = self.postings.get_mut(&token) {
                     posting.0 = next_bucket_id;
                 }
 
                 if let Some(mut ob) = self.buckets.get_mut(&old_bucket_id) {
-                    if ob.2.swap_remove_if(|k| &token == k).is_some() {
-                        ob.0 = ob.0.saturating_sub(size);
-                        ob.1 = true;
+                    if ob.tokens.swap_remove_if(|k| &token == k).is_some() {
+                        ob.size = ob.size.saturating_sub(size);
+                        ob.is_dirty = true;
                     }
                 }
 
                 let mut next_new_bucket = false;
-                if let Some(mut nb) = self.buckets.get_mut(&next_bucket_id) {
-                    if nb.2.is_empty() || nb.0 + size < self.bucket_overload_size {
+                {
+                    let mut nb = self.buckets.entry(next_bucket_id).or_default();
+
+                    if nb.tokens.is_empty() || nb.size + size < self.config.bucket_overload_size {
                         // Bucket has enough space, update directly
-                        nb.0 += size;
-                        nb.2.push(token.clone());
+                        nb.is_dirty = true;
+                        nb.size += size;
+                        nb.tokens.push(token.clone());
+                        nb.doc_ids.insert(id);
                     } else {
                         // Bucket doesn't have enough space, need to migrate to the next bucket
                         next_new_bucket = true;
@@ -569,30 +540,22 @@ where
                     if let Some(mut posting) = self.postings.get_mut(&token) {
                         posting.0 = next_bucket_id;
                     }
-
-                    match self.buckets.entry(next_bucket_id) {
-                        dashmap::Entry::Vacant(entry) => {
-                            // Create a new bucket with the initial size
-                            entry.insert((size, true, vec![token].into()));
-                        }
-                        dashmap::Entry::Occupied(mut entry) => {
-                            let bucket_entry = entry.get_mut();
-                            bucket_entry.0 += size;
-                            bucket_entry.1 = true; // Mark as dirty
-                            bucket_entry.2.push(token);
-                        }
-                    }
+                    let mut nb = self.buckets.entry(next_bucket_id).or_default();
+                    nb.is_dirty = true;
+                    nb.size += size;
+                    nb.tokens.push(token.clone());
                 }
             }
 
-            self.bucket_doc_ids
+            self.buckets
                 .entry(next_bucket_id)
                 .or_default()
+                .doc_ids
                 .insert(id);
-            self.dirty_doc_buckets.write().insert(next_bucket_id);
         } else {
-            self.bucket_doc_ids.entry(bucket_id).or_default().insert(id);
-            self.dirty_doc_buckets.write().insert(bucket_id);
+            let mut b = self.buckets.entry(bucket_id).or_default();
+            b.is_dirty = true;
+            b.doc_ids.insert(id);
         }
 
         self.update_metadata(|m| {
@@ -644,7 +607,7 @@ where
         };
 
         // buckets_to_update: FxHashMap<bucketid, FxHashMap<token, size_decrease>>
-        let mut buckets_to_update: FxHashMap<u32, FxHashMap<String, u32>> = FxHashMap::default();
+        let mut buckets_to_update: FxHashMap<u32, FxHashMap<String, usize>> = FxHashMap::default();
         // Remove from inverted index
         let mut tokens_to_remove = Vec::new();
         for (token, _) in token_freqs {
@@ -658,7 +621,7 @@ where
                         tokens_to_remove.push(token.clone());
                     }
                     let b = buckets_to_update.entry(posting.0).or_default();
-                    b.insert(token, size_decrease as u32);
+                    b.insert(token, size_decrease);
                 }
             }
         }
@@ -667,39 +630,28 @@ where
             self.postings.remove(token);
         }
 
-        for (id, val) in buckets_to_update {
-            if let Some(mut b) = self.buckets.get_mut(&id) {
+        let mut removed_id = false;
+        for (bucket_id, val) in buckets_to_update {
+            if let Some(mut b) = self.buckets.get_mut(&bucket_id) {
                 // Mark as dirty, needs to be persisted
-                b.1 = true;
+                b.is_dirty = true;
                 for (token, size_decrease) in val {
-                    b.0 = b.0.saturating_sub(size_decrease);
+                    b.size = b.size.saturating_sub(size_decrease);
                     if tokens_to_remove.contains(&token) {
-                        b.2.swap_remove_if(|k| &token == k);
+                        b.tokens.swap_remove_if(|k| &token == k);
                     }
                 }
+                removed_id = removed_id || b.doc_ids.remove(&id);
             }
         }
 
-        let bucket_id = self
-            .bucket_doc_ids
-            .iter()
-            .find(|kv| kv.value().contains(&id))
-            .map(|kv| *kv.key());
-
-        if let Some(bucket_id) = bucket_id {
-            let rt = self
-                .bucket_doc_ids
-                .get_mut(&bucket_id)
-                .and_then(|mut doc_ids| {
-                    doc_ids.remove(&id);
-                    if doc_ids.is_empty() { Some(()) } else { None }
-                });
-
-            if rt.is_some() {
-                self.bucket_doc_ids.remove(&bucket_id);
+        if !removed_id {
+            for mut bucket in self.buckets.iter_mut() {
+                if bucket.doc_ids.remove(&id) {
+                    bucket.is_dirty = true;
+                    break;
+                }
             }
-
-            self.dirty_doc_buckets.write().insert(bucket_id);
         }
 
         self.update_metadata(|m| {
@@ -915,23 +867,20 @@ where
     }
 
     /// Stores the index metadata, IDs and nodes to persistent storage.
-    pub async fn flush<W: Write, F1, F2>(
+    pub async fn flush<W: Write, F>(
         &self,
         metadata: W,
         now_ms: u64,
-        documents_fn: F1,
-        postings_fn: F2,
+        f: F,
     ) -> Result<bool, BM25Error>
     where
-        F1: AsyncFnMut(u32, &[u8]) -> Result<bool, BoxError>,
-        F2: AsyncFnMut(u32, &[u8]) -> Result<bool, BoxError>,
+        F: AsyncFnMut(u32, &[u8]) -> Result<bool, BoxError>,
     {
         if !self.store_metadata(metadata, now_ms)? {
             return Ok(false);
         }
 
-        self.store_dirty_documents(documents_fn).await?;
-        self.store_dirty_postings(postings_fn).await?;
+        self.store_dirty_buckets(f).await?;
         Ok(true)
     }
 
@@ -975,98 +924,42 @@ where
         Ok(true)
     }
 
-    /// Stores dirty documents to persistent storage using the provided async function
-    pub async fn store_dirty_documents<F>(&self, mut f: F) -> Result<(), BM25Error>
-    where
-        F: AsyncFnMut(u32, &[u8]) -> Result<bool, BoxError>,
-    {
-        let mut dirty_doc_buckets = {
-            // move the dirty nodes into a temporary variable
-            // and release the lock
-            let mut guard = self.dirty_doc_buckets.write();
-            std::mem::take(&mut *guard)
-        };
-
-        let mut buf = Vec::with_capacity(4096);
-        while let Some(bucket) = dirty_doc_buckets.pop_first() {
-            let mut documents = FxHashMap::default();
-            if let Some(doc_ids) = self.bucket_doc_ids.get(&bucket) {
-                for &id in doc_ids.iter() {
-                    if let Some(val) = self.doc_tokens.get(&id) {
-                        documents.insert(id, *val);
-                    }
-                }
-            }
-
-            buf.clear();
-            ciborium::into_writer(&documents, &mut buf).expect("Failed to serialize node");
-            match f(bucket, &buf).await {
-                Ok(true) => {
-                    // continue
-                }
-                Ok(false) => {
-                    // stop and refund the unprocessed dirty nodes
-                    self.dirty_doc_buckets
-                        .write()
-                        .append(&mut dirty_doc_buckets);
-                    return Ok(());
-                }
-                Err(err) => {
-                    // refund the unprocessed dirty nodes
-                    self.dirty_doc_buckets
-                        .write()
-                        .append(&mut dirty_doc_buckets);
-                    return Err(BM25Error::Generic {
-                        name: self.name.clone(),
-                        source: err,
-                    });
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Stores dirty postings to persistent storage using the provided async function
-    ///
-    /// This method iterates through all posting buckets and persists those that have been modified
-    /// since the last save operation.
-    ///
-    /// # Arguments
-    ///
-    /// * `f` - Async function that writes bucket data to persistent storage
-    ///   The function takes a bucket ID and serialized data, and returns whether to continue
-    ///
-    /// # Returns
-    ///
-    /// * `Result<(), BTreeError>` - Success or error
-    pub async fn store_dirty_postings<F>(&self, mut f: F) -> Result<(), BM25Error>
+    /// Stores dirty buckets to persistent storage using the provided async function
+    pub async fn store_dirty_buckets<F>(&self, mut f: F) -> Result<(), BM25Error>
     where
         F: AsyncFnMut(u32, &[u8]) -> Result<bool, BoxError>,
     {
         let mut buf = Vec::with_capacity(4096);
         for mut bucket in self.buckets.iter_mut() {
-            if bucket.1 {
-                // If the bucket is dirty, it needs to be persisted
-                let mut postings =
-                    FxHashMap::with_capacity_and_hasher(bucket.2.len(), FxBuildHasher);
-                for k in bucket.2.iter() {
-                    if let Some(posting) = self.postings.get(k) {
-                        postings.insert(k, posting);
-                    }
-                }
+            if bucket.is_dirty {
+                let postings: FxHashMap<_, _> = bucket
+                    .tokens
+                    .iter()
+                    .filter_map(|k| self.postings.get(k).map(|v| (k, v)))
+                    .collect();
+
+                let doc_tokens: FxHashMap<_, _> = bucket
+                    .doc_ids
+                    .iter()
+                    .filter_map(|id| self.doc_tokens.get(id).map(|v| (*id, *v)))
+                    .collect();
 
                 buf.clear();
-                ciborium::into_writer(&postings, &mut buf).map_err(|err| {
-                    BM25Error::Serialization {
-                        name: self.name.clone(),
-                        source: err.into(),
-                    }
+                ciborium::into_writer(
+                    &BucketRef {
+                        postings: &postings,
+                        doc_tokens: &doc_tokens,
+                    },
+                    &mut buf,
+                )
+                .map_err(|err| BM25Error::Serialization {
+                    name: self.name.clone(),
+                    source: err.into(),
                 })?;
 
                 if let Ok(conti) = f(*bucket.key(), &buf).await {
                     // Only mark as clean if persistence was successful, otherwise wait for next round
-                    bucket.1 = false;
+                    bucket.is_dirty = false;
                     if !conti {
                         return Ok(());
                     }
@@ -1211,34 +1104,22 @@ mod tests {
 
         // 创建临时文件
         let mut metadata: Vec<u8> = Vec::new();
-        let mut documents: HashMap<u32, Vec<u8>> = HashMap::new();
-        let mut postings: HashMap<u32, Vec<u8>> = HashMap::new();
+        let mut buckets: HashMap<u32, Vec<u8>> = HashMap::new();
 
         // 保存索引
         index
-            .flush(
-                &mut metadata,
-                0,
-                async |id: u32, data: &[u8]| {
-                    documents.insert(id, data.to_vec());
-                    Ok(true)
-                },
-                async |id: u32, data: &[u8]| {
-                    postings.insert(id, data.to_vec());
-                    Ok(true)
-                },
-            )
+            .flush(&mut metadata, 0, async |id: u32, data: &[u8]| {
+                buckets.insert(id, data.to_vec());
+                Ok(true)
+            })
             .await
             .unwrap();
 
         // 加载索引
         let tokenizer = default_tokenizer();
-        let loaded_index = BM25Index::load_all(
-            tokenizer,
-            &metadata[..],
-            async |id| Ok(documents.get(&id).cloned()),
-            async |id| Ok(postings.get(&id).cloned()),
-        )
+        let loaded_index = BM25Index::load_all(tokenizer, &metadata[..], async |id| {
+            Ok(buckets.get(&id).cloned())
+        })
         .await
         .unwrap();
 
@@ -1460,61 +1341,30 @@ mod tests {
 
         // 创建存储映射
         let mut metadata: Vec<u8> = Vec::new();
-        let mut documents: HashMap<u32, Vec<u8>> = HashMap::new();
-        let mut postings: HashMap<u32, Vec<u8>> = HashMap::new();
+        let mut buckets: HashMap<u32, Vec<u8>> = HashMap::new();
 
         // 保存索引
         index
-            .flush(
-                &mut metadata,
-                100,
-                async |id: u32, data: &[u8]| {
-                    println!("Saving documents for bucket {}, size: {}", id, data.len());
-                    documents.insert(id, data.to_vec());
-                    Ok(true)
-                },
-                async |id: u32, data: &[u8]| {
-                    println!("Saving postings for bucket {}, size: {}", id, data.len());
-                    postings.insert(id, data.to_vec());
-                    Ok(true)
-                },
-            )
+            .flush(&mut metadata, 100, async |id: u32, data: &[u8]| {
+                println!("Saving bucket {}, size: {}", id, data.len());
+                buckets.insert(id, data.to_vec());
+                Ok(true)
+            })
             .await
             .unwrap();
 
         // 验证保存了正确数量的桶
-        println!("Saved {} document buckets", documents.len());
-        println!("Saved {} posting buckets", postings.len());
-        assert!(documents.len() > 1, "应该保存了多个文档桶");
-        assert!(postings.len() > 1, "应该保存了多个倒排索引桶");
+        println!("Saved {} document buckets", buckets.len());
+        assert!(buckets.len() > 1, "应该保存了多个文档桶");
 
         // 验证每个桶的内容
-        for (bucket_id, data) in &documents {
-            let docs: FxHashMap<u64, usize> = ciborium::from_reader(&data[..]).unwrap();
-            println!(
-                "Document bucket {} contains {} documents",
-                bucket_id,
-                docs.len()
-            );
-            assert!(!docs.is_empty(), "文档桶不应该为空");
-
-            // 验证文档token数量的合理性
-            for (doc_id, token_count) in docs {
-                assert!(token_count > 0, "文档 {} 的token数量应该大于0", doc_id);
-            }
-        }
-
-        for (bucket_id, data) in &postings {
-            let posts: FxHashMap<String, PostingValue> = ciborium::from_reader(&data[..]).unwrap();
-            println!(
-                "Posting bucket {} contains {} terms",
-                bucket_id,
-                posts.len()
-            );
-            assert!(!posts.is_empty(), "倒排索引桶不应该为空");
+        for (bucket_id, data) in &buckets {
+            let bucket: BucketOwned = ciborium::from_reader(&data[..]).unwrap();
+            println!("Document bucket {bucket_id} {:?}", bucket.doc_tokens);
+            assert!(!bucket.postings.is_empty());
 
             // 验证倒排索引结构
-            for (term, (bucket_ref, doc_list)) in posts {
+            for (term, (bucket_ref, doc_list)) in bucket.postings {
                 assert_eq!(
                     bucket_ref, *bucket_id,
                     "术语 {} 的桶引用应该指向当前桶",
@@ -1526,22 +1376,19 @@ mod tests {
                     assert!(*freq > 0, "文档 {} 中术语 {} 的频率应该大于0", doc_id, term);
                 }
             }
+
+            // 验证文档token数量的合理性
+            for (doc_id, token_count) in bucket.doc_tokens {
+                assert!(token_count > 0, "文档 {} 的token数量应该大于0", doc_id);
+            }
         }
 
         // 加载索引
         let tokenizer2 = default_tokenizer();
-        let loaded_index = BM25Index::load_all(
-            tokenizer2,
-            &metadata[..],
-            async |id| {
-                println!("Loading documents for bucket {}", id);
-                Ok(documents.get(&id).cloned())
-            },
-            async |id| {
-                println!("Loading postings for bucket {}", id);
-                Ok(postings.get(&id).cloned())
-            },
-        )
+        let loaded_index = BM25Index::load_all(tokenizer2, &metadata[..], async |id| {
+            println!("Loading for bucket {}", id);
+            Ok(buckets.get(&id).cloned())
+        })
         .await
         .unwrap();
 
@@ -1675,26 +1522,14 @@ mod tests {
         {
             // 测试只加载部分桶的情况
             let tokenizer = default_tokenizer();
-            let partial_index = BM25Index::load_all(
-                tokenizer,
-                &metadata[..],
-                async |id| {
-                    // 只加载桶0的文档
-                    if id == 0 {
-                        Ok(documents.get(&id).cloned())
-                    } else {
-                        Ok(None)
-                    }
-                },
-                async |id| {
-                    // 只加载桶0的倒排索引
-                    if id == 0 {
-                        Ok(postings.get(&id).cloned())
-                    } else {
-                        Ok(None)
-                    }
-                },
-            )
+            let partial_index = BM25Index::load_all(tokenizer, &metadata[..], async |id| {
+                // 只加载桶0的文档
+                if id == 0 {
+                    Ok(buckets.get(&id).cloned())
+                } else {
+                    Ok(None)
+                }
+            })
             .await
             .unwrap();
 

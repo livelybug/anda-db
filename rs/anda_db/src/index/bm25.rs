@@ -47,12 +47,8 @@ impl BM25 {
         format!("bm25_indexes/{name}/meta.cbor")
     }
 
-    fn document_path(name: &str, bucket: u32) -> String {
-        format!("bm25_indexes/{name}/d_{bucket}.cbor")
-    }
-
-    fn posting_path(name: &str, bucket: u32) -> String {
-        format!("bm25_indexes/{name}/p_{bucket}.cbor")
+    fn bucket_path(name: &str, bucket: u32) -> String {
+        format!("bm25_indexes/{name}/b_{bucket}.cbor")
     }
 
     pub fn collect_tokens(tokenizer: &TokenizerChain, text: &str) -> Vec<String> {
@@ -69,18 +65,22 @@ impl BM25 {
     ) -> Result<Self, DBError> {
         let name = fields.join("-");
         let config = BM25Config {
-            bucket_overload_size: storage.object_chunk_size() as u32 * 2,
+            bucket_overload_size: storage.bucket_overload_size(),
             ..Default::default()
         };
         let index = BM25Index::new(name.clone(), tokenizer, Some(config));
+        let n = Arc::new(name.clone());
+        let s = Arc::new(storage.clone());
         let mut data = Vec::new();
         index
-            .flush(
-                &mut data,
-                now_ms,
-                async |_, _| Ok(true),
-                async |_, _| Ok(true),
-            )
+            .flush(&mut data, now_ms, async move |id, data| {
+                let path = BM25::bucket_path(n.clone().as_str(), id);
+                let _ = s
+                    .clone()
+                    .put_bytes(&path, Bytes::copy_from_slice(data), PutMode::Overwrite)
+                    .await?;
+                Ok(true)
+            })
             .await?;
         let ver = storage
             .put_bytes(&BM25::metadata_path(&name), data.into(), PutMode::Create)
@@ -103,28 +103,14 @@ impl BM25 {
         let (metadata, ver) = storage.fetch_bytes(&BM25::metadata_path(&name)).await?;
         let n = Arc::new(name.clone());
         let s = Arc::new(storage.clone());
-        let n2 = n.clone();
-        let s2 = s.clone();
-        let index = BM25Index::load_all(
-            tokenizer,
-            &metadata[..],
-            async move |id: u32| {
-                let path = BM25::document_path(n.clone().as_str(), id);
-                match s.clone().fetch_bytes(&path).await {
-                    Ok((data, _)) => Ok(Some(data.into())),
-                    Err(DBError::NotFound { .. }) => Ok(None),
-                    Err(e) => Err(e.into()),
-                }
-            },
-            async move |id: u32| {
-                let path = BM25::posting_path(n2.clone().as_str(), id);
-                match s2.clone().fetch_bytes(&path).await {
-                    Ok((data, _)) => Ok(Some(data.into())),
-                    Err(DBError::NotFound { .. }) => Ok(None),
-                    Err(e) => Err(e.into()),
-                }
-            },
-        )
+        let index = BM25Index::load_all(tokenizer, &metadata[..], async move |id: u32| {
+            let path = BM25::bucket_path(n.clone().as_str(), id);
+            match s.clone().fetch_bytes(&path).await {
+                Ok((data, _)) => Ok(Some(data.into())),
+                Err(DBError::NotFound { .. }) => Ok(None),
+                Err(e) => Err(e.into()),
+            }
+        })
         .await?;
 
         Ok(Self {
@@ -155,21 +141,8 @@ impl BM25 {
         let n = Arc::new(self.name.clone());
         let s = Arc::new(self.storage.clone());
         self.index
-            .store_dirty_documents(async move |id, data| {
-                let path = BM25::document_path(n.clone().as_str(), id);
-                let _ = s
-                    .clone()
-                    .put_bytes(&path, Bytes::copy_from_slice(data), PutMode::Overwrite)
-                    .await?;
-                Ok(true)
-            })
-            .await?;
-
-        let n = Arc::new(self.name.clone());
-        let s = Arc::new(self.storage.clone());
-        self.index
-            .store_dirty_postings(async move |id, data| {
-                let path = BM25::posting_path(n.clone().as_str(), id);
+            .store_dirty_buckets(async move |id, data| {
+                let path = BM25::bucket_path(n.clone().as_str(), id);
                 let _ = s
                     .clone()
                     .put_bytes(&path, Bytes::copy_from_slice(data), PutMode::Overwrite)

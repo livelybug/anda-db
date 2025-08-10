@@ -56,41 +56,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let metadata = std::fs::File::create("debug/tfs_demo/metadata.cbor")?;
         index
-            .flush(
-                metadata,
-                0,
-                async |id, data| {
-                    let mut node = std::fs::File::create(format!("debug/tfs_demo/seg_{id}.cbor"))?;
-                    node.write_all(data)?;
-                    Ok(true)
-                },
-                async |id, data| {
-                    let mut node =
-                        std::fs::File::create(format!("debug/tfs_demo/posting_{id}.cbor"))?;
-                    node.write_all(data)?;
-                    Ok(true)
-                },
-            )
+            .flush(metadata, 0, async |id, data| {
+                let mut node = std::fs::File::create(format!("debug/tfs_demo/b_{id}.cbor"))?;
+                node.write_all(data)?;
+                Ok(true)
+            })
             .await?;
     }
 
     let metadata = std::fs::File::open("debug/hnsw_demo/metadata.cbor")?;
-    let loaded_index = BM25Index::load_all(
-        jieba_tokenizer(),
-        metadata,
-        async |id| {
-            let mut node = std::fs::File::open(format!("debug/tfs_demo/seg_{id}.cbor"))?;
-            let mut buf = Vec::new();
-            node.read_to_end(&mut buf)?;
-            Ok(Some(buf))
-        },
-        async |id| {
-            let mut node = std::fs::File::open(format!("debug/tfs_demo/posting_{id}.cbor"))?;
-            let mut buf = Vec::new();
-            node.read_to_end(&mut buf)?;
-            Ok(Some(buf))
-        },
-    )
+    let loaded_index = BM25Index::load_all(jieba_tokenizer(), metadata, async |id| {
+        let mut node = std::fs::File::open(format!("debug/tfs_demo/b_{id}.cbor"))?;
+        let mut buf = Vec::new();
+        node.read_to_end(&mut buf)?;
+        Ok(Some(buf))
+    })
     .await?;
     println!("Loaded index with {} documents", loaded_index.len());
 

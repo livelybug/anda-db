@@ -63,14 +63,8 @@ index.remove(3, "The lazy dog sleeps all day", now_ms);
             metadata,
             0,
             async |id, data| {
-                let mut node = std::fs::File::create(format!("tfs_demo/seg_{id}.cbor"))?;
-                node.write_all(data)?;
-                Ok(true)
-            },
-            async |id, data| {
-                let mut node =
-                    std::fs::File::create(format!("tfs_demo/posting_{id}.cbor"))?;
-                node.write_all(data)?;
+                let mut bucket = std::fs::File::create(format!("tfs_demo/b_{id}.cbor"))?;
+                bucket.write_all(data)?;
                 Ok(true)
             },
         )
@@ -83,15 +77,9 @@ let loaded_index = BM25Index::load_all(
     jieba_tokenizer(),
     metadata,
     async |id| {
-        let mut node = std::fs::File::open(format!("tfs_demo/seg_{id}.cbor"))?;
+        let mut bucket = std::fs::File::open(format!("tfs_demo/b_{id}.cbor"))?;
         let mut buf = Vec::new();
-        node.read_to_end(&mut buf)?;
-        Ok(Some(buf))
-    },
-    async |id| {
-        let mut node = std::fs::File::open(format!("tfs_demo/posting_{id}.cbor"))?;
-        let mut buf = Vec::new();
-        node.read_to_end(&mut buf)?;
+        bucket.read_to_end(&mut buf)?;
         Ok(Some(buf))
     },
 )

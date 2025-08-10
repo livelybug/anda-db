@@ -73,8 +73,8 @@ impl BTree {
         format!("btree_indexes/{name}/meta.cbor")
     }
 
-    fn posting_path(name: &str, bucket: u32) -> String {
-        format!("btree_indexes/{name}/p_{bucket}.cbor")
+    fn bucket_path(name: &str, bucket: u32) -> String {
+        format!("btree_indexes/{name}/b_{bucket}.cbor")
     }
 
     pub fn from_cursor<T>(cursor: &Option<String>) -> Result<Option<T>, DBError>
@@ -108,7 +108,7 @@ impl BTree {
 
     pub async fn new(field: Fe, storage: Storage, now_ms: u64) -> Result<Self, DBError> {
         let config = BTreeConfig {
-            bucket_overload_size: storage.object_chunk_size() as u32 * 2,
+            bucket_overload_size: storage.bucket_overload_size(),
             allow_duplicates: !field.unique(),
         };
         let field_name = field.name().to_string();
@@ -138,7 +138,7 @@ impl BTree {
             });
         }
         let config = BTreeConfig {
-            bucket_overload_size: storage.object_chunk_size() as u32 * 2,
+            bucket_overload_size: storage.bucket_overload_size(),
             allow_duplicates: false,
         };
         BTree::inner_new(fields, &Ft::Bytes, config, storage, now_ms).await
@@ -530,7 +530,7 @@ where
         let n = Arc::new(name.clone());
         let s = Arc::new(storage.clone());
         let index = BTreeIndex::<DocumentId, FV>::load_all(&metadata[..], async move |id: u32| {
-            let path = BTree::posting_path(n.clone().as_str(), id);
+            let path = BTree::bucket_path(n.clone().as_str(), id);
             match s.clone().fetch_bytes(&path).await {
                 Ok((data, _)) => Ok(Some(data.into())),
                 Err(DBError::NotFound { .. }) => Ok(None),
@@ -567,8 +567,8 @@ where
         let n = Arc::new(self.name.clone());
         let s = Arc::new(self.storage.clone());
         self.index
-            .store_dirty_postings(async move |id, data| {
-                let path = BTree::posting_path(n.clone().as_str(), id);
+            .store_dirty_buckets(async move |id, data| {
+                let path = BTree::bucket_path(n.clone().as_str(), id);
                 let _ = s
                     .clone()
                     .put_bytes(&path, Bytes::copy_from_slice(data), PutMode::Overwrite)

@@ -70,7 +70,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Load the index data
     index2
-        .load_postings(async |id: u32| {
+        .load_buckets(async |id: u32| {
             let mut file = std::fs::File::open(format!("debug/btree_demo/bucket_{id}.cbor"))?;
             let mut data = Vec::new();
             file.read_to_end(&mut data)?;

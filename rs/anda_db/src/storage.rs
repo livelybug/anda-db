@@ -39,13 +39,14 @@ struct InnerStorage {
     object_store: Arc<dyn ObjectStore>,
     /// Base path for all documents within the object store.
     base_path: Path,
-    /// Zstd compression level (0 for no compression, 1-22).
-    compress_level: i32,
-    /// Chunk size for buffered reading/writing and streaming operations.
-    object_chunk_size: usize,
-    /// Maximum object size (in bytes) that can be stored using a single `put` operation.
-    /// Objects larger than this size must be written using `stream_writer`.
-    max_small_object_size: usize,
+    // /// Zstd compression level (0 for no compression, 1-22).
+    // compress_level: i32,
+    // /// Chunk size for buffered reading/writing, streaming operations and encryption.
+    // /// Cannot changed after initialization.
+    // object_chunk_size: usize,
+    // /// Maximum object size (in bytes) that can be stored using a single `put` operation.
+    // /// Objects larger than this size must be written using `stream_writer`.
+    // max_small_object_size: usize,
     /// Atomic storage statistics.
     stats: StorageStatsAtomic,
     /// Storage metadata (configuration and non-atomic stats).
@@ -62,10 +63,15 @@ pub struct StorageConfig {
     /// Zstd compression level. 0 disables compression, 1-22 represent compression levels.
     /// Default is 3. 22 indicates the highest compression ratio.
     pub compress_level: i32,
-    /// Chunk size (in bytes) for streaming operations.
+    /// Chunk size for buffered reading/writing, streaming operations and encryption.
+    /// Cannot changed after initialization.
     pub object_chunk_size: usize,
     /// Maximum size (in bytes) for objects considered "small" enough for single `put` operations and caching.
     pub max_small_object_size: usize,
+    /// Maximum size of a index bucket before creating a new one
+    /// When a bucket's stored data exceeds this size,
+    /// a new bucket should be created for new data
+    pub bucket_overload_size: usize,
 }
 
 impl Default for StorageConfig {
@@ -75,6 +81,7 @@ impl Default for StorageConfig {
             compress_level: 3,                  // Default compression level
             object_chunk_size: 256 * 1024,      // Default chunk size (256 KiB)
             max_small_object_size: 2000 * 1024, // Default max small object size (2 MiB)
+            bucket_overload_size: 1024 * 1024,  // Default bucket overload size (1 MiB)
         }
     }
 }
@@ -306,9 +313,6 @@ impl Storage {
             inner: Arc::new(InnerStorage {
                 object_store,
                 base_path: Path::from(metadata.path.as_str()),
-                compress_level: metadata.config.compress_level,
-                object_chunk_size: metadata.config.object_chunk_size,
-                max_small_object_size: metadata.config.max_small_object_size,
                 stats: (&metadata.stats).into(),
                 metadata,
                 cache,
@@ -330,9 +334,9 @@ impl Storage {
         &self.inner.base_path
     }
 
-    /// Returns the configured object chunk size.
-    pub fn object_chunk_size(&self) -> usize {
-        self.inner.object_chunk_size
+    /// Returns the configured bucket overload size.
+    pub fn bucket_overload_size(&self) -> usize {
+        self.inner.metadata.config.bucket_overload_size
     }
 
     /// Returns a copy of the current storage statistics.
@@ -396,7 +400,10 @@ impl Storage {
             // TODO: get_range
         }
 
-        let bytes = try_decompress(bytes, self.inner.max_small_object_size as u64);
+        let bytes = try_decompress(
+            bytes,
+            self.inner.metadata.config.max_small_object_size as u64,
+        );
         self.inner
             .stats
             .total_fetch_count
@@ -457,7 +464,7 @@ impl Storage {
         })?;
 
         if let Some(cache) = &self.inner.cache {
-            if bytes.len() < self.inner.max_small_object_size {
+            if bytes.len() <= self.inner.metadata.config.max_small_object_size {
                 // Cache the document if it is small enough
                 cache
                     .insert(path.clone(), Arc::new((bytes, version.clone())))
@@ -492,10 +499,10 @@ impl Storage {
         let reader = BufReader::with_capacity(
             self.inner.object_store.clone(),
             &meta,
-            self.inner.object_chunk_size,
+            self.inner.metadata.config.object_chunk_size,
         );
 
-        if self.inner.compress_level > 0 {
+        if self.inner.metadata.config.compress_level > 0 {
             Ok(Box::pin(ZstdDecoder::new(reader)))
         } else {
             Ok(Box::pin(reader))
@@ -628,11 +635,11 @@ impl Storage {
         let writer = BufWriter::with_capacity(
             self.inner.object_store.clone(),
             path.clone(),
-            self.inner.object_chunk_size,
+            self.inner.metadata.config.object_chunk_size,
         );
 
-        let level = async_compression::Level::Precise(self.inner.compress_level);
-        if self.inner.compress_level > 0 {
+        let level = async_compression::Level::Precise(self.inner.metadata.config.compress_level);
+        if self.inner.metadata.config.compress_level > 0 {
             Box::pin(ZstdEncoder::with_quality(writer, level))
         } else {
             Box::pin(writer)
@@ -721,14 +728,14 @@ impl Storage {
 impl InnerStorage {
     /// Internal helper to put bytes, handling compression, size checks, cache invalidation, and stats updates.
     async fn put(&self, path: Path, data: Bytes, mode: PutMode) -> Result<ObjectVersion, DBError> {
-        let data = if self.compress_level > 0 {
-            try_compress(data, self.compress_level)
+        let data = if self.metadata.config.compress_level > 0 {
+            try_compress(data, self.metadata.config.compress_level)
         } else {
             data
         };
 
         let data_len = data.len();
-        if data_len > self.max_small_object_size {
+        if data_len > self.metadata.config.max_small_object_size {
             return Err(DBError::Generic {
                 name: self.base_path.to_string(),
                 source: "Payload size exceeds limit, please use `stream_writer`".into(),
@@ -923,7 +930,7 @@ mod tests {
 
         // 验证基本属性
         assert_eq!(storage.base_path().as_ref(), "test");
-        assert_eq!(storage.object_chunk_size(), 256 * 1024);
+        assert_eq!(storage.bucket_overload_size(), 1024 * 1024);
 
         // 验证元数据
         let metadata = storage.metadata();
@@ -1331,7 +1338,7 @@ mod tests {
         assert_eq!(read_data, compressible_data);
 
         // 验证文件大小（如果启用了压缩，存储大小应小于原始大小）
-        if storage.inner.compress_level > 0 {
+        if storage.inner.metadata.config.compress_level > 0 {
             let meta = storage
                 .inner
                 .object_store
