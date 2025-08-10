@@ -336,7 +336,7 @@ where
     /// # Arguments
     ///
     /// * `f` - Async function that reads posting data from a specified bucket.
-    ///   `F: AsyncFn(u32) -> Result<Vec<u8>, BTreeError>`
+    ///   `F: AsyncFn(u32) -> Result<Option<Vec<u8>>, BTreeError>`
     ///   The function should take a bucket ID as input and return a vector of bytes
     ///   containing the serialized posting data.
     ///
