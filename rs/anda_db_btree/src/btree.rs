@@ -1284,7 +1284,7 @@ where
     where
         F: AsyncFnMut(u32, &[u8]) -> Result<bool, BoxError>,
     {
-        let mut buf = Vec::with_capacity(8192);
+        let mut buf = Vec::with_capacity(4096);
         for mut bucket in self.buckets.iter_mut() {
             if bucket.1 {
                 // If the bucket is dirty, it needs to be persisted
