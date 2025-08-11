@@ -69,18 +69,9 @@ impl BM25 {
             ..Default::default()
         };
         let index = BM25Index::new(name.clone(), tokenizer, Some(config));
-        let n = Arc::new(name.clone());
-        let s = Arc::new(storage.clone());
         let mut data = Vec::new();
         index
-            .flush(&mut data, now_ms, async move |id, data| {
-                let path = BM25::bucket_path(n.clone().as_str(), id);
-                let _ = s
-                    .clone()
-                    .put_bytes(&path, Bytes::copy_from_slice(data), PutMode::Overwrite)
-                    .await?;
-                Ok(true)
-            })
+            .flush(&mut data, now_ms, async |_, _| Ok(true))
             .await?;
         let ver = storage
             .put_bytes(&BM25::metadata_path(&name), data.into(), PutMode::Create)
@@ -123,8 +114,8 @@ impl BM25 {
     }
 
     pub async fn flush(&self, now_ms: u64) -> Result<bool, DBError> {
-        let mut data = Vec::new();
-        if !self.index.store_metadata(&mut data, now_ms)? {
+        let mut buf = Vec::with_capacity(256);
+        if !self.index.store_metadata(&mut buf, now_ms)? {
             return Ok(false);
         }
 
@@ -132,7 +123,7 @@ impl BM25 {
         let ver = { self.metadata_version.read().clone() };
         let ver = self
             .storage
-            .put_bytes(&path, data.into(), PutMode::Update(ver.into()))
+            .put_bytes(&path, buf.into(), PutMode::Update(ver.into()))
             .await?;
         {
             *self.metadata_version.write() = ver;

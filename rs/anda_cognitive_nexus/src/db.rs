@@ -205,6 +205,16 @@ impl CognitiveNexus {
             this.execute_kml(parse_kml(PERSON_KIP)?, false).await?;
         }
 
+        if !this
+            .has_concept(&ConceptPK::Object {
+                r#type: META_CONCEPT_TYPE.to_string(),
+                name: EVENT_TYPE.to_string(),
+            })
+            .await
+        {
+            this.execute_kml(parse_kml(EVENT_KIP)?, false).await?;
+        }
+
         f(&this).await?;
         Ok(this)
     }

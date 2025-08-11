@@ -176,7 +176,7 @@ where
     FV: Eq + Ord + Hash + Clone + Serialize,
 {
     #[serde(rename = "p")]
-    postings: &'a FxHashMap<&'a FV, PostingValue<PK>>,
+    postings: &'a FxHashMap<&'a FV, dashmap::mapref::one::Ref<'a, FV, PostingValue<PK>>>,
 }
 
 /// Range query specification for flexible querying
@@ -1317,7 +1317,7 @@ where
                 let postings: FxHashMap<_, _> = bucket
                     .2
                     .iter()
-                    .filter_map(|fv| self.postings.get(fv).map(|p| (fv, p.value().clone())))
+                    .filter_map(|fv| self.postings.get(fv).map(|p| (fv, p)))
                     .collect();
 
                 buf.clear();

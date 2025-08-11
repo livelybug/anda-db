@@ -108,8 +108,8 @@ impl Hnsw {
     }
 
     pub async fn flush(&self, now_ms: u64) -> Result<bool, DBError> {
-        let mut data = Vec::new();
-        if !self.index.store_metadata(&mut data, now_ms)? {
+        let mut buf = Vec::with_capacity(256);
+        if !self.index.store_metadata(&mut buf, now_ms)? {
             return Ok(false);
         }
 
@@ -119,7 +119,7 @@ impl Hnsw {
             .storage
             .put_bytes(
                 &path,
-                Bytes::copy_from_slice(&data[..]),
+                Bytes::copy_from_slice(&buf[..]),
                 PutMode::Update(metadata_version.into()),
             )
             .await?;
@@ -127,17 +127,13 @@ impl Hnsw {
             *self.metadata_version.write() = metadata_version;
         }
 
-        data.clear();
-        self.index.store_ids(&mut data)?;
+        buf.clear();
+        self.index.store_ids(&mut buf)?;
         let path = Hnsw::ids_path(&self.name);
         let ids_version = { self.ids_version.read().clone() };
         let ids_version = self
             .storage
-            .put_bytes(
-                &path,
-                Bytes::copy_from_slice(&data[..]),
-                PutMode::Update(ids_version.into()),
-            )
+            .put_bytes(&path, buf.into(), PutMode::Update(ids_version.into()))
             .await?;
         {
             *self.ids_version.write() = ids_version;

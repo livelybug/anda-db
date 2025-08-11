@@ -549,8 +549,8 @@ where
     }
 
     async fn flush(&self, now_ms: u64) -> Result<bool, DBError> {
-        let mut data = Vec::new();
-        if !self.index.store_metadata(&mut data, now_ms)? {
+        let mut buf = Vec::with_capacity(256);
+        if !self.index.store_metadata(&mut buf, now_ms)? {
             return Ok(false);
         }
 
@@ -558,7 +558,7 @@ where
         let ver = { self.metadata_version.read().clone() };
         let ver = self
             .storage
-            .put_bytes(&path, data.into(), PutMode::Update(ver.into()))
+            .put_bytes(&path, buf.into(), PutMode::Update(ver.into()))
             .await?;
         {
             *self.metadata_version.write() = ver;
