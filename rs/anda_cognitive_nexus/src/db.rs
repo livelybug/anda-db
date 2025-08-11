@@ -2980,7 +2980,7 @@ mod tests {
             result,
             json!([{
                 "_type":"ConceptNode",
-                "id":"C:12",
+                "id":"C:13",
                 "type":"Drug",
                 "name":"Aspirin",
                 "attributes":{"dosage":"325mg","molecular_formula":"C9H8O4","risk_level":2},
@@ -3855,7 +3855,7 @@ mod tests {
             .await
             .unwrap();
         let result: Vec<PropositionLink> = serde_json::from_value(result).unwrap();
-        assert_eq!(result.len(), 7);
+        assert_eq!(result.len(), 8);
 
         let (result, _) = nexus
             .execute_meta(parse_meta(r#"SEARCH PROPOSITION "test_data" LIMIT 5"#).unwrap())
