@@ -17,15 +17,12 @@ pub fn find_rename_attr(attrs: &[Attribute]) -> Option<String> {
 
         // 遍历所有参数，查找 rename 属性
         for meta in args {
-            if let Meta::NameValue(name_value) = meta {
-                if name_value.path.is_ident("rename") {
-                    if let Expr::Lit(expr_lit) = &name_value.value {
-                        if let Lit::Str(s) = &expr_lit.lit {
+            if let Meta::NameValue(name_value) = meta
+                && name_value.path.is_ident("rename")
+                    && let Expr::Lit(expr_lit) = &name_value.value
+                        && let Lit::Str(s) = &expr_lit.lit {
                             return Some(s.value());
                         }
-                    }
-                }
-            }
         }
     }
     None
@@ -36,13 +33,11 @@ pub fn find_field_type_attr(attrs: &[Attribute]) -> Option<TokenStream> {
     for attr in attrs {
         if attr.path().is_ident("field_type") {
             // 尝试访问属性的参数
-            if let Ok(meta_name_value) = attr.meta.require_name_value() {
-                if let Expr::Lit(expr_lit) = &meta_name_value.value {
-                    if let Lit::Str(lit_str) = &expr_lit.lit {
+            if let Ok(meta_name_value) = attr.meta.require_name_value()
+                && let Expr::Lit(expr_lit) = &meta_name_value.value
+                    && let Lit::Str(lit_str) = &expr_lit.lit {
                         return Some(parse_field_type_str(&lit_str.value()));
                     }
-                }
-            }
         }
     }
     None
@@ -107,18 +102,17 @@ pub fn determine_field_type(ty: &Type) -> Result<TokenStream, String> {
 
             match type_name.as_str() {
                 "Option" => {
-                    if let PathArguments::AngleBracketed(args) = &segment.arguments {
-                        if let Some(GenericArgument::Type(inner_type)) = args.args.first() {
+                    if let PathArguments::AngleBracketed(args) = &segment.arguments
+                        && let Some(GenericArgument::Type(inner_type)) = args.args.first() {
                             let inner_field_type = determine_field_type(inner_type)?;
                             return Ok(quote! { FieldType::Option(Box::new(#inner_field_type)) });
                         }
-                    }
                     Ok(quote! { FieldType::Option(Box::new(FieldType::Json)) })
                 }
                 "String" | "str" => Ok(quote! { FieldType::Text }),
                 "Vec" | "HashSet" | "BTreeSet" => {
-                    if let PathArguments::AngleBracketed(args) = &segment.arguments {
-                        if let Some(GenericArgument::Type(inner_type)) = args.args.first() {
+                    if let PathArguments::AngleBracketed(args) = &segment.arguments
+                        && let Some(GenericArgument::Type(inner_type)) = args.args.first() {
                             if is_u8_type(inner_type) {
                                 return Ok(quote! { FieldType::Bytes });
                             } else if is_bf16_type(inner_type) {
@@ -128,7 +122,6 @@ pub fn determine_field_type(ty: &Type) -> Result<TokenStream, String> {
                                 return Ok(quote! { FieldType::Array(vec![#inner_field_type]) });
                             }
                         }
-                    }
                     Err(format!(
                         "Unable to determine Vec element type for: {}",
                         type_name
@@ -146,8 +139,8 @@ pub fn determine_field_type(ty: &Type) -> Result<TokenStream, String> {
                 "Vector" => Ok(quote! { FieldType::Vector }),
                 "HashMap" | "BTreeMap" | "Map" => {
                     // 处理 HashMap 和 BTreeMap 类型
-                    if let PathArguments::AngleBracketed(args) = &segment.arguments {
-                        if args.args.len() >= 2 {
+                    if let PathArguments::AngleBracketed(args) = &segment.arguments
+                        && args.args.len() >= 2 {
                             // 检查第一个泛型参数是否为 String 类型
                             let key_type = &args.args[0];
                             if let GenericArgument::Type(key_type) = key_type {
@@ -169,7 +162,6 @@ pub fn determine_field_type(ty: &Type) -> Result<TokenStream, String> {
                                 }
                             }
                         }
-                    }
                     Err(format!("Invalid map type: {}", type_name))
                 }
                 _ => {
@@ -222,40 +214,36 @@ pub fn determine_field_type(ty: &Type) -> Result<TokenStream, String> {
 
 /// 检查类型是否为 u8
 pub fn is_u8_type(ty: &Type) -> bool {
-    if let Type::Path(type_path) = ty {
-        if let Some(segment) = type_path.path.segments.first() {
+    if let Type::Path(type_path) = ty
+        && let Some(segment) = type_path.path.segments.first() {
             return segment.ident == "u8";
         }
-    }
     false
 }
 
 /// 检查类型是否为 String 或 &str
 pub fn is_string_type(ty: &Type) -> bool {
-    if let Type::Path(type_path) = ty {
-        if let Some(segment) = type_path.path.segments.first() {
+    if let Type::Path(type_path) = ty
+        && let Some(segment) = type_path.path.segments.first() {
             return segment.ident == "String" || segment.ident == "str";
         }
-    }
     false
 }
 
 /// 检查类型是否为 bf16
 pub fn is_bf16_type(ty: &Type) -> bool {
-    if let Type::Path(type_path) = ty {
-        if let Some(segment) = type_path.path.segments.first() {
+    if let Type::Path(type_path) = ty
+        && let Some(segment) = type_path.path.segments.first() {
             return segment.ident == "bf16";
         }
-    }
     false
 }
 
 /// 检查类型是否为 u64
 pub fn is_u64_type(ty: &Type) -> bool {
-    if let Type::Path(type_path) = ty {
-        if let Some(segment) = type_path.path.segments.first() {
+    if let Type::Path(type_path) = ty
+        && let Some(segment) = type_path.path.segments.first() {
             return segment.ident == "u64";
         }
-    }
     false
 }

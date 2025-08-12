@@ -1107,11 +1107,10 @@ impl FieldValue {
     where
         &'a T: TryFrom<&'a FieldValue>,
     {
-        if let Fv::Map(m) = self {
-            if let Some(v) = m.get(field) {
+        if let Fv::Map(m) = self
+            && let Some(v) = m.get(field) {
                 return v.try_into().ok();
             }
-        }
         None
     }
 }

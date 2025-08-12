@@ -417,13 +417,12 @@ impl CognitiveNexus {
         ctx: &mut QueryContext,
         clause: PropositionClause,
     ) -> Result<(), KipError> {
-        if let Some(var) = &clause.variable {
-            if ctx.entities.contains_key(var) {
+        if let Some(var) = &clause.variable
+            && ctx.entities.contains_key(var) {
                 return Err(KipError::InvalidCommand(format!(
                     "Variable '{var}' already exists in context",
                 )));
             }
-        }
 
         let result = match clause.matcher {
             PropositionMatcher::ID(id) => {
@@ -445,11 +444,10 @@ impl CognitiveNexus {
             }
         };
 
-        if let TargetEntities::IDs(ids) = result {
-            if let Some(var) = clause.variable {
+        if let TargetEntities::IDs(ids) = result
+            && let Some(var) = clause.variable {
                 ctx.entities.insert(var, ids.into());
             }
-        }
 
         Ok(())
     }
@@ -484,11 +482,10 @@ impl CognitiveNexus {
                 Some(false) => {
                     // 过滤不通过，移除相关值
                     for (var, id) in bindings_cursor {
-                        if let Some(existing) = ctx.entities.get_mut(&var) {
-                            if let Some(idx) = existing.iter().position(|x| x == &id) {
+                        if let Some(existing) = ctx.entities.get_mut(&var)
+                            && let Some(idx) = existing.iter().position(|x| x == &id) {
                                 existing.remove(idx);
                             }
-                        }
                     }
                     // 继续处理剩余绑定
                     entities = bindings_snapshot;
@@ -917,13 +914,12 @@ impl CognitiveNexus {
                                     extract_json_text(&mut texts, val);
                                 }
                                 let texts = texts.join("\n");
-                                if tokens.iter().any(|t| texts.contains(t.as_str())) {
-                                    if let Ok(val) =
+                                if tokens.iter().any(|t| texts.contains(t.as_str()))
+                                    && let Ok(val) =
                                         extract_proposition_field_value(proposition, predicate, &[])
                                     {
                                         rt.push(val);
                                     }
-                                }
                             }
 
                             Ok(rt)
@@ -1594,8 +1590,7 @@ impl CognitiveNexus {
                     if let Ok(mut proposition) = self
                         .try_get_proposition_with(&ctx.cache, *id, |prop| Ok(prop.clone()))
                         .await
-                    {
-                        if let Some(prop) = proposition.properties.get_mut(predicate) {
+                        && let Some(prop) = proposition.properties.get_mut(predicate) {
                             let length = prop.attributes.len();
                             for attr in &attributes {
                                 prop.attributes.remove(attr);
@@ -1617,7 +1612,6 @@ impl CognitiveNexus {
                                 updated_propositions += 1;
                             }
                         }
-                    }
                 }
             }
         }
@@ -1684,8 +1678,7 @@ impl CognitiveNexus {
                     if let Ok(mut proposition) = self
                         .try_get_proposition_with(&ctx.cache, *id, |prop| Ok(prop.clone()))
                         .await
-                    {
-                        if let Some(prop) = proposition.properties.get_mut(predicate) {
+                        && let Some(prop) = proposition.properties.get_mut(predicate) {
                             let length = prop.metadata.len();
                             for name in &keys {
                                 prop.metadata.remove(name);
@@ -1707,7 +1700,6 @@ impl CognitiveNexus {
                                 updated_propositions += 1;
                             }
                         }
-                    }
                 }
             }
         }
@@ -2314,13 +2306,11 @@ impl CognitiveNexus {
 
         if has_order_by {
             result = apply_order_by(result, var, order_by);
-            if let Some(cursor) = cursor {
-                if let Some(idx) = result.iter().position(|(eid, _)| eid == &cursor) {
-                    if idx < result.len() {
+            if let Some(cursor) = cursor
+                && let Some(idx) = result.iter().position(|(eid, _)| eid == &cursor)
+                    && idx < result.len() {
                         result = result.split_off(idx + 1);
                     }
-                }
-            }
         }
 
         let mut next_cursor: Option<String> = None;

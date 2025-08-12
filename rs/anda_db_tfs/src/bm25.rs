@@ -511,12 +511,11 @@ where
                     posting.0 = next_bucket_id;
                 }
 
-                if let Some(mut ob) = self.buckets.get_mut(&old_bucket_id) {
-                    if ob.tokens.swap_remove_if(|k| &token == k).is_some() {
+                if let Some(mut ob) = self.buckets.get_mut(&old_bucket_id)
+                    && ob.tokens.swap_remove_if(|k| &token == k).is_some() {
                         ob.size = ob.size.saturating_sub(size);
                         ob.is_dirty = true;
                     }
-                }
 
                 let mut next_new_bucket = false;
                 {

@@ -748,12 +748,11 @@ where
                     posting.0 = next_bucket_id;
                 }
 
-                if let Some(mut ob) = self.buckets.get_mut(&old_bucket_id) {
-                    if ob.2.swap_remove_if(|k| &field_value == k).is_some() {
+                if let Some(mut ob) = self.buckets.get_mut(&old_bucket_id)
+                    && ob.2.swap_remove_if(|k| &field_value == k).is_some() {
                         ob.0 = ob.0.saturating_sub(size);
                         // ob.1 = true; // do not need to set dirty
                     }
-                }
 
                 let mut new_bucket = false;
                 if let Some(mut nb) = self.buckets.get_mut(&next_bucket_id) {

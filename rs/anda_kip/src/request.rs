@@ -54,7 +54,7 @@ impl Request {
     /// # Returns
     /// - `Cow::Borrowed` if no parameters need substitution
     /// - `Cow::Owned` if parameter substitution was performed
-    pub fn to_command(&self) -> Cow<str> {
+    pub fn to_command(&self) -> Cow<'_, str> {
         if self.parameters.is_empty() {
             Cow::Borrowed(&self.command)
         } else {

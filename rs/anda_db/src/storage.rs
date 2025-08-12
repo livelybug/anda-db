@@ -443,8 +443,8 @@ impl Storage {
     where
         T: DeserializeOwned,
     {
-        if let Some(cache) = &self.inner.cache {
-            if let Some(arc) = cache.get(path).await {
+        if let Some(cache) = &self.inner.cache
+            && let Some(arc) = cache.get(path).await {
                 let doc: T = from_reader(&arc.0[..]).map_err(|err| DBError::Serialization {
                     name: self.inner.base_path.to_string(),
                     source: err.into(),
@@ -455,7 +455,6 @@ impl Storage {
                     .fetch_add(1, Ordering::Relaxed);
                 return Ok((doc, arc.1.clone()));
             }
-        }
 
         let (bytes, version) = self.inner_fetch(path).await?;
         let doc: T = from_reader(&bytes[..]).map_err(|err| DBError::Serialization {
@@ -463,14 +462,13 @@ impl Storage {
             source: err.into(),
         })?;
 
-        if let Some(cache) = &self.inner.cache {
-            if bytes.len() <= self.inner.metadata.config.max_small_object_size {
+        if let Some(cache) = &self.inner.cache
+            && bytes.len() <= self.inner.metadata.config.max_small_object_size {
                 // Cache the document if it is small enough
                 cache
                     .insert(path.clone(), Arc::new((bytes, version.clone())))
                     .await;
             }
-        }
 
         Ok((doc, version))
     }
@@ -711,7 +709,8 @@ impl Storage {
         } else {
             self.inner.object_store.list(Some(&path_prefix))
         };
-        let stream = stream
+        
+        (stream
             .map_err(DBError::from)
             .try_filter_map(|meta| {
                 let this = self.clone();
@@ -720,8 +719,7 @@ impl Storage {
                     Ok(Some(result))
                 }
             })
-            .boxed();
-        stream
+            .boxed()) as _
     }
 }
 

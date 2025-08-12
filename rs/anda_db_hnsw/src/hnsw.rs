@@ -530,13 +530,12 @@ impl HnswIndex {
                 1, // Only need the closest one for entry point search
                 &mut distance_cache,
             )?;
-            if let Some(&(nearest_id, nearest_dist, nearest_layer)) = nearest.first() {
-                if nearest_dist < entry_point_dist {
+            if let Some(&(nearest_id, nearest_dist, nearest_layer)) = nearest.first()
+                && nearest_dist < entry_point_dist {
                     entry_point_node = nearest_id;
                     entry_point_layer = nearest_layer;
                     entry_point_dist = nearest_dist;
                 }
-            }
         }
 
         #[allow(clippy::type_complexity)]
@@ -576,12 +575,10 @@ impl HnswIndex {
             if let Some(closest_in_layer) = selected_neighbors
                 .iter()
                 .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(cmp::Ordering::Equal))
-            {
-                if closest_in_layer.1 < entry_point_dist {
+                && closest_in_layer.1 < entry_point_dist {
                     entry_point_node = closest_in_layer.0;
                     entry_point_dist = closest_in_layer.1;
                 }
-            }
 
             // 记录新节点需要连接的邻居，并收集反向连接信息
             for (neighbor_id, dist, layer) in selected_neighbors {
@@ -698,8 +695,8 @@ impl HnswIndex {
                 ) {
                     // select_neighbors 会读取 self.nodes
                     // 修改 self.nodes 必须在 select_neighbors 之后
-                    if let Some(node) = nodes.get(&neighbor_id) {
-                        if node.neighbors.len() > layer as usize {
+                    if let Some(node) = nodes.get(&neighbor_id)
+                        && node.neighbors.len() > layer as usize {
                             // Update neighbor connections
                             let mut node = node.clone();
                             node.neighbors[layer as usize] = selected
@@ -707,8 +704,7 @@ impl HnswIndex {
                                 .map(|(id, dist, _)| (id, bf16::from_f32(dist)))
                                 .collect();
                             nodes.insert(neighbor_id, node);
-                        }
-                    };
+                        };
                 }
             }
         }
@@ -827,13 +823,12 @@ impl HnswIndex {
                 1,
                 &mut distance_cache,
             )?;
-            if let Some(node) = nearest.first() {
-                if node.1 < current_dist {
+            if let Some(node) = nearest.first()
+                && node.1 < current_dist {
                     current_dist = node.1;
                     current_node = node.0;
                     current_node_layer = node.2;
                 }
-            }
         }
 
         // 在底层搜索最近的邻居
@@ -931,15 +926,14 @@ impl HnswIndex {
 
         // Get nearest candidates
         while let Some((Reverse(OrderedFloat(dist)), point, _)) = candidates.pop() {
-            if let Some((OrderedFloat(max_dist), _, _)) = results.peek() {
-                if &dist > max_dist && results.len() >= ef {
+            if let Some((OrderedFloat(max_dist), _, _)) = results.peek()
+                && &dist > max_dist && results.len() >= ef {
                     break;
                 };
-            }
 
             // Check neighbors of current node
-            if let Some(node) = nodes.get(&point) {
-                if let Some(neighbors) = node.neighbors.get(layer as usize) {
+            if let Some(node) = nodes.get(&point)
+                && let Some(neighbors) = node.neighbors.get(layer as usize) {
                     for &(neighbor, _) in neighbors {
                         if !visited.contains(&neighbor) {
                             visited.insert(neighbor);
@@ -991,7 +985,6 @@ impl HnswIndex {
                         }
                     }
                 }
-            }
         }
 
         Ok(results

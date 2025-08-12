@@ -901,25 +901,22 @@ pub fn compare_json(left: &Json, right: &Json) -> Option<Ordering> {
         (Json::Null, Json::Null) => Some(Ordering::Equal),
         (Json::String(a), Json::String(b)) => {
             // try to compare as number
-            if let Ok(a) = Number::from_str(a) {
-                if let Ok(b) = Number::from_str(b) {
+            if let Ok(a) = Number::from_str(a)
+                && let Ok(b) = Number::from_str(b) {
                     return a
                         .as_f64()
                         .unwrap_or(0.0)
                         .partial_cmp(&b.as_f64().unwrap_or(0.0));
                 }
-            }
             // try to compare as datetime
-            if let Ok(a) = DateTime::parse_from_rfc3339(a) {
-                if let Ok(b) = DateTime::parse_from_rfc3339(b) {
+            if let Ok(a) = DateTime::parse_from_rfc3339(a)
+                && let Ok(b) = DateTime::parse_from_rfc3339(b) {
                     return Some(a.cmp(&b));
                 }
-            }
-            if let Ok(a) = DateTime::parse_from_rfc2822(a) {
-                if let Ok(b) = DateTime::parse_from_rfc2822(b) {
+            if let Ok(a) = DateTime::parse_from_rfc2822(a)
+                && let Ok(b) = DateTime::parse_from_rfc2822(b) {
                     return Some(a.cmp(&b));
                 }
-            }
 
             Some(a.cmp(b))
         }
