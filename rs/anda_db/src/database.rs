@@ -283,7 +283,7 @@ impl AndaDB {
             .collect::<Vec<_>>();
         let _rt = join_all(collections.iter().map(|collection| collection.close())).await;
         let start = Instant::now();
-        match self.flush(unix_ms()).await {
+        match self.flush_self(unix_ms()).await {
             Ok(_) => {
                 let elapsed = start.elapsed();
                 log::info!(
@@ -307,6 +307,26 @@ impl AndaDB {
         Ok(())
     }
 
+    /// Flushes the database, ensuring all data is written to storage.
+    pub async fn flush(&self) -> Result<(), DBError> {
+        let collections = self
+            .inner
+            .collections
+            .read()
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        let now_ms = unix_ms();
+        let _rt = join_all(
+            collections
+                .iter()
+                .map(|collection| collection.flush(now_ms)),
+        )
+        .await;
+
+        self.flush_self(unix_ms()).await
+    }
+
     /// Automatically flushes the database at regular intervals.
     ///
     /// This method runs in a loop, waiting for the specified interval
@@ -327,23 +347,15 @@ impl AndaDB {
                 _ = tokio::time::sleep(interval) => {}
             };
 
-            let collections = self
-                .inner
-                .collections
-                .read()
-                .values()
-                .cloned()
-                .collect::<Vec<_>>();
-            let _rt = join_all(collections.iter().map(|collection| collection.close())).await;
             let start = Instant::now();
-            match self.flush(unix_ms()).await {
+            match self.flush().await {
                 Ok(_) => {
                     let elapsed = start.elapsed();
                     log::info!(
                         action = "auto_flush",
                         database = self.inner.name,
                         elapsed = elapsed.as_millis();
-                        "Database auto-flushed successfully in {elapsed:?}",
+                        "Database flushed successfully in {elapsed:?}",
                     );
                 }
                 Err(err) => {
@@ -352,7 +364,7 @@ impl AndaDB {
                         action = "auto_flush",
                         database = self.inner.name,
                         elapsed = elapsed.as_millis();
-                        "Failed to auto-flush database: {err:?}",
+                        "Failed to flush database: {err:?}",
                     );
                 }
             }
@@ -415,7 +427,7 @@ impl AndaDB {
 
         let now = unix_ms();
         collection.flush(now).await?;
-        self.flush(now).await?;
+        self.flush_self(now).await?;
         let elapsed = start.elapsed();
         log::info!(
             action = "create_collection",
@@ -542,7 +554,7 @@ impl AndaDB {
     ///
     /// # Returns
     /// A Result indicating success or an error
-    async fn flush(&self, now_ms: u64) -> Result<(), DBError> {
+    async fn flush_self(&self, now_ms: u64) -> Result<(), DBError> {
         let metadata = self.metadata();
 
         self.inner

@@ -280,12 +280,13 @@ impl Storage {
             return Ok(());
         }
 
-        self.inner
-            .stats
-            .check_point
-            .store(check_point, Ordering::Release);
+        if check_point > 0 {
+            self.inner
+                .stats
+                .check_point
+                .store(check_point, Ordering::Release);
+        }
         self.inner.stats.version.fetch_add(1, Ordering::Release);
-
         let metadata = self.metadata();
         self.put(Storage::METADATA_PATH, &metadata, None).await?;
 
@@ -444,17 +445,18 @@ impl Storage {
         T: DeserializeOwned,
     {
         if let Some(cache) = &self.inner.cache
-            && let Some(arc) = cache.get(path).await {
-                let doc: T = from_reader(&arc.0[..]).map_err(|err| DBError::Serialization {
-                    name: self.inner.base_path.to_string(),
-                    source: err.into(),
-                })?;
-                self.inner
-                    .stats
-                    .total_cache_get_count
-                    .fetch_add(1, Ordering::Relaxed);
-                return Ok((doc, arc.1.clone()));
-            }
+            && let Some(arc) = cache.get(path).await
+        {
+            let doc: T = from_reader(&arc.0[..]).map_err(|err| DBError::Serialization {
+                name: self.inner.base_path.to_string(),
+                source: err.into(),
+            })?;
+            self.inner
+                .stats
+                .total_cache_get_count
+                .fetch_add(1, Ordering::Relaxed);
+            return Ok((doc, arc.1.clone()));
+        }
 
         let (bytes, version) = self.inner_fetch(path).await?;
         let doc: T = from_reader(&bytes[..]).map_err(|err| DBError::Serialization {
@@ -463,12 +465,13 @@ impl Storage {
         })?;
 
         if let Some(cache) = &self.inner.cache
-            && bytes.len() <= self.inner.metadata.config.max_small_object_size {
-                // Cache the document if it is small enough
-                cache
-                    .insert(path.clone(), Arc::new((bytes, version.clone())))
-                    .await;
-            }
+            && bytes.len() <= self.inner.metadata.config.max_small_object_size
+        {
+            // Cache the document if it is small enough
+            cache
+                .insert(path.clone(), Arc::new((bytes, version.clone())))
+                .await;
+        }
 
         Ok((doc, version))
     }
@@ -709,7 +712,7 @@ impl Storage {
         } else {
             self.inner.object_store.list(Some(&path_prefix))
         };
-        
+
         (stream
             .map_err(DBError::from)
             .try_filter_map(|meta| {
