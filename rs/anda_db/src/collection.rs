@@ -1108,16 +1108,18 @@ impl Collection {
                 let fields = index.virtual_field();
                 if fields_keys.iter().any(|v| fields.contains(v)) {
                     if let Some(fv) = self.index_hooks.btree_index_value(index, &old_doc)
-                        && fv.as_ref() != &FieldValue::Null {
-                            index.remove(id, &fv, now_ms);
-                            btree_removed.insert(index, fv);
-                        }
+                        && fv.as_ref() != &FieldValue::Null
+                    {
+                        index.remove(id, &fv, now_ms);
+                        btree_removed.insert(index, fv);
+                    }
 
                     if let Some(fv) = self.index_hooks.btree_index_value(index, &doc)
-                        && fv.as_ref() != &FieldValue::Null {
-                            index.insert(id, fv.clone().into_owned(), now_ms)?;
-                            btree_inserted.insert(index, fv);
-                        }
+                        && fv.as_ref() != &FieldValue::Null
+                    {
+                        index.insert(id, fv.clone().into_owned(), now_ms)?;
+                        btree_inserted.insert(index, fv);
+                    }
                 }
             }
 
@@ -1241,9 +1243,10 @@ impl Collection {
             let doc = Document::try_from_doc(self.schema(), doc)?;
             for index in &self.btree_indexes {
                 if let Some(fv) = self.index_hooks.btree_index_value(index, &doc)
-                    && fv.as_ref() != &FieldValue::Null {
-                        index.remove(id, &fv, now_ms);
-                    }
+                    && fv.as_ref() != &FieldValue::Null
+                {
+                    index.remove(id, &fv, now_ms);
+                }
             }
 
             for index in &self.bm25_indexes {
@@ -1578,7 +1581,8 @@ impl Collection {
                 }
             }
             RangeQuery::Lt(end_key) => {
-                result.reserve_exact(limit);
+                // 倒序遍历以便在有上限时尽快终止，最终结果按正序返回
+                let mut tmp = Vec::with_capacity(if limit > 0 { limit } else { 0 });
                 for id in self
                     .doc_ids_index
                     .read()
@@ -1586,15 +1590,18 @@ impl Collection {
                     .rev()
                 {
                     if candidates.is_empty() || candidates.contains(id) {
-                        result.push(*id);
-                        if limit > 0 && result.len() >= limit {
-                            return result;
+                        tmp.push(*id);
+                        if limit > 0 && tmp.len() >= limit {
+                            break;
                         }
                     }
                 }
+                tmp.reverse();
+                result.extend(tmp);
             }
             RangeQuery::Le(end_key) => {
-                result.reserve_exact(limit);
+                // 倒序遍历以便在有上限时尽快终止，最终结果按正序返回
+                let mut tmp = Vec::with_capacity(if limit > 0 { limit } else { 0 });
                 for id in self
                     .doc_ids_index
                     .read()
@@ -1602,12 +1609,14 @@ impl Collection {
                     .rev()
                 {
                     if candidates.is_empty() || candidates.contains(id) {
-                        result.push(*id);
-                        if limit > 0 && result.len() >= limit {
-                            return result;
+                        tmp.push(*id);
+                        if limit > 0 && tmp.len() >= limit {
+                            break;
                         }
                     }
                 }
+                tmp.reverse();
+                result.extend(tmp);
             }
             RangeQuery::Between(start_key, end_key) => {
                 result.reserve_exact(limit.min((1 + end_key - start_key) as usize));

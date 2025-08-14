@@ -749,10 +749,11 @@ where
                 }
 
                 if let Some(mut ob) = self.buckets.get_mut(&old_bucket_id)
-                    && ob.2.swap_remove_if(|k| &field_value == k).is_some() {
-                        ob.0 = ob.0.saturating_sub(size);
-                        // ob.1 = true; // do not need to set dirty
-                    }
+                    && ob.2.swap_remove_if(|k| &field_value == k).is_some()
+                {
+                    ob.0 = ob.0.saturating_sub(size);
+                    // ob.1 = true; // do not need to set dirty
+                }
 
                 let mut new_bucket = false;
                 if let Some(mut nb) = self.buckets.get_mut(&next_bucket_id) {
@@ -998,6 +999,8 @@ where
                 }
             }
             RangeQuery::Lt(end_key) => {
+                // 倒序遍历以支持 limit 提前终止，但最终结果按正序返回
+                let mut groups: Vec<Vec<R>> = Vec::new();
                 for k in self
                     .btree
                     .read()
@@ -1006,14 +1009,17 @@ where
                 {
                     if let Some(posting) = self.postings.get(k) {
                         let (conti, rt) = f(k, &posting.2);
-                        results.extend(rt);
+                        groups.push(rt);
                         if !conti {
-                            return results;
+                            break;
                         }
                     }
                 }
+                // 组级反转，保持每个 key 内部顺序不变，整体 key 正序
+                return groups.into_iter().rev().flatten().collect();
             }
             RangeQuery::Le(end_key) => {
+                let mut groups: Vec<Vec<R>> = Vec::new();
                 for k in self
                     .btree
                     .read()
@@ -1022,12 +1028,15 @@ where
                 {
                     if let Some(posting) = self.postings.get(k) {
                         let (conti, rt) = f(k, &posting.2);
-                        results.extend(rt);
+                        groups.push(rt);
                         if !conti {
-                            return results;
+                            break;
                         }
                     }
                 }
+
+                // 组级反转，保持每个 key 内部顺序不变，整体 key 正序
+                return groups.into_iter().rev().flatten().collect();
             }
             RangeQuery::Between(start_key, end_key) => {
                 for k in self.btree.read().range(start_key..=end_key) {
@@ -1163,12 +1172,7 @@ where
                 }
             }
             RangeQuery::Lt(end_key) => {
-                for k in self
-                    .btree
-                    .read()
-                    .range(std::ops::RangeTo { end: end_key })
-                    .rev()
-                {
+                for k in self.btree.read().range(std::ops::RangeTo { end: end_key }) {
                     results.push(k.clone());
                 }
             }
@@ -1177,7 +1181,6 @@ where
                     .btree
                     .read()
                     .range(std::ops::RangeToInclusive { end: end_key })
-                    .rev()
                 {
                     results.push(k.clone());
                 }
@@ -1791,6 +1794,96 @@ mod tests {
 
         assert_eq!(results.len(), 3);
         assert_eq!(count, 3); // 确认查询在第三项后停止
+    }
+
+    #[test]
+    fn test_range_query_lt_le_full_order() {
+        let index = create_populated_index();
+        // keys: apple < banana < cherry < date < eggplant
+
+        // Lt(date) -> apple, banana, cherry (正序)
+        let results = index.range_query_with(RangeQuery::Lt("date".to_string()), |k, _| {
+            (true, vec![k.clone()])
+        });
+        assert_eq!(results, vec!["apple", "banana", "cherry"]);
+
+        // Le(date) -> apple, banana, cherry, date (正序)
+        let results = index.range_query_with(RangeQuery::Le("date".to_string()), |k, _| {
+            (true, vec![k.clone()])
+        });
+        assert_eq!(results, vec!["apple", "banana", "cherry", "date"]);
+    }
+
+    #[test]
+    fn test_range_query_lt_le_with_early_stop_limit_semantics() {
+        let index = create_populated_index();
+        // 目标：模拟“小于 date 的 2 条数据”，即距离 date 最近的 2 个 key，且最终为正序
+
+        // Lt(date): 倒序遍历是 cherry, banana, apple，截断 2 个 => [cherry, banana]，最终正序 [banana, cherry]
+        let mut count = 0usize;
+        let results = index.range_query_with(RangeQuery::Lt("date".to_string()), |k, _| {
+            count += 1;
+            (count < 2, vec![k.clone()])
+        });
+        assert_eq!(results, vec!["banana", "cherry"]);
+
+        // Le(date): 倒序遍历是 date, cherry, banana, apple，截断 2 个 => [date, cherry]，最终正序 [cherry, date]
+        let mut count = 0usize;
+        let results = index.range_query_with(RangeQuery::Le("date".to_string()), |k, _| {
+            count += 1;
+            (count < 2, vec![k.clone()])
+        });
+        assert_eq!(results, vec!["cherry", "date"]);
+
+        // 再测试当“上限”大于可返回数量时，返回全部（正序）
+        let mut count = 0usize;
+        let results = index.range_query_with(RangeQuery::Lt("banana".to_string()), |k, _| {
+            count += 1;
+            (count < 10, vec![k.clone()])
+        });
+        assert_eq!(results, vec!["apple"]);
+    }
+
+    #[test]
+    fn test_range_query_lt_le_group_order_preserved() {
+        let index = create_populated_index();
+        // 让每个 key 返回多个结果，验证倒序遍历后“组内顺序”保持，并最终整体正序
+        // 取 Lt(date) 最近 2 个 key：banana, cherry，最终顺序应为：
+        // banana-1, banana-2, cherry-1, cherry-2
+
+        let mut count = 0usize;
+        let results = index.range_query_with(RangeQuery::Lt("date".to_string()), |k, _| {
+            count += 1;
+            let v = vec![format!("{k}-1"), format!("{k}-2")];
+            (count < 2, v)
+        });
+        assert_eq!(
+            results,
+            vec![
+                "banana-1".to_string(),
+                "banana-2".to_string(),
+                "cherry-1".to_string(),
+                "cherry-2".to_string()
+            ]
+        );
+
+        // Le(date) 最近 2 个：cherry, date，组内顺序保持：
+        // cherry-1, cherry-2, date-1, date-2
+        let mut count = 0usize;
+        let results = index.range_query_with(RangeQuery::Le("date".to_string()), |k, _| {
+            count += 1;
+            let v = vec![format!("{k}-1"), format!("{k}-2")];
+            (count < 2, v)
+        });
+        assert_eq!(
+            results,
+            vec![
+                "cherry-1".to_string(),
+                "cherry-2".to_string(),
+                "date-1".to_string(),
+                "date-2".to_string()
+            ]
+        );
     }
 
     #[test]
