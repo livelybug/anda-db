@@ -568,7 +568,7 @@ impl AndaDB {
     /// Returns a clone of the object store.
     ///
     /// This method is used internally by collections to access the object store.
-    pub(crate) fn object_store(&self) -> Arc<dyn ObjectStore> {
+    pub fn object_store(&self) -> Arc<dyn ObjectStore> {
         self.inner.object_store.clone()
     }
 }
