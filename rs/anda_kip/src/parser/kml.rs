@@ -77,13 +77,16 @@ fn parse_concept_block(input: &str) -> IResult<&str, ConceptBlock> {
 
 fn parse_set_proposition(input: &str) -> IResult<&str, SetProposition> {
     map(
-        (
-            parenthesized_block(separated_pair(
-                quoted_string,
-                ws(char(',')),
-                parse_target_term,
-            )),
-            opt(parse_with_metadata),
+        terminated(
+            (
+                parenthesized_block(separated_pair(
+                    quoted_string,
+                    ws(char(',')),
+                    parse_target_term,
+                )),
+                opt(parse_with_metadata),
+            ),
+            opt(ws(char(','))), // Allow atypical trailing comma
         ),
         |((predicate, object), metadata)| SetProposition {
             predicate,
