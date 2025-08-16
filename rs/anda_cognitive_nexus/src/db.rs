@@ -71,7 +71,14 @@ impl Executor for CognitiveNexus {
     async fn execute(&self, command: Command, dry_run: bool) -> Response {
         match command {
             Command::Kql(command) => self.execute_kql(command).await.into(),
-            Command::Kml(command) => self.execute_kml(command, dry_run).await.into(),
+            Command::Kml(command) => match self.execute_kml(command, dry_run).await {
+                Ok(result) => Response::Ok {
+                    result,
+                    next_cursor: None,
+                    ignore: Some(true),
+                },
+                Err(error) => Response::err(error),
+            },
             Command::Meta(command) => self.execute_meta(command).await.into(),
         }
     }
@@ -418,11 +425,12 @@ impl CognitiveNexus {
         clause: PropositionClause,
     ) -> Result<(), KipError> {
         if let Some(var) = &clause.variable
-            && ctx.entities.contains_key(var) {
-                return Err(KipError::InvalidCommand(format!(
-                    "Variable '{var}' already exists in context",
-                )));
-            }
+            && ctx.entities.contains_key(var)
+        {
+            return Err(KipError::InvalidCommand(format!(
+                "Variable '{var}' already exists in context",
+            )));
+        }
 
         let result = match clause.matcher {
             PropositionMatcher::ID(id) => {
@@ -445,9 +453,10 @@ impl CognitiveNexus {
         };
 
         if let TargetEntities::IDs(ids) = result
-            && let Some(var) = clause.variable {
-                ctx.entities.insert(var, ids.into());
-            }
+            && let Some(var) = clause.variable
+        {
+            ctx.entities.insert(var, ids.into());
+        }
 
         Ok(())
     }
@@ -483,9 +492,10 @@ impl CognitiveNexus {
                     // 过滤不通过，移除相关值
                     for (var, id) in bindings_cursor {
                         if let Some(existing) = ctx.entities.get_mut(&var)
-                            && let Some(idx) = existing.iter().position(|x| x == &id) {
-                                existing.remove(idx);
-                            }
+                            && let Some(idx) = existing.iter().position(|x| x == &id)
+                        {
+                            existing.remove(idx);
+                        }
                     }
                     // 继续处理剩余绑定
                     entities = bindings_snapshot;
@@ -917,9 +927,9 @@ impl CognitiveNexus {
                                 if tokens.iter().any(|t| texts.contains(t.as_str()))
                                     && let Ok(val) =
                                         extract_proposition_field_value(proposition, predicate, &[])
-                                    {
-                                        rt.push(val);
-                                    }
+                                {
+                                    rt.push(val);
+                                }
                             }
 
                             Ok(rt)
@@ -1590,28 +1600,29 @@ impl CognitiveNexus {
                     if let Ok(mut proposition) = self
                         .try_get_proposition_with(&ctx.cache, *id, |prop| Ok(prop.clone()))
                         .await
-                        && let Some(prop) = proposition.properties.get_mut(predicate) {
-                            let length = prop.attributes.len();
-                            for attr in &attributes {
-                                prop.attributes.remove(attr);
-                            }
-
-                            if prop.attributes.len() < length
-                                && self
-                                    .propositions
-                                    .update(
-                                        *id,
-                                        BTreeMap::from([(
-                                            "properties".to_string(),
-                                            proposition.properties.into(),
-                                        )]),
-                                    )
-                                    .await
-                                    .is_ok()
-                            {
-                                updated_propositions += 1;
-                            }
+                        && let Some(prop) = proposition.properties.get_mut(predicate)
+                    {
+                        let length = prop.attributes.len();
+                        for attr in &attributes {
+                            prop.attributes.remove(attr);
                         }
+
+                        if prop.attributes.len() < length
+                            && self
+                                .propositions
+                                .update(
+                                    *id,
+                                    BTreeMap::from([(
+                                        "properties".to_string(),
+                                        proposition.properties.into(),
+                                    )]),
+                                )
+                                .await
+                                .is_ok()
+                        {
+                            updated_propositions += 1;
+                        }
+                    }
                 }
             }
         }
@@ -1678,28 +1689,29 @@ impl CognitiveNexus {
                     if let Ok(mut proposition) = self
                         .try_get_proposition_with(&ctx.cache, *id, |prop| Ok(prop.clone()))
                         .await
-                        && let Some(prop) = proposition.properties.get_mut(predicate) {
-                            let length = prop.metadata.len();
-                            for name in &keys {
-                                prop.metadata.remove(name);
-                            }
-
-                            if prop.metadata.len() < length
-                                && self
-                                    .propositions
-                                    .update(
-                                        *id,
-                                        BTreeMap::from([(
-                                            "properties".to_string(),
-                                            proposition.properties.into(),
-                                        )]),
-                                    )
-                                    .await
-                                    .is_ok()
-                            {
-                                updated_propositions += 1;
-                            }
+                        && let Some(prop) = proposition.properties.get_mut(predicate)
+                    {
+                        let length = prop.metadata.len();
+                        for name in &keys {
+                            prop.metadata.remove(name);
                         }
+
+                        if prop.metadata.len() < length
+                            && self
+                                .propositions
+                                .update(
+                                    *id,
+                                    BTreeMap::from([(
+                                        "properties".to_string(),
+                                        proposition.properties.into(),
+                                    )]),
+                                )
+                                .await
+                                .is_ok()
+                        {
+                            updated_propositions += 1;
+                        }
+                    }
                 }
             }
         }
@@ -2308,9 +2320,10 @@ impl CognitiveNexus {
             result = apply_order_by(result, var, order_by);
             if let Some(cursor) = cursor
                 && let Some(idx) = result.iter().position(|(eid, _)| eid == &cursor)
-                    && idx < result.len() {
-                        result = result.split_off(idx + 1);
-                    }
+                && idx < result.len()
+            {
+                result = result.split_off(idx + 1);
+            }
         }
 
         let mut next_cursor: Option<String> = None;

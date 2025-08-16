@@ -101,6 +101,10 @@ pub enum Response {
         // If present, there may be more results available.
         #[serde(skip_serializing_if = "Option::is_none")]
         next_cursor: Option<String>,
+
+        /// If true, the client should ignore this response.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        ignore: Option<bool>,
     },
 
     /// Error response containing structured error details
@@ -115,6 +119,7 @@ impl Response {
         Self::Ok {
             result,
             next_cursor: None,
+            ignore: None,
         }
     }
 
@@ -230,6 +235,7 @@ where
             Ok((result, next_cursor)) => Response::Ok {
                 result,
                 next_cursor,
+                ignore: None,
             },
             Err(err) => Response::Err { error: err.into() },
         }
@@ -245,6 +251,7 @@ where
             Ok(result) => Response::Ok {
                 result,
                 next_cursor: None,
+                ignore: None,
             },
             Err(err) => Response::Err { error: err.into() },
         }
@@ -514,10 +521,11 @@ mod tests {
         let res = Response::Ok {
             result: json!("Success"),
             next_cursor: Some("abcdef".to_string()),
+            ignore: Some(true),
         };
         assert_eq!(
             serde_json::to_string(&res).unwrap(),
-            r#"{"result":"Success","next_cursor":"abcdef"}"#
+            r#"{"result":"Success","next_cursor":"abcdef","ignore":true}"#
         );
 
         let res = Response::err(ErrorObject {
