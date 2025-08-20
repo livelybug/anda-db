@@ -60,7 +60,7 @@ tantivy-jieba = "0.13"
 structured-logger = "1"
 smallvec = "1.15"
 criterion = "0.6"
-ic_auth_types = { version = "0.5" }
+ic_auth_types = { version = "0.6" }
 object_store = { version = "0.12" }
 moka = { version = "0.12", features = ["future"] }
 zstd-safe = "7"
