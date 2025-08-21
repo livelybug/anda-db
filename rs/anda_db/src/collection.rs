@@ -1354,14 +1354,22 @@ impl Collection {
             }
         }
 
+        let mut truncate_head = false;
         match query.filter {
             Some(filter) => {
+                truncate_head = Self::filter_has_lt_or_le(&filter);
                 result = self.filter_by_field(filter, &candidates, top_k)?;
             }
             None => result = candidates,
         };
+        if limit > 0 && result.len() > limit {
+            if truncate_head {
+                result.drain(0..(result.len() - limit));
+            } else {
+                result.truncate(limit);
+            }
+        }
 
-        result.truncate(limit);
         Ok(result)
     }
 
@@ -1378,7 +1386,37 @@ impl Collection {
         limit: Option<usize>,
     ) -> Result<Vec<DocumentId>, DBError> {
         self.search_count.fetch_add(1, Ordering::Relaxed);
-        self.filter_by_field(filter, &[], limit.unwrap_or(0))
+        let limit = limit.unwrap_or(0);
+        let truncate_head = Self::filter_has_lt_or_le(&filter);
+
+        let mut rt = self.filter_by_field(filter, &[], limit)?;
+        if limit > 0 && rt.len() > limit {
+            if truncate_head {
+                rt.drain(0..(rt.len() - limit));
+            } else {
+                rt.truncate(limit);
+            }
+        }
+        Ok(rt)
+    }
+
+    // 临时策略：当过滤条件中出现 Lt/Le 时，结果采用“保留尾部”的截断方式
+    fn filter_has_lt_or_le(filter: &Filter) -> bool {
+        match filter {
+            Filter::Field((_name, rq)) => Self::range_has_lt_or_le(rq),
+            Filter::Or(qs) | Filter::And(qs) => qs.iter().any(|q| Self::filter_has_lt_or_le(q)),
+            Filter::Not(_) => false,
+        }
+    }
+
+    fn range_has_lt_or_le<T>(rq: &RangeQuery<T>) -> bool {
+        match rq {
+            RangeQuery::Lt(_) | RangeQuery::Le(_) => true,
+            RangeQuery::And(qs) | RangeQuery::Or(qs) => {
+                qs.iter().any(|q| Self::range_has_lt_or_le(q))
+            }
+            _ => false,
+        }
     }
 
     /// Gets a document by its ID.
@@ -1431,7 +1469,7 @@ impl Collection {
     /// # Arguments
     /// * `filter` - The filter condition to apply
     /// * `candidates` - Optional list of document IDs to filter (if empty, all documents are considered)
-    /// * `limit` - Maximum number of results to return
+    /// * `limit` - The number of results to stop retrieving. The returned vector may be shorter or larger than this limit.
     ///
     /// # Returns
     /// A vector of document IDs matching the filter, or an error if filtering fails
@@ -1485,9 +1523,10 @@ impl Collection {
                 }
 
                 result = rt.into();
-                if limit > 0 && result.len() > limit {
-                    result.truncate(limit);
-                }
+                // 由调用方控制结果长度
+                // if limit > 0 && result.len() > limit {
+                //     result.truncate(limit);
+                // }
                 Ok(result)
             }
             Filter::And(queries) => {
@@ -1504,9 +1543,10 @@ impl Collection {
                     }
 
                     result = rt.into();
-                    if limit > 0 && result.len() > limit {
-                        result.truncate(limit);
-                    }
+                    // 由调用方控制结果长度
+                    // if limit > 0 && result.len() > limit {
+                    //     result.truncate(limit);
+                    // }
                 }
                 Ok(result)
             }
@@ -1531,6 +1571,8 @@ impl Collection {
     ///
     /// # Arguments
     /// * `query` - The range query to apply to document IDs
+    /// * `candidates` - Optional list of document IDs to filter (if empty, all documents are considered)
+    /// * `limit` - The number of results to stop retrieving. The returned vector may be shorter or larger than this limit.
     ///
     /// # Returns
     /// A vector of document IDs matching the range query
@@ -1551,12 +1593,10 @@ impl Collection {
             }
             RangeQuery::Gt(start_key) => {
                 result.reserve_exact(limit);
-                for id in self
-                    .doc_ids_index
-                    .read()
-                    .range(std::ops::RangeFrom { start: start_key })
-                    .filter(|&id| *id > start_key)
-                {
+                for id in self.doc_ids_index.read().range((
+                    std::ops::Bound::Excluded(start_key),
+                    std::ops::Bound::Unbounded,
+                )) {
                     if candidates.is_empty() || candidates.contains(id) {
                         result.push(*id);
                         if limit > 0 && result.len() >= limit {
@@ -1657,9 +1697,10 @@ impl Collection {
                     }
 
                     result = rt.into();
-                    if limit > 0 && result.len() > limit {
-                        result.truncate(limit);
-                    }
+                    // 由调用方控制结果长度
+                    // if limit > 0 && result.len() > limit {
+                    //     result.truncate(limit);
+                    // }
                 }
             }
             RangeQuery::Or(queries) => {
@@ -1673,9 +1714,10 @@ impl Collection {
                 }
 
                 result = rt.into();
-                if limit > 0 && result.len() > limit {
-                    result.truncate(limit);
-                }
+                // 由调用方控制结果长度
+                // if limit > 0 && result.len() > limit {
+                //     result.truncate(limit);
+                // }
             }
             RangeQuery::Not(query) => {
                 result.reserve_exact(limit);
