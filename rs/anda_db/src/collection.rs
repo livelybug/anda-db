@@ -597,6 +597,11 @@ impl Collection {
         stats
     }
 
+    /// Returns the maximum document ID in the collection.
+    pub fn max_document_id(&self) -> DocumentId {
+        self.max_document_id.load(Ordering::Relaxed)
+    }
+
     /// Checks if a document with the given ID exists in the collection.
     ///
     /// # Arguments
