@@ -11,7 +11,8 @@ pub struct Resource {
     pub _id: u64,
 
     /// A list of tags that identifies the type of this resource.
-    /// "text", "image", "audio", "video", etc.
+    /// It is recommended to use the primary type of the file MIME type and the file extension as tags, for example:
+    /// "text", "image", "audio", "video", "txt", "md", "png", etc.
     pub tags: Vec<String>,
 
     /// A human-readable name for this resource.
