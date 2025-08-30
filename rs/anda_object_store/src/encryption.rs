@@ -199,7 +199,7 @@ impl<T: ObjectStore> EncryptedStoreBuilder<T> {
         Self { chunk_size, ..self }
     }
 
-    /// Enables conditional put operations.
+    /// Enables conditional put operations (Should enable with LocalFileSystem store).
     ///
     /// When enabled, put operations will check the extend e-tag of the existing object
     /// before overwriting it, providing optimistic concurrency control.
@@ -336,38 +336,37 @@ impl<T: ObjectStore> ObjectStore for EncryptedStore<T> {
             .inner
             .update_meta_with(location, async |meta| {
                 if self.inner.conditional_put
-                    && let PutMode::Update(v) = &opts.mode {
-                        match meta {
-                            Some(m) => {
-                                if m.e_tag != v.e_tag {
-                                    return Err(Error::Precondition {
-                                        path: location.to_string(),
-                                        source: format!(
-                                            "{:?} does not match {:?}",
-                                            m.e_tag, v.e_tag
-                                        )
-                                        .into(),
-                                    });
-                                }
-                            }
-                            None => {
+                    && let PutMode::Update(v) = &opts.mode
+                {
+                    match meta {
+                        Some(m) => {
+                            if m.e_tag != v.e_tag {
                                 return Err(Error::Precondition {
                                     path: location.to_string(),
-                                    source: "metadata not found".into(),
+                                    source: format!("{:?} does not match {:?}", m.e_tag, v.e_tag)
+                                        .into(),
                                 });
                             }
                         }
-
-                        opts.mode = PutMode::Overwrite;
+                        None => {
+                            return Err(Error::Precondition {
+                                path: location.to_string(),
+                                source: "metadata not found".into(),
+                            });
+                        }
                     }
+
+                    opts.mode = PutMode::Overwrite;
+                }
 
                 let full_path = self.inner.full_path(location);
                 let payload = Bytes::from(payload);
 
-                let nonce: [u8; 12] = rand_bytes();
+                let base_nonce: [u8; 12] = rand_bytes();
                 let mut data: Vec<u8> = payload.into();
                 let mut aes_tags: Vec<ByteArray<16>> = Vec::new();
-                for chunk in data.chunks_mut(self.inner.chunk_size as usize) {
+                for (i, chunk) in data.chunks_mut(self.inner.chunk_size as usize).enumerate() {
+                    let nonce = derive_gcm_nonce(&base_nonce, i as u64);
                     let tag = self
                         .inner
                         .cipher
@@ -386,7 +385,7 @@ impl<T: ObjectStore> ObjectStore for EncryptedStore<T> {
                     size: data.len() as u64,
                     e_tag: Some(BASE64_URL_SAFE.encode(hash)),
                     original_tag: None,
-                    aes_nonce: nonce.into(),
+                    aes_nonce: base_nonce.into(),
                     aes_tags,
                 };
 
@@ -401,14 +400,23 @@ impl<T: ObjectStore> ObjectStore for EncryptedStore<T> {
             })
             .await?;
 
-        Ok(PutResult {
-            e_tag: if self.inner.conditional_put {
-                rt.e_tag.clone()
-            } else {
-                rt.original_tag.clone()
-            },
-            version: None,
-        })
+        if self.inner.conditional_put {
+            Ok(PutResult {
+                e_tag: rt.e_tag.clone(),
+                version: None,
+            })
+        } else {
+            Ok(PutResult {
+                e_tag: rt.original_tag.clone(),
+                version: self
+                    .inner
+                    .store
+                    .head(&self.inner.full_path(location))
+                    .await
+                    .ok()
+                    .and_then(|m| m.version),
+            })
+        }
     }
 
     async fn put_multipart_opts(
@@ -429,6 +437,7 @@ impl<T: ObjectStore> ObjectStore for EncryptedStore<T> {
             size: 0,
             aes_nonce: rand_bytes(),
             aes_tags: Vec::new(),
+            chunk_index: 0,
             location: location.clone(),
             store: self.inner.clone(),
             inner,
@@ -487,7 +496,7 @@ impl<T: ObjectStore> ObjectStore for EncryptedStore<T> {
             res,
             self.inner.cipher.clone(),
             meta.aes_tags.clone(),
-            meta.aes_nonce.as_slice().to_vec(),
+            *meta.aes_nonce,
             location.clone(),
             chunk_size,
             start_idx,
@@ -521,7 +530,6 @@ impl<T: ObjectStore> ObjectStore for EncryptedStore<T> {
 
         let mut result: Vec<Bytes> = Vec::with_capacity(ranges.len());
         let mut chunk_cache: Option<(usize, Vec<u8>)> = None; // cache the last chunk read
-        let nonce_ref = Nonce::from_slice(meta.aes_nonce.as_slice());
         for &Range { start, end } in ranges {
             let mut buf = Vec::with_capacity((end - start) as usize);
             // Calculate the chunk indices we need to read
@@ -556,11 +564,13 @@ impl<T: ObjectStore> ObjectStore for EncryptedStore<T> {
                             )
                             .into(),
                         })?;
+
+                        let nonce = derive_gcm_nonce(&meta.aes_nonce, idx as u64);
                         let mut chunk = self.inner.get_chunk(location, idx as u64).await?;
                         self.inner
                             .cipher
                             .decrypt_in_place_detached(
-                                nonce_ref,
+                                Nonce::from_slice(&nonce),
                                 &[],
                                 &mut chunk,
                                 Tag::from_slice(tag.as_slice()),
@@ -601,7 +611,12 @@ impl<T: ObjectStore> ObjectStore for EncryptedStore<T> {
         self.inner.store.delete(&full_path).await?;
 
         let meta_path = self.inner.meta_path(location);
-        self.inner.store.delete(&meta_path).await?;
+        if let Err(e) = self.inner.store.delete(&meta_path).await {
+            // 元数据不存在时忽略
+            if !matches!(e, Error::NotFound { .. }) {
+                return Err(e);
+            }
+        }
         self.inner.remove_meta_cache(location).await;
         Ok(())
     }
@@ -621,16 +636,17 @@ impl<T: ObjectStore> ObjectStore for EncryptedStore<T> {
         }
 
         stream
-            .and_then(move |mut obj| {
+            .map_ok(move |mut obj| {
                 let store = inner.clone();
                 async move {
                     let location = store.strip_prefix(obj.location);
                     let meta = store.get_meta(&location).await?;
                     obj.location = location;
                     obj.e_tag = meta.e_tag;
-                    Ok(obj)
+                    Ok::<ObjectMeta, Error>(obj)
                 }
             })
+            .try_buffered(8) // 并发获取 meta
             .boxed()
     }
 
@@ -654,46 +670,67 @@ impl<T: ObjectStore> ObjectStore for EncryptedStore<T> {
         }
 
         stream
-            .and_then(move |mut obj| {
+            .map_ok(move |mut obj| {
                 let store = inner.clone();
                 async move {
                     let location = store.strip_prefix(obj.location);
                     let meta = store.get_meta(&location).await?;
                     obj.location = location;
                     obj.e_tag = meta.e_tag;
-                    Ok(obj)
+                    Ok::<ObjectMeta, Error>(obj)
                 }
             })
+            .try_buffered(8) // 并发获取 meta
             .boxed()
     }
 
     async fn list_with_delimiter(&self, prefix: Option<&Path>) -> Result<ListResult> {
         let prefix = self.inner.full_path(prefix.unwrap_or(&Path::default()));
         let rt = self.inner.store.list_with_delimiter(Some(&prefix)).await?;
-        let mut rt = ListResult {
-            common_prefixes: rt
-                .common_prefixes
-                .into_iter()
-                .map(|p| self.inner.strip_prefix(p))
-                .collect(),
-            objects: rt
-                .objects
-                .into_iter()
-                .map(|mut meta| {
-                    meta.location = self.inner.strip_prefix(meta.location);
-                    meta
-                })
-                .collect(),
-        };
+        let common_prefixes = rt
+            .common_prefixes
+            .into_iter()
+            .map(|p| self.inner.strip_prefix(p))
+            .collect::<Vec<_>>();
 
-        if self.inner.conditional_put {
-            for obj in rt.objects.iter_mut() {
-                let meta = self.inner.get_meta(&obj.location).await?;
-                obj.e_tag = meta.e_tag;
-            }
+        let objects = rt
+            .objects
+            .into_iter()
+            .map(|mut meta| {
+                meta.location = self.inner.strip_prefix(meta.location);
+                meta
+            })
+            .collect::<Vec<_>>();
+
+        if !self.inner.conditional_put {
+            return Ok(ListResult {
+                common_prefixes,
+                objects,
+            });
         }
 
-        Ok(rt)
+        let inner = self.inner.clone();
+        let mut indexed =
+            futures::stream::iter(objects.into_iter().enumerate().map(move |(idx, mut obj)| {
+                let store = inner.clone();
+                async move {
+                    let meta = store.get_meta(&obj.location).await?;
+                    obj.e_tag = meta.e_tag;
+                    Ok::<(usize, ObjectMeta), Error>((idx, obj))
+                }
+            }))
+            .buffer_unordered(8)
+            .try_collect::<Vec<_>>()
+            .await?;
+
+        // 按索引恢复顺序
+        indexed.sort_by_key(|(idx, _)| *idx);
+        let objects = indexed.into_iter().map(|(_, obj)| obj).collect();
+
+        Ok(ListResult {
+            common_prefixes,
+            objects,
+        })
     }
 
     async fn copy(&self, from: &Path, to: &Path) -> Result<()> {
@@ -763,6 +800,8 @@ pub struct EncryptedStoreUploader<T: ObjectStore> {
     size: usize,
     aes_tags: Vec<ByteArray<16>>,
     aes_nonce: [u8; 12],
+    /// Chunk index for tracking the current chunk
+    chunk_index: u64,
     /// Logical path of the object
     location: Path,
     /// Reference to the MetaStoreBuilder
@@ -788,18 +827,20 @@ impl<T: ObjectStore> MultipartUpload for EncryptedStoreUploader<T> {
         }
 
         let mut parts: Vec<UploadPart> = Vec::new();
-        let nonce = Nonce::from_slice(&self.aes_nonce);
+
         while self.buf.len() >= self.store.chunk_size as usize {
             let mut chunk = self
                 .buf
                 .drain(..self.store.chunk_size as usize)
                 .collect::<Vec<u8>>();
 
-            match self
-                .store
-                .cipher
-                .encrypt_in_place_detached(nonce, &[], &mut chunk)
-            {
+            let nonce = derive_gcm_nonce(&self.aes_nonce, self.chunk_index);
+            self.chunk_index = self.chunk_index.wrapping_add(1);
+            match self.store.cipher.encrypt_in_place_detached(
+                Nonce::from_slice(&nonce),
+                &[],
+                &mut chunk,
+            ) {
                 Ok(tag) => {
                     let tag: [u8; 16] = tag.into();
                     self.aes_tags.push(tag.into());
@@ -829,12 +870,13 @@ impl<T: ObjectStore> MultipartUpload for EncryptedStoreUploader<T> {
     }
 
     async fn complete(&mut self) -> Result<PutResult> {
-        let nonce = Nonce::from_slice(&self.aes_nonce);
+        let mut processed = 0u64;
         for chunk in self.buf.chunks_mut(self.store.chunk_size as usize) {
+            let nonce = derive_gcm_nonce(&self.aes_nonce, self.chunk_index + processed);
             let tag = self
                 .store
                 .cipher
-                .encrypt_in_place_detached(nonce, &[], chunk)
+                .encrypt_in_place_detached(Nonce::from_slice(&nonce), &[], chunk)
                 .map_err(|err| Error::Generic {
                     store: "EncryptedStore",
                     source: format!("AES256 encrypt failed for path {}: {err:?}", self.location)
@@ -844,7 +886,9 @@ impl<T: ObjectStore> MultipartUpload for EncryptedStoreUploader<T> {
             self.aes_tags.push(tag.into());
             self.hasher.update(&chunk);
             self.inner.put_part(chunk.to_vec().into()).await?;
+            processed += 1;
         }
+        self.chunk_index = self.chunk_index.wrapping_add(processed);
 
         self.buf.clear();
         let hash: [u8; 32] = self.hasher.clone().finalize().into();
@@ -880,7 +924,7 @@ fn create_decryption_stream(
     res: GetResult,
     cipher: Arc<Aes256Gcm>,
     aes_tags: Vec<ByteArray<16>>,
-    nonce: Vec<u8>,
+    base_nonce: [u8; 12],
     location: Path,
     chunk_size: usize,
     start_idx: usize,
@@ -893,13 +937,12 @@ fn create_decryption_stream(
         let mut buf = Vec::with_capacity(chunk_size * 2);
         let mut idx = start_idx;
         let mut remaining = size;
-        let nonce_ref = Nonce::from_slice(&nonce);
 
         while let Some(data) = stream.next().await {
             let data = data?;
             buf.extend_from_slice(&data);
 
-            while buf.len() > chunk_size {
+            while buf.len() >= chunk_size {
                 let mut chunk = buf.drain(..chunk_size).collect::<Vec<u8>>();
 
                 let tag = aes_tags.get(idx).ok_or_else(|| Error::Generic {
@@ -907,8 +950,9 @@ fn create_decryption_stream(
                     source: format!("missing AES256 tag for chunk {idx} for path {location}").into(),
                 })?;
 
+                let nonce = derive_gcm_nonce(&base_nonce, idx as u64);
                 cipher.decrypt_in_place_detached(
-                    nonce_ref,
+                    Nonce::from_slice(&nonce),
                     &[],
                     &mut chunk,
                     Tag::from_slice(tag.as_slice())
@@ -934,8 +978,9 @@ fn create_decryption_stream(
                 store: "EncryptedStore",
                 source: format!("missing AES256 tag for chunk {idx} for path {location}").into(),
             })?;
+            let nonce = derive_gcm_nonce(&base_nonce, idx as u64);
             cipher.decrypt_in_place_detached(
-                nonce_ref,
+                Nonce::from_slice(&nonce),
                 &[],
                 &mut buf,
                 Tag::from_slice(tag.as_slice())
@@ -969,6 +1014,12 @@ fn ranges_is_valid(ranges: &[Range<u64>], len: u64) -> Result<()> {
                 source: format!("end {} is less than start {}", range.end, range.start).into(),
             });
         }
+        if range.end > len {
+            return Err(Error::Generic {
+                store: "EncryptedStore",
+                source: format!("end {} is larger than length {}", range.end, len).into(),
+            });
+        }
     }
     Ok(())
 }
@@ -978,6 +1029,16 @@ fn rand_bytes<const N: usize>() -> [u8; N] {
     let mut bytes = [0u8; N];
     rng.fill_bytes(&mut bytes);
     bytes
+}
+
+// 为每个分块从基准 nonce 派生唯一的 GCM nonce（后 8 字节作为计数器）
+fn derive_gcm_nonce(base: &[u8; 12], idx: u64) -> [u8; 12] {
+    let mut nonce = *base;
+    let mut ctr = [0u8; 8];
+    ctr.copy_from_slice(&nonce[4..12]);
+    let c = u64::from_le_bytes(ctr).wrapping_add(idx);
+    nonce[4..12].copy_from_slice(&c.to_le_bytes());
+    nonce
 }
 
 #[cfg(test)]

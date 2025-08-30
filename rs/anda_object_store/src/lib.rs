@@ -55,6 +55,8 @@ pub struct MetaStoreBuilder<T: ObjectStore> {
     meta_prefix: Path,
     /// Cache for metadata to reduce storage operations
     meta_cache: Cache<Path, Arc<Metadata>>,
+    /// Maximum number of metadata entries to cache
+    meta_cache_capacity: u64,
 }
 
 /// Metadata structure for objects stored in `MetaStore`.
@@ -105,7 +107,17 @@ impl<T: ObjectStore> MetaStoreBuilder<T> {
                 .max_capacity(meta_cache_capacity)
                 .time_to_live(Duration::from_secs(60 * 60))
                 .build(),
+            meta_cache_capacity,
         }
+    }
+
+    /// Sets the time-to-live (TTL) for the metadata cache.
+    pub fn with_meta_cache_ttl(mut self, ttl: Duration) -> Self {
+        self.meta_cache = Cache::builder()
+            .max_capacity(self.meta_cache_capacity)
+            .time_to_live(ttl)
+            .build();
+        self
     }
 
     /// Builds a `MetaStore` from this builder.
@@ -267,7 +279,7 @@ impl<T: ObjectStore> ObjectStore for MetaStore<T> {
 
         Ok(PutResult {
             e_tag: rt.e_tag.clone(),
-            version: None,
+            version: None, // not used
         })
     }
 
@@ -342,7 +354,12 @@ impl<T: ObjectStore> ObjectStore for MetaStore<T> {
         self.inner.store.delete(&full_path).await?;
 
         let meta_path = self.inner.meta_path(location);
-        self.inner.store.delete(&meta_path).await?;
+        if let Err(e) = self.inner.store.delete(&meta_path).await {
+            // 元数据不存在时忽略
+            if !matches!(e, Error::NotFound { .. }) {
+                return Err(e);
+            }
+        }
         self.inner.remove_meta_cache(location).await;
         Ok(())
     }
@@ -353,16 +370,17 @@ impl<T: ObjectStore> ObjectStore for MetaStore<T> {
 
         let inner = self.inner.clone();
         stream
-            .and_then(move |mut obj| {
+            .map_ok(move |mut obj| {
                 let store = inner.clone();
                 async move {
                     let location = store.strip_prefix(obj.location);
                     let meta = store.get_meta(&location).await?;
                     obj.location = location;
                     obj.e_tag = meta.e_tag;
-                    Ok(obj)
+                    Ok::<ObjectMeta, Error>(obj)
                 }
             })
+            .try_buffered(8) // 并发获取 meta
             .boxed()
     }
 
@@ -377,44 +395,61 @@ impl<T: ObjectStore> ObjectStore for MetaStore<T> {
 
         let inner = self.inner.clone();
         stream
-            .and_then(move |mut obj| {
+            .map_ok(move |mut obj| {
                 let store = inner.clone();
                 async move {
                     let location = store.strip_prefix(obj.location);
                     let meta = store.get_meta(&location).await?;
                     obj.location = location;
                     obj.e_tag = meta.e_tag;
-                    Ok(obj)
+                    Ok::<ObjectMeta, Error>(obj)
                 }
             })
+            .try_buffered(8) // 并发获取 meta
             .boxed()
     }
 
     async fn list_with_delimiter(&self, prefix: Option<&Path>) -> Result<ListResult> {
         let prefix = self.inner.full_path(prefix.unwrap_or(&Path::default()));
         let rt = self.inner.store.list_with_delimiter(Some(&prefix)).await?;
-        let mut rt = ListResult {
-            common_prefixes: rt
-                .common_prefixes
-                .into_iter()
-                .map(|p| self.inner.strip_prefix(p))
-                .collect(),
-            objects: rt
-                .objects
-                .into_iter()
-                .map(|mut meta| {
-                    meta.location = self.inner.strip_prefix(meta.location);
-                    meta
-                })
-                .collect(),
-        };
+        let common_prefixes = rt
+            .common_prefixes
+            .into_iter()
+            .map(|p| self.inner.strip_prefix(p))
+            .collect::<Vec<_>>();
 
-        for obj in rt.objects.iter_mut() {
-            let meta = self.inner.get_meta(&obj.location).await?;
-            obj.e_tag = meta.e_tag;
-        }
+        let objects = rt
+            .objects
+            .into_iter()
+            .map(|mut meta| {
+                meta.location = self.inner.strip_prefix(meta.location);
+                meta
+            })
+            .collect::<Vec<_>>();
 
-        Ok(rt)
+        // 并发获取各对象的 meta（保持原有顺序）
+        let inner = self.inner.clone();
+        let mut indexed =
+            futures::stream::iter(objects.into_iter().enumerate().map(move |(idx, mut obj)| {
+                let store = inner.clone();
+                async move {
+                    let meta = store.get_meta(&obj.location).await?;
+                    obj.e_tag = meta.e_tag;
+                    Ok::<(usize, ObjectMeta), Error>((idx, obj))
+                }
+            }))
+            .buffer_unordered(8)
+            .try_collect::<Vec<_>>()
+            .await?;
+
+        // 按索引恢复顺序
+        indexed.sort_by_key(|(idx, _)| *idx);
+        let objects = indexed.into_iter().map(|(_, obj)| obj).collect();
+
+        Ok(ListResult {
+            common_prefixes,
+            objects,
+        })
     }
 
     async fn copy(&self, from: &Path, to: &Path) -> Result<()> {
