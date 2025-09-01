@@ -1,8 +1,9 @@
 use nom::{
-    IResult, Parser,
+    Parser,
     branch::alt,
     bytes::complete::tag,
     combinator::{map, opt, value},
+    error::context,
     sequence::preceded,
 };
 
@@ -12,7 +13,7 @@ use crate::ast::*;
 
 // --- Top Level META Parser ---
 
-pub fn parse_meta_command(input: &str) -> IResult<&str, MetaCommand> {
+pub fn parse_meta_command(input: &str) -> VResult<'_, MetaCommand> {
     alt((
         map(parse_describe_command, MetaCommand::Describe),
         map(parse_search_command, MetaCommand::Search),
@@ -22,33 +23,51 @@ pub fn parse_meta_command(input: &str) -> IResult<&str, MetaCommand> {
 
 // --- DESCRIBE ---
 
-fn parse_describe_command(input: &str) -> IResult<&str, DescribeTarget> {
+fn parse_describe_command(input: &str) -> VResult<'_, DescribeTarget> {
     preceded(
         ws(tag("DESCRIBE ")),
         ws(alt((
-            value(DescribeTarget::Primer, ws(tag("PRIMER"))),
-            value(DescribeTarget::Domains, ws(tag("DOMAINS"))),
-            map(
-                preceded(
-                    ws(tag("CONCEPT TYPES")),
-                    (opt(ws(parse_limit_clause)), opt(ws(parse_cursor_clause))),
+            context(
+                "DESCRIBE PRIMER",
+                value(DescribeTarget::Primer, ws(tag("PRIMER"))),
+            ),
+            context(
+                "DESCRIBE DOMAINS",
+                value(DescribeTarget::Domains, ws(tag("DOMAINS"))),
+            ),
+            context(
+                "DESCRIBE CONCEPT TYPES",
+                map(
+                    preceded(
+                        ws(tag("CONCEPT TYPES")),
+                        (opt(ws(parse_limit_clause)), opt(ws(parse_cursor_clause))),
+                    ),
+                    |(limit, cursor)| DescribeTarget::ConceptTypes { limit, cursor },
                 ),
-                |(limit, cursor)| DescribeTarget::ConceptTypes { limit, cursor },
             ),
-            map(
-                preceded(tag("CONCEPT TYPE "), ws(quoted_string)),
-                DescribeTarget::ConceptType,
-            ),
-            map(
-                preceded(
-                    ws(tag("PROPOSITION TYPES")),
-                    (opt(ws(parse_limit_clause)), opt(ws(parse_cursor_clause))),
+            context(
+                "DESCRIBE CONCEPT TYPE \"<TypeName>\"",
+                map(
+                    preceded(tag("CONCEPT TYPE "), ws(quoted_string)),
+                    DescribeTarget::ConceptType,
                 ),
-                |(limit, cursor)| DescribeTarget::PropositionTypes { limit, cursor },
             ),
-            map(
-                preceded(tag("PROPOSITION TYPE "), ws(quoted_string)),
-                DescribeTarget::PropositionType,
+            context(
+                "DESCRIBE PROPOSITION TYPES",
+                map(
+                    preceded(
+                        ws(tag("PROPOSITION TYPES")),
+                        (opt(ws(parse_limit_clause)), opt(ws(parse_cursor_clause))),
+                    ),
+                    |(limit, cursor)| DescribeTarget::PropositionTypes { limit, cursor },
+                ),
+            ),
+            context(
+                "DESCRIBE PROPOSITION TYPE \"<predicate>\"",
+                map(
+                    preceded(tag("PROPOSITION TYPE "), ws(quoted_string)),
+                    DescribeTarget::PropositionType,
+                ),
             ),
         ))),
     )
@@ -56,26 +75,29 @@ fn parse_describe_command(input: &str) -> IResult<&str, DescribeTarget> {
 }
 
 // --- SEARCH ---
-fn parse_search_command(input: &str) -> IResult<&str, SearchCommand> {
-    map(
-        preceded(
-            ws(tag("SEARCH ")),
-            (
-                ws(alt((
-                    value(SearchTarget::Concept, tag("CONCEPT ")),
-                    value(SearchTarget::Proposition, tag("PROPOSITION ")),
-                ))),
-                ws(quoted_string),
-                opt(preceded(tag("WITH TYPE "), ws(quoted_string))),
-                opt(preceded(tag("LIMIT "), ws(nom::character::complete::usize))),
+fn parse_search_command(input: &str) -> VResult<'_, SearchCommand> {
+    context(
+        "SEARCH CONCEPT|PROPOSITION \"<term>\" [WITH TYPE \"<Type>\"] [LIMIT N]",
+        map(
+            preceded(
+                ws(tag("SEARCH ")),
+                (
+                    ws(alt((
+                        value(SearchTarget::Concept, tag("CONCEPT ")),
+                        value(SearchTarget::Proposition, tag("PROPOSITION ")),
+                    ))),
+                    ws(quoted_string),
+                    opt(preceded(tag("WITH TYPE "), ws(quoted_string))),
+                    opt(preceded(tag("LIMIT "), ws(nom::character::complete::usize))),
+                ),
             ),
+            |(target, term, in_type, limit)| SearchCommand {
+                target,
+                term,
+                in_type,
+                limit,
+            },
         ),
-        |(target, term, in_type, limit)| SearchCommand {
-            target,
-            term,
-            in_type,
-            limit,
-        },
     )
     .parse(input)
 }

@@ -6,15 +6,16 @@ use nom::{
     bytes::{tag, tag_no_case, take},
     character::{
         anychar, char,
-        complete::{alpha1, alphanumeric1, multispace0},
+        complete::{alpha1, alphanumeric1},
         none_of,
     },
-    combinator::{map, map_opt, map_res, opt, recognize, value, verify},
-    error::{Error, ErrorKind, ParseError},
+    combinator::{cut, map, map_opt, map_res, opt, recognize, value, verify},
+    error::context,
     multi::{fold, many0, separated_list0},
     number::complete::recognize_float,
     sequence::{delimited, pair, preceded, separated_pair, terminated},
 };
+use nom_language::error::VerboseError;
 use std::str::FromStr;
 
 use crate::{Json, Map, Number};
@@ -23,44 +24,36 @@ use crate::{Json, Map, Number};
 /// - Allow identifier as map key (starts with a letter or underscore, followed by any combination of letters, digits, or underscores)
 /// - Allow line comment (starting with //).
 /// - Allow trailing comma
-pub fn json_value<'a>() -> impl Parser<&'a str, Output = Json, Error = Error<&'a str>> {
+pub fn json_value<'a>() -> impl Parser<&'a str, Output = Json, Error = VerboseError<&'a str>> {
     JsonParser
 }
 
 /// Parses a double-quoted string, handling escaped quotes.
-pub fn quoted_string(input: &str) -> IResult<&str, String> {
+pub fn quoted_string(input: &str) -> IResult<&str, String, VerboseError<&str>> {
     string().parse(input)
 }
 
-pub fn parse_number(input: &str) -> IResult<&str, Number> {
-    let (next_input, num_str) = recognize_float(input)?;
-    let num = Number::from_str(num_str)
-        .map_err(|_| nom::Err::Error(Error::new(num_str, ErrorKind::Digit)))?;
-    Ok((next_input, num))
+pub fn parse_number(input: &str) -> IResult<&str, Number, VerboseError<&str>> {
+    map_res(recognize_float, Number::from_str).parse(input)
 }
 
-pub fn ws<'a, O, E, F>(f: F) -> impl Parser<&'a str, Output = O, Error = E>
+pub fn ws<'a, O, F>(f: F) -> impl Parser<&'a str, Output = O, Error = VerboseError<&'a str>>
 where
-    E: ParseError<&'a str>,
-    F: Parser<&'a str, Output = O, Error = E>,
+    F: Parser<&'a str, Output = O, Error = VerboseError<&'a str>>,
 {
     delimited(skip_ws_and_comments, f, skip_ws_and_comments)
 }
 
 /// Skips whitespace and line comments.
-fn skip_ws_and_comments<'a, E>(input: &'a str) -> IResult<&'a str, (), E>
-where
-    E: ParseError<&'a str>,
-{
+fn skip_ws_and_comments(input: &str) -> IResult<&str, (), VerboseError<&str>> {
     let mut remaining = input;
 
     loop {
         let start_len = remaining.len();
 
         // 跳过空白字符
-        if let Ok((rest, _)) = multispace0::<&str, E>(remaining) {
-            remaining = rest;
-        }
+        let trimmed = remaining.trim_start_matches(|c: char| c.is_whitespace());
+        remaining = trimmed;
 
         // 跳过行注释
         if remaining.starts_with("//") {
@@ -81,65 +74,70 @@ where
     Ok((remaining, ()))
 }
 
-fn string<'a>() -> impl Parser<&'a str, Output = String, Error = Error<&'a str>> {
+fn string<'a>() -> impl Parser<&'a str, Output = String, Error = VerboseError<&'a str>> {
     delimited(
         char('"'),
-        fold(0.., character(), String::new, |mut string, c| {
+        cut(fold(0.., character(), String::new, |mut string, c| {
             string.push(c);
             string
-        }),
+        })),
         char('"'),
     )
 }
 
 // It is not a standard JSON:
 // - Allow trailing comma
-fn array<'a>() -> impl Parser<&'a str, Output = Vec<Json>, Error = Error<&'a str>> {
-    delimited(
-        char('['),
-        ws(terminated(
-            separated_list0(ws(char(',')), json_value()),
-            opt(ws(char(','))),
-        )),
-        char(']'),
+fn array<'a>() -> impl Parser<&'a str, Output = Vec<Json>, Error = VerboseError<&'a str>> {
+    context(
+        "JSON array [ ... ]",
+        delimited(
+            char('['),
+            cut(ws(terminated(
+                separated_list0(ws(char(',')), json_value()),
+                opt(ws(char(','))),
+            ))),
+            char(']'),
+        ),
     )
 }
 
 // An identifier starts with a letter or underscore, followed by any combination of letters, digits, or underscores.
-fn identifier(input: &str) -> IResult<&str, &str> {
+fn identifier<'a>() -> impl Parser<&'a str, Output = &'a str, Error = VerboseError<&'a str>> {
     recognize(pair(
         alt((alpha1, tag("_"))),
         many0(alt((alphanumeric1, tag("_")))),
     ))
-    .parse(input)
 }
 
-fn object<'a>() -> impl Parser<&'a str, Output = Map<String, Json>, Error = Error<&'a str>> {
-    map(
-        delimited(
-            char('{'),
-            ws(terminated(
-                separated_list0(
-                    ws(char(',')),
-                    separated_pair(
-                        alt((string(), map(identifier, |s| s.to_string()))),
-                        ws(char(':')),
-                        json_value(),
+fn object<'a>() -> impl Parser<&'a str, Output = Map<String, Json>, Error = VerboseError<&'a str>> {
+    context(
+        "JSON object { ... }",
+        map(
+            delimited(
+                char('{'),
+                cut(ws(terminated(
+                    separated_list0(
+                        ws(char(',')),
+                        separated_pair(
+                            alt((string(), map(identifier(), |s| s.to_string()))),
+                            ws(char(':')),
+                            json_value(),
+                        ),
                     ),
-                ),
-                opt(ws(char(','))),
-            )),
-            char('}'),
+                    opt(ws(char(','))),
+                ))),
+                char('}'),
+            ),
+            |key_values| key_values.into_iter().collect(),
         ),
-        |key_values| key_values.into_iter().collect(),
     )
 }
 
-fn u16_hex<'a>() -> impl Parser<&'a str, Output = u16, Error = Error<&'a str>> {
+fn u16_hex<'a>() -> impl Parser<&'a str, Output = u16, Error = VerboseError<&'a str>> {
     map_res(take(4usize), |s| u16::from_str_radix(s, 16))
 }
 
-fn unicode_escape<'a>() -> impl Parser<&'a str, Output = char, Error = Error<&'a str>> {
+fn unicode_escape<'a>() -> impl Parser<&'a str, Output = char, Error = VerboseError<&'a str>> {
     map_opt(
         alt((
             // Not a surrogate
@@ -165,7 +163,7 @@ fn unicode_escape<'a>() -> impl Parser<&'a str, Output = char, Error = Error<&'a
     )
 }
 
-pub fn character<'a>() -> impl Parser<&'a str, Output = char, Error = Error<&'a str>> {
+pub fn character<'a>() -> impl Parser<&'a str, Output = char, Error = VerboseError<&'a str>> {
     Character
 }
 
@@ -174,7 +172,7 @@ struct Character;
 impl<'a> Parser<&'a str> for Character {
     type Output = char;
 
-    type Error = Error<&'a str>;
+    type Error = VerboseError<&'a str>;
 
     fn process<OM: nom::OutputMode>(
         &mut self,
@@ -208,7 +206,7 @@ struct JsonParser;
 
 impl<'a> Parser<&'a str> for JsonParser {
     type Output = Json;
-    type Error = Error<&'a str>;
+    type Error = VerboseError<&'a str>;
 
     fn process<OM: nom::OutputMode>(
         &mut self,

@@ -3,38 +3,43 @@ use nom::{
     branch::alt,
     bytes::complete::{tag, tag_no_case},
     character::complete::{alpha1, alphanumeric1, char},
-    combinator::{map, opt, recognize, value},
-    error::ParseError,
+    combinator::{cut, map, opt, recognize, value},
+    error::{ErrorKind, ParseError, context},
     multi::{many0, separated_list1},
     sequence::{delimited, pair, preceded, separated_pair, terminated},
 };
+use nom_language::error::VerboseError;
 
 use super::json::{json_value, parse_number};
 use crate::ast::{DotPathVar, Json, KeyValue, Map, Value};
 
 pub use super::json::{quoted_string, ws};
 
+pub type VResult<'a, T> = IResult<&'a str, T, VerboseError<&'a str>>;
+
 /// Parses the contents of a block enclosed in curly braces.
-pub fn braced_block<'a, O, E, F>(f: F) -> impl Parser<&'a str, Output = O, Error = E>
+pub fn braced_block<'a, O, F>(
+    f: F,
+) -> impl Parser<&'a str, Output = O, Error = VerboseError<&'a str>>
 where
-    E: ParseError<&'a str>,
-    F: Parser<&'a str, Output = O, Error = E>,
+    F: Parser<&'a str, Output = O, Error = VerboseError<&'a str>>,
 {
     delimited(ws(char('{')), f, ws(char('}')))
 }
 
 /// Parses the contents of a block enclosed in parentheses.
-pub fn parenthesized_block<'a, O, E, F>(f: F) -> impl Parser<&'a str, Output = O, Error = E>
+pub fn parenthesized_block<'a, O, F>(
+    f: F,
+) -> impl Parser<&'a str, Output = O, Error = VerboseError<&'a str>>
 where
-    E: ParseError<&'a str>,
-    F: Parser<&'a str, Output = O, Error = E>,
+    F: Parser<&'a str, Output = O, Error = VerboseError<&'a str>>,
 {
     delimited(ws(char('(')), f, ws(char(')')))
 }
 
 /// Parses a valid identifier (e.g., for variables, types, predicates).
 /// An identifier starts with a letter or underscore, followed by any combination of letters, digits, or underscores.
-pub fn identifier(input: &str) -> IResult<&str, &str> {
+pub fn identifier(input: &str) -> VResult<'_, &str> {
     recognize(pair(
         alt((alpha1, tag("_"))),
         many0(alt((alphanumeric1, tag("_")))),
@@ -43,24 +48,26 @@ pub fn identifier(input: &str) -> IResult<&str, &str> {
 }
 
 /// Parses a KIP variable, like `?my_var`.
-pub fn variable(input: &str) -> IResult<&str, String> {
-    map(preceded(char('?'), identifier), |s| s.to_string()).parse(input)
+pub fn variable(input: &str) -> VResult<'_, String> {
+    map(preceded(char('?'), cut(identifier)), |s| s.to_string()).parse(input)
 }
 
 /// Parses a dot notation path, like `?var`, `?var.field` or `?var.attributes.key`.
-pub fn dot_path_var(input: &str) -> IResult<&str, DotPathVar> {
-    let (remaining, (var, path_components)) = pair(
-        preceded(char('?'), identifier),
-        many0(preceded(char('.'), identifier)),
+pub fn dot_path_var(input: &str) -> VResult<'_, DotPathVar> {
+    let (remaining, (var, path_components)) = context(
+        "KIP dot notation path",
+        pair(
+            preceded(char('?'), cut(identifier)),
+            many0(preceded(char('.'), identifier)),
+        ),
     )
     .parse(input)?;
 
     // 验证剩余输入不以点号开头（避免 "?var." 这种情况）
     if remaining.starts_with('.') {
-        return Err(nom::Err::Error(nom::error::Error::new(
-            remaining,
-            nom::error::ErrorKind::Verify,
-        )));
+        return Err(nom::Err::Error(
+            <VerboseError<&str> as ParseError<&str>>::from_error_kind(remaining, ErrorKind::Verify),
+        ));
     }
 
     Ok((
@@ -73,7 +80,7 @@ pub fn dot_path_var(input: &str) -> IResult<&str, DotPathVar> {
 }
 
 /// Parses any KIP value (string, number, boolean, null).
-pub fn kip_value(input: &str) -> IResult<&str, Value> {
+pub fn kip_value(input: &str) -> VResult<'_, Value> {
     alt((
         value(Value::Null, tag_no_case("null")),
         value(Value::Bool(true), tag_no_case("true")),
@@ -85,7 +92,7 @@ pub fn kip_value(input: &str) -> IResult<&str, Value> {
 }
 
 /// Parses a key-value pair, like `name: "Aspirin"`.
-pub fn key_value_pair(input: &str) -> IResult<&str, KeyValue> {
+pub fn key_value_pair(input: &str) -> VResult<'_, KeyValue> {
     map(
         separated_pair(identifier, ws(char(':')), kip_value),
         |(k, v)| KeyValue {
@@ -97,22 +104,25 @@ pub fn key_value_pair(input: &str) -> IResult<&str, KeyValue> {
 }
 
 /// Parses a list of key-value pairs inside braces, like `{ key1: val1, key2: val2 }`.
-pub fn json_value_map(input: &str) -> IResult<&str, Map<String, Json>> {
-    map(
-        delimited(
-            ws(char('{')),
-            opt(terminated(
-                separated_list1(ws(char(',')), key_json_pair),
-                opt(ws(char(','))), // Allow trailing comma
-            )),
-            ws(char('}')),
+pub fn json_value_map(input: &str) -> VResult<'_, Map<String, Json>> {
+    context(
+        "KIP key-value map, like `{ key1: val1, key2: val2 }`",
+        map(
+            delimited(
+                ws(char('{')),
+                opt(terminated(
+                    separated_list1(ws(char(',')), key_json_pair),
+                    opt(ws(char(','))), // Allow trailing comma
+                )),
+                ws(char('}')),
+            ),
+            |opt_kvs| opt_kvs.unwrap_or_default().into_iter().collect(),
         ),
-        |opt_kvs| opt_kvs.unwrap_or_default().into_iter().collect(),
     )
     .parse(input)
 }
 
-fn key_json_pair(input: &str) -> IResult<&str, (String, Json)> {
+fn key_json_pair(input: &str) -> VResult<'_, (String, Json)> {
     separated_pair(
         alt((quoted_string, map(identifier, |s| s.to_string()))),
         ws(char(':')),
@@ -125,17 +135,19 @@ fn key_json_pair(input: &str) -> IResult<&str, (String, Json)> {
 mod tests {
     use super::*;
     use crate::ast::Number;
-    use nom::error::Error;
 
     #[test]
     fn test_ws() {
         assert_eq!(
-            ws(char::<&str, Error<_>>('a')).parse("  a  "),
+            ws(char::<&str, VerboseError<_>>('a')).parse("  a  "),
             Ok(("", 'a'))
         );
-        assert_eq!(ws(char::<&str, Error<_>>('a')).parse("a"), Ok(("", 'a')));
         assert_eq!(
-            ws(char::<&str, Error<_>>('a')).parse("\n\t a \r\n"),
+            ws(char::<&str, VerboseError<_>>('a')).parse("a"),
+            Ok(("", 'a'))
+        );
+        assert_eq!(
+            ws(char::<&str, VerboseError<_>>('a')).parse("\n\t a \r\n"),
             Ok(("", 'a'))
         );
     }
@@ -144,17 +156,17 @@ mod tests {
     fn test_ws_with_comments() {
         // 测试注释后跟换行符
         let input = "// comment\nvalue";
-        let result = ws(tag::<&str, &str, Error<_>>("value")).parse(input);
+        let result = ws(tag::<&str, &str, VerboseError<_>>("value")).parse(input);
         assert!(result.is_ok());
 
         // 测试多行注释和空白字符混合
         let input = "  // comment1\n  // comment2\n  value";
-        let result = ws(tag::<&str, &str, Error<_>>("value")).parse(input);
+        let result = ws(tag::<&str, &str, VerboseError<_>>("value")).parse(input);
         assert!(result.is_ok());
 
         // 测试注释在末尾
         let input = "value  // comment";
-        let result = ws(tag::<&str, &str, Error<_>>("value")).parse(input);
+        let result = ws(tag::<&str, &str, VerboseError<_>>("value")).parse(input);
         assert!(result.is_ok());
     }
 
@@ -407,7 +419,7 @@ mod tests {
 
     #[test]
     fn test_braced_block() {
-        let mut parser = braced_block(char::<&str, Error<_>>('a'));
+        let mut parser = braced_block(char::<&str, VerboseError<_>>('a'));
         assert_eq!(parser.parse("{ a }"), Ok(("", 'a')));
         assert_eq!(parser.parse("{a}"), Ok(("", 'a')));
         assert_eq!(parser.parse("{\n  a  \n}"), Ok(("", 'a')));
@@ -418,7 +430,7 @@ mod tests {
 
     #[test]
     fn test_parenthesized_block() {
-        let mut parser = parenthesized_block(char::<&str, Error<_>>('a'));
+        let mut parser = parenthesized_block(char::<&str, VerboseError<_>>('a'));
         assert_eq!(parser.parse("( a )"), Ok(("", 'a')));
         assert_eq!(parser.parse("(a)"), Ok(("", 'a')));
         assert_eq!(parser.parse("(\n  a  \n)"), Ok(("", 'a')));

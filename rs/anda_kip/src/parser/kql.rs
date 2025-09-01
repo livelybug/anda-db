@@ -1,9 +1,10 @@
 use nom::{
-    IResult, Parser,
+    Parser,
     branch::alt,
     bytes::complete::tag,
     character::complete::{char, multispace1},
-    combinator::{map, map_res, opt},
+    combinator::{cut, map, map_res, opt},
+    error::context,
     multi::{fold, many1, separated_list1},
     sequence::{pair, preceded, separated_pair, terminated},
 };
@@ -13,7 +14,7 @@ use crate::ast::*;
 
 // --- Top Level KQL Parser ---
 
-pub fn parse_kql_query(input: &str) -> IResult<&str, KqlQuery> {
+pub fn parse_kql_query(input: &str) -> VResult<'_, KqlQuery> {
     map(
         (
             ws(parse_find_clause),
@@ -35,41 +36,47 @@ pub fn parse_kql_query(input: &str) -> IResult<&str, KqlQuery> {
 
 // --- FIND Clause ---
 
-fn parse_find_clause(input: &str) -> IResult<&str, FindClause> {
-    map(
-        preceded(
-            ws(tag("FIND")),
-            parenthesized_block(separated_list1(ws(char(',')), parse_find_expression)),
+fn parse_find_clause(input: &str) -> VResult<'_, FindClause> {
+    context(
+        "FIND( ... )",
+        map(
+            preceded(
+                ws(tag("FIND")),
+                parenthesized_block(separated_list1(ws(char(',')), parse_find_expression)),
+            ),
+            |expressions| FindClause { expressions },
         ),
-        |expressions| FindClause { expressions },
     )
     .parse(input)
 }
 
-fn parse_find_expression(input: &str) -> IResult<&str, FindExpression> {
+fn parse_find_expression(input: &str) -> VResult<'_, FindExpression> {
     alt((parse_aggregation_expression, parse_find_variable)).parse(input)
 }
 
-fn parse_find_variable(input: &str) -> IResult<&str, FindExpression> {
+fn parse_find_variable(input: &str) -> VResult<'_, FindExpression> {
     map(dot_path_var, FindExpression::Variable).parse(input)
 }
 
-fn parse_aggregation_expression(input: &str) -> IResult<&str, FindExpression> {
-    map(
-        (
-            parse_aggregation_function,
-            parenthesized_block((opt(terminated(tag("DISTINCT"), multispace1)), dot_path_var)),
+fn parse_aggregation_expression(input: &str) -> VResult<'_, FindExpression> {
+    context(
+        "KQL aggregation expression",
+        map(
+            (
+                parse_aggregation_function,
+                parenthesized_block((opt(terminated(tag("DISTINCT"), multispace1)), dot_path_var)),
+            ),
+            |(func, (distinct, var))| FindExpression::Aggregation {
+                func,
+                var,
+                distinct: distinct.is_some(),
+            },
         ),
-        |(func, (distinct, var))| FindExpression::Aggregation {
-            func,
-            var,
-            distinct: distinct.is_some(),
-        },
     )
     .parse(input)
 }
 
-fn parse_aggregation_function(input: &str) -> IResult<&str, AggregationFunction> {
+fn parse_aggregation_function(input: &str) -> VResult<'_, AggregationFunction> {
     alt((
         map(tag("COUNT"), |_| AggregationFunction::Count),
         map(tag("SUM"), |_| AggregationFunction::Sum),
@@ -82,15 +89,19 @@ fn parse_aggregation_function(input: &str) -> IResult<&str, AggregationFunction>
 
 // --- WHERE Clause ---
 
-pub fn parse_where_block(input: &str) -> IResult<&str, Vec<WhereClause>> {
-    preceded(ws(tag("WHERE")), parse_where_group).parse(input)
+pub fn parse_where_block(input: &str) -> VResult<'_, Vec<WhereClause>> {
+    context(
+        "WHERE { ... }",
+        preceded(ws(tag("WHERE")), parse_where_group),
+    )
+    .parse(input)
 }
 
-fn parse_where_group(input: &str) -> IResult<&str, Vec<WhereClause>> {
+fn parse_where_group(input: &str) -> VResult<'_, Vec<WhereClause>> {
     braced_block(many1(ws(parse_single_where_clause))).parse(input)
 }
 
-fn parse_single_where_clause(input: &str) -> IResult<&str, WhereClause> {
+fn parse_single_where_clause(input: &str) -> VResult<'_, WhereClause> {
     alt((
         map(parse_optional_clause, WhereClause::Optional),
         map(parse_not_clause, WhereClause::Not),
@@ -104,31 +115,40 @@ fn parse_single_where_clause(input: &str) -> IResult<&str, WhereClause> {
 
 // --- WHERE Clause Sub-parsers ---
 
-pub fn parse_concept_matcher(input: &str) -> IResult<&str, ConceptMatcher> {
-    map_res(
-        braced_block(separated_list1(ws(char(',')), key_value_pair)),
-        ConceptMatcher::try_from,
+pub fn parse_concept_matcher(input: &str) -> VResult<'_, ConceptMatcher> {
+    context(
+        "KQL concept matcher",
+        map_res(
+            braced_block(cut(separated_list1(ws(char(',')), key_value_pair))),
+            ConceptMatcher::try_from,
+        ),
     )
     .parse(input)
 }
 
-fn parse_concept_clause(input: &str) -> IResult<&str, ConceptClause> {
-    map((variable, parse_concept_matcher), |(variable, matcher)| {
-        ConceptClause { variable, matcher }
-    })
+fn parse_concept_clause(input: &str) -> VResult<'_, ConceptClause> {
+    context(
+        "KQL concept clause",
+        map((variable, parse_concept_matcher), |(variable, matcher)| {
+            ConceptClause { variable, matcher }
+        }),
+    )
     .parse(input)
 }
 
-pub fn parse_target_term(input: &str) -> IResult<&str, TargetTerm> {
-    alt((
-        map(parse_concept_matcher, TargetTerm::Concept),
-        map(parse_prop_mather, |p| TargetTerm::Proposition(Box::new(p))),
-        map(variable, TargetTerm::Variable),
-    ))
+pub fn parse_target_term(input: &str) -> VResult<'_, TargetTerm> {
+    context(
+        "KQL target term",
+        alt((
+            map(parse_concept_matcher, TargetTerm::Concept),
+            map(parse_prop_mather, |p| TargetTerm::Proposition(Box::new(p))),
+            map(variable, TargetTerm::Variable),
+        )),
+    )
     .parse(input)
 }
 
-fn parse_predicate_path(input: &str) -> IResult<&str, PredTerm> {
+fn parse_predicate_path(input: &str) -> VResult<'_, PredTerm> {
     let (input, first) = parse_multi_hop_predicate(input)?;
 
     match first {
@@ -149,7 +169,7 @@ fn parse_predicate_path(input: &str) -> IResult<&str, PredTerm> {
     }
 }
 
-fn parse_multi_hop_predicate(input: &str) -> IResult<&str, PredTerm> {
+fn parse_multi_hop_predicate(input: &str) -> VResult<'_, PredTerm> {
     alt((
         map(
             (quoted_string, parse_predicate_quantifier),
@@ -165,8 +185,8 @@ fn parse_multi_hop_predicate(input: &str) -> IResult<&str, PredTerm> {
 }
 
 // parse: {m,n} | {m,} | {m}
-fn parse_predicate_quantifier(input: &str) -> IResult<&str, (u16, Option<u16>)> {
-    braced_block(ws(alt((
+fn parse_predicate_quantifier(input: &str) -> VResult<'_, (u16, Option<u16>)> {
+    braced_block(ws(cut(alt((
         // {m,n} 格式
         map_res(
             (
@@ -191,62 +211,75 @@ fn parse_predicate_quantifier(input: &str) -> IResult<&str, (u16, Option<u16>)> 
         ),
         // {m} 格式（精确匹配）
         map(nom::character::complete::u16, |min| (min, Some(min))),
-    ))))
+    )))))
     .parse(input)
 }
 
-fn parse_pred_term(input: &str) -> IResult<&str, PredTerm> {
-    alt((map(variable, PredTerm::Variable), parse_predicate_path)).parse(input)
-}
-
-pub fn parse_prop_mather(input: &str) -> IResult<&str, PropositionMatcher> {
-    parenthesized_block(alt((
-        map(
-            separated_pair(ws(tag("id")), ws(char(':')), ws(quoted_string)),
-            |(_, id)| PropositionMatcher::ID(id),
-        ),
-        map(
-            (
-                ws(parse_target_term),
-                ws(char(',')),
-                ws(parse_pred_term),
-                ws(char(',')),
-                ws(parse_target_term),
-            ),
-            |(subject, _, predicate, _, object)| PropositionMatcher::Object {
-                subject,
-                predicate,
-                object,
-            },
-        ),
-    )))
-    .parse(input)
-}
-
-fn parse_prop_clause(input: &str) -> IResult<&str, PropositionClause> {
-    map((opt(variable), parse_prop_mather), |(variable, matcher)| {
-        PropositionClause { matcher, variable }
-    })
-    .parse(input)
-}
-
-fn parse_filter_clause(input: &str) -> IResult<&str, FilterClause> {
-    map(
-        preceded(
-            ws(tag("FILTER")),
-            parenthesized_block(parse_filter_expression),
-        ),
-        |expression| FilterClause { expression },
+fn parse_pred_term(input: &str) -> VResult<'_, PredTerm> {
+    context(
+        "KQL predicate term",
+        alt((map(variable, PredTerm::Variable), parse_predicate_path)),
     )
     .parse(input)
 }
 
-fn parse_filter_expression(input: &str) -> IResult<&str, FilterExpression> {
+pub fn parse_prop_mather(input: &str) -> VResult<'_, PropositionMatcher> {
+    context(
+        "KQL proposition matcher",
+        parenthesized_block(cut(alt((
+            map(
+                separated_pair(ws(tag("id")), ws(char(':')), ws(quoted_string)),
+                |(_, id)| PropositionMatcher::ID(id),
+            ),
+            map(
+                (
+                    ws(parse_target_term),
+                    ws(char(',')),
+                    ws(parse_pred_term),
+                    ws(char(',')),
+                    ws(parse_target_term),
+                ),
+                |(subject, _, predicate, _, object)| PropositionMatcher::Object {
+                    subject,
+                    predicate,
+                    object,
+                },
+            ),
+        )))),
+    )
+    .parse(input)
+}
+
+fn parse_prop_clause(input: &str) -> VResult<'_, PropositionClause> {
+    context(
+        "KQL proposition clause",
+        map((opt(variable), parse_prop_mather), |(variable, matcher)| {
+            PropositionClause { matcher, variable }
+        }),
+    )
+    .parse(input)
+}
+
+fn parse_filter_clause(input: &str) -> VResult<'_, FilterClause> {
+    context(
+        "KQL FILTER clause",
+        map(
+            preceded(
+                ws(tag("FILTER")),
+                cut(parenthesized_block(parse_filter_expression)),
+            ),
+            |expression| FilterClause { expression },
+        ),
+    )
+    .parse(input)
+}
+
+fn parse_filter_expression(input: &str) -> VResult<'_, FilterExpression> {
     parse_logical_or_expression(input)
 }
 
 // 解析逻辑 OR 表达式（最低优先级）
-fn parse_logical_or_expression(input: &str) -> IResult<&str, FilterExpression> {
+fn parse_logical_or_expression(input: &str) -> VResult<'_, FilterExpression> {
     let (input, left) = parse_logical_and_expression(input)?;
 
     fold(
@@ -263,7 +296,7 @@ fn parse_logical_or_expression(input: &str) -> IResult<&str, FilterExpression> {
 }
 
 // 解析逻辑 AND 表达式
-fn parse_logical_and_expression(input: &str) -> IResult<&str, FilterExpression> {
+fn parse_logical_and_expression(input: &str) -> VResult<'_, FilterExpression> {
     let (input, left) = parse_unary_expression(input)?;
 
     fold(
@@ -280,7 +313,7 @@ fn parse_logical_and_expression(input: &str) -> IResult<&str, FilterExpression> 
 }
 
 // 解析一元表达式（NOT）
-fn parse_unary_expression(input: &str) -> IResult<&str, FilterExpression> {
+fn parse_unary_expression(input: &str) -> VResult<'_, FilterExpression> {
     alt((
         map(preceded(ws(char('!')), parse_primary_expression), |expr| {
             FilterExpression::Not(Box::new(expr))
@@ -291,7 +324,7 @@ fn parse_unary_expression(input: &str) -> IResult<&str, FilterExpression> {
 }
 
 // 解析基本表达式（比较、函数、括号）
-fn parse_primary_expression(input: &str) -> IResult<&str, FilterExpression> {
+fn parse_primary_expression(input: &str) -> VResult<'_, FilterExpression> {
     alt((
         // 括号表达式
         parenthesized_block(parse_filter_expression),
@@ -304,7 +337,7 @@ fn parse_primary_expression(input: &str) -> IResult<&str, FilterExpression> {
 }
 
 // 解析比较表达式
-fn parse_comparison_expression(input: &str) -> IResult<&str, FilterExpression> {
+fn parse_comparison_expression(input: &str) -> VResult<'_, FilterExpression> {
     map(
         (
             parse_filter_operand,
@@ -321,7 +354,7 @@ fn parse_comparison_expression(input: &str) -> IResult<&str, FilterExpression> {
 }
 
 // 解析函数表达式
-fn parse_function_expression(input: &str) -> IResult<&str, FilterExpression> {
+fn parse_function_expression(input: &str) -> VResult<'_, FilterExpression> {
     map(
         (
             parse_filter_function,
@@ -333,7 +366,7 @@ fn parse_function_expression(input: &str) -> IResult<&str, FilterExpression> {
 }
 
 // 解析过滤器操作数
-fn parse_filter_operand(input: &str) -> IResult<&str, FilterOperand> {
+fn parse_filter_operand(input: &str) -> VResult<'_, FilterOperand> {
     alt((
         map(dot_path_var, FilterOperand::Variable),
         map(kip_value, FilterOperand::Literal),
@@ -342,7 +375,7 @@ fn parse_filter_operand(input: &str) -> IResult<&str, FilterOperand> {
 }
 
 // 解析比较运算符
-fn parse_comparison_operator(input: &str) -> IResult<&str, ComparisonOperator> {
+fn parse_comparison_operator(input: &str) -> VResult<'_, ComparisonOperator> {
     alt((
         map(tag("=="), |_| ComparisonOperator::Equal),
         map(tag("!="), |_| ComparisonOperator::NotEqual),
@@ -355,7 +388,7 @@ fn parse_comparison_operator(input: &str) -> IResult<&str, ComparisonOperator> {
 }
 
 // 解析过滤器函数
-fn parse_filter_function(input: &str) -> IResult<&str, FilterFunction> {
+fn parse_filter_function(input: &str) -> VResult<'_, FilterFunction> {
     alt((
         map(tag("CONTAINS"), |_| FilterFunction::Contains),
         map(tag("STARTS_WITH"), |_| FilterFunction::StartsWith),
@@ -365,44 +398,56 @@ fn parse_filter_function(input: &str) -> IResult<&str, FilterFunction> {
     .parse(input)
 }
 
-fn parse_optional_clause(input: &str) -> IResult<&str, Vec<WhereClause>> {
-    preceded(
-        ws(tag("OPTIONAL")),
-        braced_block(many1(ws(parse_single_where_clause))),
+fn parse_optional_clause(input: &str) -> VResult<'_, Vec<WhereClause>> {
+    context(
+        "KQL OPTIONAL clause",
+        preceded(
+            ws(tag("OPTIONAL")),
+            cut(braced_block(many1(ws(parse_single_where_clause)))),
+        ),
     )
     .parse(input)
 }
 
-fn parse_not_clause(input: &str) -> IResult<&str, Vec<WhereClause>> {
-    preceded(
-        ws(tag("NOT")),
-        braced_block(many1(ws(parse_single_where_clause))),
+fn parse_not_clause(input: &str) -> VResult<'_, Vec<WhereClause>> {
+    context(
+        "KQL NOT clause",
+        preceded(
+            ws(tag("NOT")),
+            cut(braced_block(many1(ws(parse_single_where_clause)))),
+        ),
     )
     .parse(input)
 }
 
-fn parse_union_expression(input: &str) -> IResult<&str, Vec<WhereClause>> {
-    preceded(
-        ws(tag("UNION")),
-        braced_block(many1(ws(parse_single_where_clause))),
+fn parse_union_expression(input: &str) -> VResult<'_, Vec<WhereClause>> {
+    context(
+        "KQL UNION clause",
+        preceded(
+            ws(tag("UNION")),
+            cut(braced_block(many1(ws(parse_single_where_clause)))),
+        ),
     )
     .parse(input)
 }
 
 // --- Solution Modifiers ---
 
-fn parse_order_by_clause(input: &str) -> IResult<&str, Vec<OrderByCondition>> {
-    preceded(
-        ws(tag("ORDER ")),
+fn parse_order_by_clause(input: &str) -> VResult<'_, Vec<OrderByCondition>> {
+    context(
+        "KQL ORDER BY clause",
         preceded(
-            ws(tag("BY ")),
-            separated_list1(ws(char(',')), parse_order_by_condition),
+            ws(tag("ORDER ")),
+            preceded(
+                ws(tag("BY ")),
+                separated_list1(ws(char(',')), parse_order_by_condition),
+            ),
         ),
     )
     .parse(input)
 }
 
-fn parse_order_by_condition(input: &str) -> IResult<&str, OrderByCondition> {
+fn parse_order_by_condition(input: &str) -> VResult<'_, OrderByCondition> {
     map(
         pair(
             dot_path_var,
@@ -419,15 +464,18 @@ fn parse_order_by_condition(input: &str) -> IResult<&str, OrderByCondition> {
     .parse(input)
 }
 
-pub fn parse_limit_clause(input: &str) -> IResult<&str, usize> {
-    preceded(
-        ws(tag("LIMIT ")),
-        map(nom::character::complete::usize, |n| n),
+pub fn parse_limit_clause(input: &str) -> VResult<'_, usize> {
+    context(
+        "KQL LIMIT clause",
+        preceded(
+            ws(tag("LIMIT ")),
+            map(nom::character::complete::usize, |n| n),
+        ),
     )
     .parse(input)
 }
 
-pub fn parse_cursor_clause(input: &str) -> IResult<&str, String> {
+pub fn parse_cursor_clause(input: &str) -> VResult<'_, String> {
     preceded(ws(tag("CURSOR ")), quoted_string).parse(input)
 }
 

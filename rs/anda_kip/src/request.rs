@@ -265,6 +265,28 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    #[ignore]
+    fn test_debug() {
+        let text = r#"
+        {
+  "command": "UPSERT {\n    // 1. Update my own name given by the user\n    CONCEPT ?self {\n        {type: \"Person\", name: \"$self\"}\n        SET ATTRIBUTES {\n            name: \"佛根\"\n        }\n    }\n\n    // 2. Create or update the user's profile\n    CONCEPT ?user_yan {\n        {type: \"Person\", name: $user_id}\n        SET ATTRIBUTES {\n            id: $user_id,\n            person_class: \"Human\",\n            name: \"Yan\",\n            handle: \"Yan\",\n            status: \"active\",\n            relationship_to_self: \"user\",\n            interaction_summary: {\n                last_seen_at: $timestamp\n            }\n        }\n    }\n\n    // 3. Record this interaction as a short-term memory Event\n    CONCEPT ?event {\n        {type: \"Event\", name: $event_name}\n        SET ATTRIBUTES {\n            event_class: \"Conversation\",\n            start_time: $timestamp,\n            participants: [\"$self\", $user_id],\n            content_summary: \"User 'Yan' (id: $user_id) introduced themselves and gave the agent '$self' the nickname '佛根'.\",\n            key_concepts: [\"$self\", $user_id]\n        }\n        WITH METADATA {\n            // This is an episodic memory and can expire after a while.\n            // Setting expiration to 30 days from now.\n            expires_at: \"2025-10-01T01:45:39.167Z\" \n        }\n    }\n}\nWITH METADATA {\n    author: $user_id,\n    source: \"UserInteraction\"\n}\n",
+  "dry_run": false,
+  "parameters": {
+    "event_name": "Event-Conversation-2025-09-01T01:45:39.167Z",
+    "timestamp": "2025-09-01T01:45:39.167Z",
+    "user_id": "nmob2-y6p4k-rp5j7-7x2mo-aqceq-lpie2-fjgw7-nkjdu-bkoe4-zjetd-wae"
+  }
+}
+        "#;
+        let request: Request = serde_json::from_str(text).unwrap();
+
+        let result = request.to_command();
+        println!("Result:\n{}", result);
+        let rt = parse_kml(&result);
+        println!("Parse Result error:\n{}", rt.err().unwrap());
+    }
+
+    #[test]
     fn test_to_command_empty_parameters() {
         let request = Request {
             command: "FIND(?drug) WHERE { ?drug {type: \"Drug\"} }".to_string(),

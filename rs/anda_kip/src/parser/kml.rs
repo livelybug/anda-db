@@ -1,9 +1,10 @@
 use nom::{
-    IResult, Parser,
+    Parser,
     branch::alt,
     bytes::complete::tag,
     character::complete::char,
-    combinator::{map, opt},
+    combinator::{cut, map, opt},
+    error::context,
     multi::{many1, separated_list1},
     sequence::{preceded, separated_pair, terminated},
 };
@@ -14,7 +15,7 @@ use crate::ast::*;
 
 // --- Top Level KML Parser ---
 
-pub fn parse_kml_statement(input: &str) -> IResult<&str, KmlStatement> {
+pub fn parse_kml_statement(input: &str) -> VResult<'_, KmlStatement> {
     alt((
         map(parse_upsert_blocks, KmlStatement::Upsert),
         map(parse_delete_statement, KmlStatement::Delete),
@@ -24,25 +25,32 @@ pub fn parse_kml_statement(input: &str) -> IResult<&str, KmlStatement> {
 
 // --- UPSERT ---
 
-fn parse_with_metadata(input: &str) -> IResult<&str, Map<String, Json>> {
-    preceded(ws(tag("WITH METADATA")), json_value_map).parse(input)
-}
-
-fn parse_upsert_blocks(input: &str) -> IResult<&str, Vec<UpsertBlock>> {
-    many1(map(
-        preceded(
-            ws(tag("UPSERT")),
-            (
-                braced_block(many1(ws(parse_upsert_item))),
-                opt(parse_with_metadata),
-            ),
-        ),
-        |(items, metadata)| UpsertBlock { items, metadata },
-    ))
+fn parse_with_metadata(input: &str) -> VResult<'_, Map<String, Json>> {
+    context(
+        "WITH METADATA { ... }",
+        preceded(ws(tag("WITH METADATA")), json_value_map),
+    )
     .parse(input)
 }
 
-fn parse_upsert_item(input: &str) -> IResult<&str, UpsertItem> {
+fn parse_upsert_blocks(input: &str) -> VResult<'_, Vec<UpsertBlock>> {
+    context(
+        "UPSERT { ... }",
+        many1(map(
+            preceded(
+                ws(tag("UPSERT")),
+                cut((
+                    braced_block(many1(ws(parse_upsert_item))),
+                    opt(parse_with_metadata),
+                )),
+            ),
+            |(items, metadata)| UpsertBlock { items, metadata },
+        )),
+    )
+    .parse(input)
+}
+
+fn parse_upsert_item(input: &str) -> VResult<'_, UpsertItem> {
     alt((
         map(parse_concept_block, UpsertItem::Concept),
         map(parse_proposition_block, UpsertItem::Proposition),
@@ -50,32 +58,41 @@ fn parse_upsert_item(input: &str) -> IResult<&str, UpsertItem> {
     .parse(input)
 }
 
-fn parse_concept_block(input: &str) -> IResult<&str, ConceptBlock> {
-    map(
-        (
-            preceded(ws(tag("CONCEPT")), ws(variable)),
-            braced_block((
-                ws(parse_concept_matcher),
-                opt(ws(preceded(tag("SET ATTRIBUTES"), json_value_map))),
-                opt(ws(preceded(
-                    tag("SET PROPOSITIONS"),
-                    braced_block(many1(ws(parse_set_proposition))),
+fn parse_concept_block(input: &str) -> VResult<'_, ConceptBlock> {
+    context(
+        "CONCEPT ?local_handle { ... }",
+        map(
+            (
+                preceded(ws(tag("CONCEPT")), ws(variable)),
+                cut(braced_block((
+                    ws(parse_concept_matcher),
+                    opt(context(
+                        "SET ATTRIBUTES { ... }",
+                        ws(preceded(tag("SET ATTRIBUTES"), json_value_map)),
+                    )),
+                    opt(context(
+                        "SET PROPOSITIONS { ... }",
+                        ws(preceded(
+                            tag("SET PROPOSITIONS"),
+                            braced_block(many1(ws(parse_set_proposition))),
+                        )),
+                    )),
                 ))),
-            )),
-            opt(ws(parse_with_metadata)),
+                opt(ws(parse_with_metadata)),
+            ),
+            |(handle, (concept, set_attributes, set_propositions), metadata)| ConceptBlock {
+                handle,
+                concept,
+                set_attributes,
+                set_propositions,
+                metadata,
+            },
         ),
-        |(handle, (concept, set_attributes, set_propositions), metadata)| ConceptBlock {
-            handle,
-            concept,
-            set_attributes,
-            set_propositions,
-            metadata,
-        },
     )
     .parse(input)
 }
 
-fn parse_set_proposition(input: &str) -> IResult<&str, SetProposition> {
+fn parse_set_proposition(input: &str) -> VResult<'_, SetProposition> {
     map(
         terminated(
             (
@@ -97,100 +114,121 @@ fn parse_set_proposition(input: &str) -> IResult<&str, SetProposition> {
     .parse(input)
 }
 
-fn parse_proposition_block(input: &str) -> IResult<&str, PropositionBlock> {
-    map(
-        (
-            preceded(ws(tag("PROPOSITION")), ws(variable)),
-            braced_block((
-                ws(parse_prop_mather),
-                opt(ws(preceded(tag("SET ATTRIBUTES"), json_value_map))),
-            )),
-            opt(ws(parse_with_metadata)),
+fn parse_proposition_block(input: &str) -> VResult<'_, PropositionBlock> {
+    context(
+        "PROPOSITION ?local_handle { ... }",
+        map(
+            (
+                preceded(ws(tag("PROPOSITION")), ws(variable)),
+                cut(braced_block((
+                    ws(parse_prop_mather),
+                    opt(context(
+                        "SET ATTRIBUTES { ... }",
+                        ws(preceded(tag("SET ATTRIBUTES"), json_value_map)),
+                    )),
+                ))),
+                opt(ws(parse_with_metadata)),
+            ),
+            |(handle, (proposition, set_attributes), metadata)| PropositionBlock {
+                handle,
+                proposition,
+                set_attributes,
+                metadata,
+            },
         ),
-        |(handle, (proposition, set_attributes), metadata)| PropositionBlock {
-            handle,
-            proposition,
-            set_attributes,
-            metadata,
-        },
     )
     .parse(input)
 }
 
 // --- DELETE ---
 
-fn parse_delete_statement(input: &str) -> IResult<&str, DeleteStatement> {
+fn parse_delete_statement(input: &str) -> VResult<'_, DeleteStatement> {
     preceded(
         ws(tag("DELETE ")),
-        alt((
+        cut(alt((
             parse_delete_attributes,
             parse_delete_metadata,
             parse_delete_propositions,
             parse_delete_concept,
-        )),
+        ))),
     )
     .parse(input)
 }
 
-fn parse_delete_attributes(input: &str) -> IResult<&str, DeleteStatement> {
-    map(
-        preceded(
-            ws(tag("ATTRIBUTES")),
-            (
-                braced_block(separated_list1(ws(char(',')), quoted_string)),
-                preceded(ws(tag("FROM")), variable),
-                parse_where_block,
+fn parse_delete_attributes(input: &str) -> VResult<'_, DeleteStatement> {
+    context(
+        "DELETE ATTRIBUTES ...",
+        map(
+            preceded(
+                ws(tag("ATTRIBUTES")),
+                cut((
+                    braced_block(separated_list1(ws(char(',')), quoted_string)),
+                    preceded(ws(tag("FROM")), variable),
+                    parse_where_block,
+                )),
             ),
+            |(attributes, target, where_clauses)| DeleteStatement::DeleteAttributes {
+                attributes,
+                target,
+                where_clauses,
+            },
         ),
-        |(attributes, target, where_clauses)| DeleteStatement::DeleteAttributes {
-            attributes,
-            target,
-            where_clauses,
-        },
     )
     .parse(input)
 }
 
-fn parse_delete_metadata(input: &str) -> IResult<&str, DeleteStatement> {
-    map(
-        preceded(
-            ws(tag("METADATA")),
-            (
-                braced_block(separated_list1(ws(char(',')), quoted_string)),
-                preceded(ws(tag("FROM")), variable),
-                parse_where_block,
+fn parse_delete_metadata(input: &str) -> VResult<'_, DeleteStatement> {
+    context(
+        "DELETE METADATA ...",
+        map(
+            preceded(
+                ws(tag("METADATA")),
+                cut((
+                    braced_block(separated_list1(ws(char(',')), quoted_string)),
+                    preceded(ws(tag("FROM")), variable),
+                    parse_where_block,
+                )),
             ),
+            |(keys, target, where_clauses)| DeleteStatement::DeleteMetadata {
+                keys,
+                target,
+                where_clauses,
+            },
         ),
-        |(keys, target, where_clauses)| DeleteStatement::DeleteMetadata {
-            keys,
-            target,
-            where_clauses,
-        },
     )
     .parse(input)
 }
 
-fn parse_delete_propositions(input: &str) -> IResult<&str, DeleteStatement> {
-    map(
-        preceded(ws(tag("PROPOSITIONS")), (ws(variable), parse_where_block)),
-        |(target, where_clauses)| DeleteStatement::DeletePropositions {
-            target,
-            where_clauses,
-        },
+fn parse_delete_propositions(input: &str) -> VResult<'_, DeleteStatement> {
+    context(
+        "DELETE PROPOSITIONS ...",
+        map(
+            preceded(
+                ws(tag("PROPOSITIONS")),
+                cut((ws(variable), parse_where_block)),
+            ),
+            |(target, where_clauses)| DeleteStatement::DeletePropositions {
+                target,
+                where_clauses,
+            },
+        ),
     )
     .parse(input)
 }
 
-fn parse_delete_concept(input: &str) -> IResult<&str, DeleteStatement> {
-    map(
-        preceded(
-            ws(tag("CONCEPT")),
-            (terminated(variable, ws(tag("DETACH"))), parse_where_block),
+fn parse_delete_concept(input: &str) -> VResult<'_, DeleteStatement> {
+    context(
+        "DELETE CONCEPT ...",
+        map(
+            preceded(
+                ws(tag("CONCEPT")),
+                cut((terminated(variable, ws(tag("DETACH"))), parse_where_block)),
+            ),
+            |(target, where_clauses)| DeleteStatement::DeleteConcept {
+                target,
+                where_clauses,
+            },
         ),
-        |(target, where_clauses)| DeleteStatement::DeleteConcept {
-            target,
-            where_clauses,
-        },
     )
     .parse(input)
 }
