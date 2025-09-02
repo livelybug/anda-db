@@ -105,9 +105,9 @@ pub fn key_value_pair(input: &str) -> VResult<'_, KeyValue> {
 
 /// Parses a list of key-value pairs inside braces, like `{ key1: val1, key2: val2 }`.
 pub fn json_value_map(input: &str) -> VResult<'_, Map<String, Json>> {
-    context(
-        "KIP key-value map, like `{ key1: val1, key2: val2 }`",
-        map(
+    map(
+        context(
+            "KIP key-value map",
             delimited(
                 ws(char('{')),
                 opt(terminated(
@@ -116,8 +116,8 @@ pub fn json_value_map(input: &str) -> VResult<'_, Map<String, Json>> {
                 )),
                 ws(char('}')),
             ),
-            |opt_kvs| opt_kvs.unwrap_or_default().into_iter().collect(),
         ),
+        |opt_kvs| opt_kvs.unwrap_or_default().into_iter().collect(),
     )
     .parse(input)
 }
