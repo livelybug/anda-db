@@ -940,9 +940,13 @@ fn create_decryption_stream(
 
         while let Some(data) = stream.next().await {
             let data = data?;
+            if remaining == 0 {
+                // 已满足请求大小，提前结束
+                break;
+            }
             buf.extend_from_slice(&data);
 
-            while buf.len() >= chunk_size {
+            while remaining > 0 && buf.len() >= chunk_size {
                 let mut chunk = buf.drain(..chunk_size).collect::<Vec<u8>>();
 
                 let tag = aes_tags.get(idx).ok_or_else(|| Error::Generic {
@@ -961,19 +965,27 @@ fn create_decryption_stream(
                     store: "EncryptedStore",
                     source: format!("AES256 decrypt failed for path {location}: {err:?}").into(),
                 })?;
-
+                // 首块去掉起始偏移
                 if idx == start_idx && start_offset > 0 {
                     chunk.drain(..start_offset);
+                }
+
+                if chunk.len() > remaining {
+                    chunk.truncate(remaining);
                 }
 
                 remaining = remaining.saturating_sub(chunk.len());
                 yield Bytes::from(chunk);
 
                 idx += 1;
+                if remaining == 0 {
+                    // 已满足请求大小，提前结束
+                    return;
+                }
             }
         }
 
-        if !buf.is_empty() {
+        if remaining > 0 && !buf.is_empty() {
             let tag = aes_tags.get(idx).ok_or_else(|| Error::Generic {
                 store: "EncryptedStore",
                 source: format!("missing AES256 tag for chunk {idx} for path {location}").into(),
