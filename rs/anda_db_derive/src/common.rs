@@ -72,9 +72,9 @@ pub fn parse_field_type_str(type_str: &str) -> TokenStream {
         }
 
         // 添加对 Map<String, Type> 的支持
-        s if s.starts_with("Map<String, ") && s.ends_with(">") => {
-            let inner = &s[12..s.len() - 1];
-            let inner_type = parse_field_type_str(inner);
+        s if s.starts_with("Map<String,") && s.ends_with(">") => {
+            let inner = &s[11..s.len() - 1];
+            let inner_type = parse_field_type_str(inner.trim());
             quote! {
                 FieldType::Map(std::collections::BTreeMap::from([(
                     "*".into(),
@@ -83,9 +83,9 @@ pub fn parse_field_type_str(type_str: &str) -> TokenStream {
             }
         }
 
-        s if s.starts_with("Map<Bytes, ") && s.ends_with(">") => {
-            let inner = &s[12..s.len() - 1];
-            let inner_type = parse_field_type_str(inner);
+        s if s.starts_with("Map<Bytes,") && s.ends_with(">") => {
+            let inner = &s[10..s.len() - 1];
+            let inner_type = parse_field_type_str(inner.trim());
             quote! {
                 FieldType::Map(std::collections::BTreeMap::from([(
                     b"*".into(),

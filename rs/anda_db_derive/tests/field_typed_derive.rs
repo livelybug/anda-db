@@ -19,8 +19,10 @@ struct User {
     #[field_type = "Map<String, Json>"]
     attributes2: Map<String, Value>, // 会被正确映射为 Map 包含 Json
     metadata: Map<String, Json>, // 会被正确映射为 Map 包含 Json
-    optional_data: Option<HashMap<String, f64>>, // 会被正确映射为 Option<Map>
-    vector1: Vec<bf16>,          // 会被正确映射为 Vector
+
+    #[field_type = "Option<Map<Bytes, F64>>"]
+    optional_data: Option<HashMap<Xid, f64>>, // 会被正确映射为 Option<Map>
+    vector1: Vec<bf16>, // 会被正确映射为 Vector
 
     #[serde(rename = "b1")]
     blob1: ByteArray<64>, // 会被正确映射为 Bytes
@@ -85,7 +87,7 @@ fn field_typed_derive_works() {
                 (
                     "optional_data".into(),
                     FieldType::Option(Box::new(FieldType::Map(std::collections::BTreeMap::from(
-                        [("*".into(), FieldType::F64)]
+                        [(b"*".into(), FieldType::F64)]
                     ))))
                 ),
                 ("vector1".into(), FieldType::Vector),
