@@ -254,6 +254,10 @@ impl BTree {
         field_value: Fv,
         now_ms: u64,
     ) -> Result<bool, DBError> {
+        if field_value == Fv::Null {
+            return Ok(false);
+        }
+
         if let Fv::Array(vals) = field_value {
             return self.insert_array(doc_id, vals, now_ms).map(|n| n > 0);
         }
@@ -333,6 +337,10 @@ impl BTree {
     }
 
     pub fn remove(&self, doc_id: DocumentId, field_value: &Fv, now_ms: u64) -> bool {
+        if field_value == &Fv::Null {
+            return false;
+        }
+
         if let Fv::Array(vals) = field_value {
             return self
                 .remove_array(doc_id, vals, now_ms)
@@ -351,6 +359,34 @@ impl BTree {
             }
             _ => false,
         }
+    }
+
+    pub fn update(
+        &self,
+        doc_id: DocumentId,
+        old_value: &Fv,
+        new_value: &Fv,
+        now_ms: u64,
+    ) -> Result<bool, DBError> {
+        if old_value == &Fv::Null {
+            return self.insert(doc_id, new_value.clone(), now_ms);
+        }
+
+        if new_value == &Fv::Null {
+            return Ok(self.remove(doc_id, old_value, now_ms));
+        }
+
+        if let Fv::Array(new_value) = new_value
+            && let Fv::Array(old_value) = old_value
+        {
+            return self
+                .batch_update(doc_id, old_value, new_value, now_ms)
+                .map(|(r, i)| i > 0 || r > 0);
+        }
+
+        let rt1 = self.remove(doc_id, old_value, now_ms);
+        let rt2 = self.insert(doc_id, new_value.clone(), now_ms)?;
+        Ok(rt1 || rt2)
     }
 
     pub fn remove_array(
@@ -387,6 +423,69 @@ impl BTree {
                     .filter_map(|val| val.clone().try_into().ok())
                     .collect();
                 Ok(btree.index.remove_array(doc_id, values, now_ms))
+            }
+        }
+    }
+
+    pub fn batch_update(
+        &self,
+        doc_id: DocumentId,
+        old_field_values: &[Fv],
+        new_field_values: &[Fv],
+        now_ms: u64,
+    ) -> Result<(usize, usize), DBError> {
+        match &self {
+            BTree::I64(btree) => {
+                let old_field_values: Vec<i64> = old_field_values
+                    .iter()
+                    .filter_map(|val| val.try_into().ok())
+                    .collect();
+                let new_field_values: Vec<i64> = new_field_values
+                    .iter()
+                    .filter_map(|val| val.try_into().ok())
+                    .collect();
+                Ok(btree
+                    .index
+                    .batch_update(doc_id, old_field_values, new_field_values, now_ms)?)
+            }
+            BTree::U64(btree) => {
+                let old_field_values: Vec<u64> = old_field_values
+                    .iter()
+                    .filter_map(|val| val.try_into().ok())
+                    .collect();
+                let new_field_values: Vec<u64> = new_field_values
+                    .iter()
+                    .filter_map(|val| val.try_into().ok())
+                    .collect();
+                Ok(btree
+                    .index
+                    .batch_update(doc_id, old_field_values, new_field_values, now_ms)?)
+            }
+            BTree::String(btree) => {
+                let old_field_values: Vec<String> = old_field_values
+                    .iter()
+                    .filter_map(|val| val.clone().try_into().ok())
+                    .collect();
+                let new_field_values: Vec<String> = new_field_values
+                    .iter()
+                    .filter_map(|val| val.clone().try_into().ok())
+                    .collect();
+                Ok(btree
+                    .index
+                    .batch_update(doc_id, old_field_values, new_field_values, now_ms)?)
+            }
+            BTree::Bytes(btree) => {
+                let old_field_values: Vec<Vec<u8>> = old_field_values
+                    .iter()
+                    .filter_map(|val| val.clone().try_into().ok())
+                    .collect();
+                let new_field_values: Vec<Vec<u8>> = new_field_values
+                    .iter()
+                    .filter_map(|val| val.clone().try_into().ok())
+                    .collect();
+                Ok(btree
+                    .index
+                    .batch_update(doc_id, old_field_values, new_field_values, now_ms)?)
             }
         }
     }

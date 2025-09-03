@@ -1095,13 +1095,12 @@ impl Collection {
 
         // record the updated and removed indexes for rollback
         #[allow(clippy::mutable_key_type)]
-        let mut btree_inserted: FxHashMap<&BTree, Cow<FieldValue>> = FxHashMap::default();
+        let mut btree_updated: FxHashMap<&BTree, (Cow<FieldValue>, Cow<FieldValue>)> =
+            FxHashMap::default();
         #[allow(clippy::mutable_key_type)]
         let mut bm25_inserted: FxHashMap<&BM25, (u64, Cow<str>)> = FxHashMap::default();
         #[allow(clippy::mutable_key_type)]
         let mut hnsw_inserted: FxHashMap<&Hnsw, u64> = FxHashMap::default();
-        #[allow(clippy::mutable_key_type)]
-        let mut btree_removed: FxHashMap<&BTree, Cow<FieldValue>> = FxHashMap::default();
         #[allow(clippy::mutable_key_type)]
         let mut bm25_removed: FxHashMap<&BM25, (u64, Cow<str>)> = FxHashMap::default();
         #[allow(clippy::mutable_key_type)]
@@ -1112,18 +1111,23 @@ impl Collection {
             for index in &self.btree_indexes {
                 let fields = index.virtual_field();
                 if fields_keys.iter().any(|v| fields.contains(v)) {
-                    if let Some(fv) = self.index_hooks.btree_index_value(index, &old_doc)
-                        && fv.as_ref() != &FieldValue::Null
-                    {
-                        index.remove(id, &fv, now_ms);
-                        btree_removed.insert(index, fv);
-                    }
+                    let old_value = self
+                        .index_hooks
+                        .btree_index_value(index, &old_doc)
+                        .unwrap_or_else(|| Cow::Owned(FieldValue::Null));
+                    let new_value = self
+                        .index_hooks
+                        .btree_index_value(index, &doc)
+                        .unwrap_or_else(|| Cow::Owned(FieldValue::Null));
 
-                    if let Some(fv) = self.index_hooks.btree_index_value(index, &doc)
-                        && fv.as_ref() != &FieldValue::Null
-                    {
-                        index.insert(id, fv.clone().into_owned(), now_ms)?;
-                        btree_inserted.insert(index, fv);
+                    match index.update(id, &old_value, &new_value, now_ms) {
+                        Ok(_) => {
+                            btree_updated.insert(index, (old_value, new_value));
+                        }
+                        Err(err) => {
+                            let _ = index.update(id, &new_value, &old_value, now_ms);
+                            return Err(err);
+                        }
                     }
                 }
             }
@@ -1162,18 +1166,17 @@ impl Collection {
         })();
 
         let rollback_indexes = || {
-            for (k, v) in btree_inserted {
-                k.remove(id, &v, now_ms);
-            }
             for (k, v) in bm25_inserted {
                 k.remove(v.0, &v.1, now_ms);
             }
             for (k, v) in hnsw_inserted {
                 k.remove(v, now_ms);
             }
-            for (k, v) in btree_removed {
-                let _ = k.insert(id, v.into_owned(), now_ms);
+
+            for (k, v) in btree_updated {
+                let _ = k.update(id, &v.1, &v.0, now_ms);
             }
+
             for (k, v) in bm25_removed {
                 let _ = k.insert(v.0, &v.1, now_ms);
             }

@@ -916,6 +916,49 @@ where
         removed_count
     }
 
+    /// Batch updates the index for a document
+    ///
+    /// # Arguments
+    ///
+    /// * `doc_id` - doc ID
+    /// * `old_field_values` - old field values (without duplicates)
+    /// * `new_field_values` - new field values (without duplicates)
+    /// * `now_ms` - current timestamp (milliseconds)
+    ///
+    /// # Returns
+    /// * `Result<(usize, usize), BTreeError>` - (removed count, inserted count)
+    pub fn batch_update(
+        &self,
+        doc_id: PK,
+        old_field_values: Vec<FV>,
+        new_field_values: Vec<FV>,
+        now_ms: u64,
+    ) -> Result<(usize, usize), BTreeError> {
+        use rustc_hash::FxHashSet;
+
+        // 去重
+        let old_set: FxHashSet<_> = old_field_values.into_iter().collect();
+        let new_set: FxHashSet<_> = new_field_values.into_iter().collect();
+
+        // 需要插入的值 = 新集合 - 旧集合
+        let to_insert: Vec<_> = new_set.difference(&old_set).cloned().collect();
+        // 需要删除的值 = 旧集合 - 新集合
+        let to_remove: Vec<_> = old_set.difference(&new_set).cloned().collect();
+
+        let removed = if !to_remove.is_empty() {
+            self.remove_array(doc_id.clone(), to_remove, now_ms)
+        } else {
+            0
+        };
+        let inserted = if !to_insert.is_empty() {
+            self.insert_array(doc_id, to_insert, now_ms)?
+        } else {
+            0
+        };
+
+        Ok((removed, inserted))
+    }
+
     /// Queries the index for an exact key match
     ///
     /// # Arguments
@@ -2275,6 +2318,127 @@ mod tests {
             let result = overflow_index.query_with(value, |ids| Some(ids.clone()));
             assert!(result.is_none());
         }
+    }
+
+    #[test]
+    fn test_batch_update() {
+        let index = create_test_index();
+
+        // 初始插入 ["a", "b"]
+        let _ = index.insert_array(1, vec!["a".to_string(), "b".to_string()], now_ms());
+
+        // 1. 只增加新值
+        let (removed, inserted) = index
+            .batch_update(
+                1,
+                vec!["a".to_string(), "b".to_string()],
+                vec!["a".to_string(), "b".to_string(), "c".to_string()],
+                now_ms(),
+            )
+            .unwrap();
+        assert_eq!(removed, 0);
+        assert_eq!(inserted, 1);
+        let ids = index
+            .query_with(&"c".to_string(), |ids| Some(ids.clone()))
+            .unwrap();
+        assert!(ids.contains(&1));
+
+        // 2. 只减少旧值
+        let (removed, inserted) = index
+            .batch_update(
+                1,
+                vec!["a".to_string(), "b".to_string(), "c".to_string()],
+                vec!["a".to_string()],
+                now_ms(),
+            )
+            .unwrap();
+        assert_eq!(removed, 2);
+        assert_eq!(inserted, 0);
+        assert_eq!(
+            index
+                .query_with(&"a".to_string(), |ids| {
+                    println!("ids for 'a': {:?}", ids);
+                    Some(ids.clone())
+                })
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            index
+                .query_with(&"c".to_string(), |ids| Some(ids.clone()))
+                .is_none()
+        );
+
+        // 3. 增减混合
+        let (removed, inserted) = index
+            .batch_update(
+                1,
+                vec!["a".to_string()],
+                vec!["b".to_string(), "c".to_string()],
+                now_ms(),
+            )
+            .unwrap();
+        assert_eq!(removed, 1);
+        assert_eq!(inserted, 2);
+        let ids_b = index
+            .query_with(&"b".to_string(), |ids| Some(ids.clone()))
+            .unwrap();
+        let ids_c = index
+            .query_with(&"c".to_string(), |ids| Some(ids.clone()))
+            .unwrap();
+        assert!(ids_b.contains(&1));
+        assert!(ids_c.contains(&1));
+        assert!(
+            index
+                .query_with(&"a".to_string(), |ids| Some(ids.clone()))
+                .unwrap_or_default()
+                .is_empty()
+        );
+
+        // 4. 完全替换
+        let (removed, inserted) = index
+            .batch_update(
+                1,
+                vec!["b".to_string(), "c".to_string()],
+                vec!["x".to_string(), "y".to_string()],
+                now_ms(),
+            )
+            .unwrap();
+        assert_eq!(removed, 2);
+        assert_eq!(inserted, 2);
+        let ids_x = index
+            .query_with(&"x".to_string(), |ids| Some(ids.clone()))
+            .unwrap();
+        let ids_y = index
+            .query_with(&"y".to_string(), |ids| Some(ids.clone()))
+            .unwrap();
+        assert!(ids_x.contains(&1));
+        assert!(ids_y.contains(&1));
+        assert!(
+            index
+                .query_with(&"b".to_string(), |ids| Some(ids.clone()))
+                .unwrap_or_default()
+                .is_empty()
+        );
+        assert!(
+            index
+                .query_with(&"c".to_string(), |ids| Some(ids.clone()))
+                .unwrap_or_default()
+                .is_empty()
+        );
+
+        // 5. 新旧完全相同，无变化
+        let (removed, inserted) = index
+            .batch_update(
+                1,
+                vec!["x".to_string(), "y".to_string()],
+                vec!["x".to_string(), "y".to_string()],
+                now_ms(),
+            )
+            .unwrap();
+        assert_eq!(removed, 0);
+        assert_eq!(inserted, 0);
     }
 
     #[tokio::test(flavor = "multi_thread")]
