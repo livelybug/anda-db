@@ -1,8 +1,8 @@
-use ic_auth_types::{ByteArrayB64, ByteBufB64};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AndaDBSchema, FieldEntry, FieldKey, FieldType, FieldTyped, Json, Map, Schema, SchemaError,
+    AndaDBSchema, ByteArrayB64, ByteBufB64, FieldEntry, FieldKey, FieldType, FieldTyped, Json, Map,
+    Schema, SchemaError,
 };
 
 /// Represents a resource for AI Agents.

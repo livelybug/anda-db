@@ -7,8 +7,8 @@
 //!
 //! All data is serialized into CBOR format for storage to improve storage efficiency and cross-platform compatibility.
 //!
+use base64::{Engine, prelude::BASE64_URL_SAFE};
 use ciborium::Value;
-use ic_auth_types::ByteBufB64;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
@@ -22,6 +22,8 @@ pub use serde_json::Map;
 
 /// Re-export bf16 from half crate
 pub use half::bf16;
+
+pub use ic_auth_types::{ByteArrayB64, ByteBufB64};
 
 /// Type alias for Vec<bf16>
 pub type Vector = Vec<bf16>;
@@ -234,7 +236,7 @@ impl FieldType {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum FieldKey {
     Text(String),
-    Bytes(ByteBufB64),
+    Bytes(Vec<u8>),
 }
 
 pub static TEXT_WILDCARD_KEY: std::sync::LazyLock<FieldKey> =
@@ -244,10 +246,17 @@ pub static BYTES_WILDCARD_KEY: std::sync::LazyLock<FieldKey> =
     std::sync::LazyLock::new(|| b"*".into());
 
 impl FieldKey {
+    pub fn field_type(&self) -> FieldType {
+        match self {
+            FieldKey::Text(_) => FieldType::Text,
+            FieldKey::Bytes(_) => FieldType::Bytes,
+        }
+    }
+
     pub fn as_bytes(&self) -> &[u8] {
         match self {
             FieldKey::Text(s) => s.as_bytes(),
-            FieldKey::Bytes(b) => &b,
+            FieldKey::Bytes(b) => b,
         }
     }
 }
@@ -266,25 +275,25 @@ impl From<&str> for FieldKey {
 
 impl From<Vec<u8>> for FieldKey {
     fn from(b: Vec<u8>) -> Self {
-        FieldKey::Bytes(ByteBufB64(b))
+        FieldKey::Bytes(b)
     }
 }
 
 impl<const N: usize> From<[u8; N]> for FieldKey {
     fn from(b: [u8; N]) -> Self {
-        FieldKey::Bytes(ByteBufB64(b.to_vec()))
+        FieldKey::Bytes(b.into())
     }
 }
 
 impl From<&[u8]> for FieldKey {
     fn from(b: &[u8]) -> Self {
-        FieldKey::Bytes(ByteBufB64(b.to_vec()))
+        FieldKey::Bytes(b.to_vec())
     }
 }
 
 impl<const N: usize> From<&[u8; N]> for FieldKey {
     fn from(b: &[u8; N]) -> Self {
-        FieldKey::Bytes(ByteBufB64(b.to_vec()))
+        FieldKey::Bytes(b.to_vec())
     }
 }
 
@@ -294,7 +303,7 @@ impl TryFrom<Value> for FieldKey {
     fn try_from(value: Value) -> Result<Self, Self::Error> {
         match value {
             Value::Text(s) => Ok(FieldKey::Text(s)),
-            Value::Bytes(b) => Ok(FieldKey::Bytes(b.into())),
+            Value::Bytes(b) => Ok(FieldKey::Bytes(b)),
             _ => Err(
                 SchemaError::FieldValue(format!("expected Text or Bytes, got {value:?}")).into(),
             ),
@@ -306,7 +315,7 @@ impl std::fmt::Display for FieldKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             FieldKey::Text(s) => write!(f, "{s}"),
-            FieldKey::Bytes(b) => write!(f, "{b}"),
+            FieldKey::Bytes(b) => write!(f, "{}", BASE64_URL_SAFE.encode(b)),
         }
     }
 }
@@ -375,7 +384,7 @@ impl From<FieldValue> for Cbor {
                         (
                             match k {
                                 FieldKey::Text(s) => Cbor::Text(s),
-                                FieldKey::Bytes(b) => Cbor::Bytes(b.0),
+                                FieldKey::Bytes(b) => Cbor::Bytes(b),
                             },
                             Cbor::from(v),
                         )
@@ -493,6 +502,15 @@ where
 impl From<serde_json::Map<String, Json>> for FieldValue {
     fn from(obj: serde_json::Map<String, Json>) -> Self {
         FieldValue::Map(obj.into_iter().map(|(k, v)| (k.into(), v.into())).collect())
+    }
+}
+
+impl From<FieldKey> for FieldValue {
+    fn from(key: FieldKey) -> Self {
+        match key {
+            FieldKey::Text(s) => FieldValue::Text(s),
+            FieldKey::Bytes(b) => FieldValue::Bytes(b),
+        }
     }
 }
 
@@ -1085,7 +1103,7 @@ impl FieldValue {
                             .map(|(k, v)| {
                                 let key = match k {
                                     Cbor::Text(s) => FieldKey::Text(s),
-                                    Cbor::Bytes(b) => FieldKey::Bytes(b.into()),
+                                    Cbor::Bytes(b) => FieldKey::Bytes(b),
                                     _ => {
                                         return Err(SchemaError::FieldValue(format!(
                                             "invalid map key: {k:?}"
@@ -1429,7 +1447,7 @@ mod tests {
         assert_eq!(val, val2);
 
         let val = FieldValue::Map(BTreeMap::from([(
-            FieldKey::Bytes(b"*".to_vec().into()),
+            FieldKey::Bytes(b"*".to_vec()),
             FieldValue::Bytes(b"*".to_vec()),
         )]));
         let data = cbor_into_vec(&Value::Map(vec![(
@@ -1440,6 +1458,11 @@ mod tests {
         // println!("data: {:?}", hex::encode(&data));
         assert_eq!(cbor_into_vec(&val).unwrap(), data);
         let val2: FieldValue = from_reader(data.as_slice()).unwrap();
+        assert_eq!(val, val2);
+        let data = serde_json::to_string(&val).unwrap();
+        println!("json: {}", data);
+        assert_eq!(data, r#"{"Kg==":"Kg=="}"#);
+        let val2: FieldValue = serde_json::from_str(&data).unwrap();
         assert_eq!(val, val2);
     }
 

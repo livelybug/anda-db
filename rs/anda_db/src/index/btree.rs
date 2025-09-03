@@ -117,10 +117,30 @@ impl BTree {
                 Ft::Array(v) if v.len() == 1 => {
                     BTree::inner_new(vec![field_name], &v[0], config, storage, now_ms).await
                 }
+                Ft::Map(v) if v.len() == 1 => {
+                    BTree::inner_new(
+                        vec![field_name],
+                        &v.keys().next().unwrap().field_type(),
+                        config,
+                        storage,
+                        now_ms,
+                    )
+                    .await
+                }
                 v => BTree::inner_new(vec![field_name], v, config, storage, now_ms).await,
             },
             Ft::Array(v) if v.len() == 1 => {
                 BTree::inner_new(vec![field_name], &v[0], config, storage, now_ms).await
+            }
+            Ft::Map(v) if v.len() == 1 => {
+                BTree::inner_new(
+                    vec![field_name],
+                    &v.keys().next().unwrap().field_type(),
+                    config,
+                    storage,
+                    now_ms,
+                )
+                .await
             }
             v => BTree::inner_new(vec![field_name], v, config, storage, now_ms).await,
         }
@@ -251,33 +271,43 @@ impl BTree {
     pub fn insert(
         &self,
         doc_id: DocumentId,
-        field_value: Fv,
+        field_value: &Fv,
         now_ms: u64,
     ) -> Result<bool, DBError> {
-        if field_value == Fv::Null {
+        if field_value == &Fv::Null {
             return Ok(false);
         }
 
         if let Fv::Array(vals) = field_value {
-            return self.insert_array(doc_id, vals, now_ms).map(|n| n > 0);
+            return self
+                .insert_array(doc_id, vals.clone(), now_ms)
+                .map(|n| n > 0);
+        } else if let Fv::Map(vals) = field_value {
+            return self
+                .insert_array(
+                    doc_id,
+                    vals.keys().map(|k| Fv::from(k.clone())).collect(),
+                    now_ms,
+                )
+                .map(|n| n > 0);
         }
 
         match (&self, field_value) {
             (BTree::I64(btree), Fv::I64(val)) => btree
                 .index
-                .insert(doc_id, val, now_ms)
+                .insert(doc_id, *val, now_ms)
                 .map_err(DBError::from),
             (BTree::U64(btree), Fv::U64(val)) => btree
                 .index
-                .insert(doc_id, val, now_ms)
+                .insert(doc_id, *val, now_ms)
                 .map_err(DBError::from),
             (BTree::String(btree), Fv::Text(val)) => btree
                 .index
-                .insert(doc_id, val, now_ms)
+                .insert(doc_id, val.clone(), now_ms)
                 .map_err(DBError::from),
             (BTree::Bytes(btree), Fv::Bytes(val)) => btree
                 .index
-                .insert(doc_id, val, now_ms)
+                .insert(doc_id, val.clone(), now_ms)
                 .map_err(DBError::from),
             (_, v) => Err(DBError::Index {
                 name: self.name().to_string(),
@@ -286,7 +316,7 @@ impl BTree {
         }
     }
 
-    pub fn insert_array(
+    fn insert_array(
         &self,
         doc_id: DocumentId,
         field_values: Vec<Fv>,
@@ -343,7 +373,16 @@ impl BTree {
 
         if let Fv::Array(vals) = field_value {
             return self
-                .remove_array(doc_id, vals, now_ms)
+                .remove_array(doc_id, vals.clone(), now_ms)
+                .map(|n| n > 0)
+                .unwrap_or_default();
+        } else if let Fv::Map(vals) = field_value {
+            return self
+                .remove_array(
+                    doc_id,
+                    vals.keys().map(|k| Fv::from(k.clone())).collect(),
+                    now_ms,
+                )
                 .map(|n| n > 0)
                 .unwrap_or_default();
         }
@@ -369,7 +408,7 @@ impl BTree {
         now_ms: u64,
     ) -> Result<bool, DBError> {
         if old_value == &Fv::Null {
-            return self.insert(doc_id, new_value.clone(), now_ms);
+            return self.insert(doc_id, new_value, now_ms);
         }
 
         if new_value == &Fv::Null {
@@ -382,45 +421,62 @@ impl BTree {
             return self
                 .batch_update(doc_id, old_value, new_value, now_ms)
                 .map(|(r, i)| i > 0 || r > 0);
+        } else if let Fv::Map(new_value) = new_value
+            && let Fv::Map(old_value) = old_value
+        {
+            return self
+                .batch_update(
+                    doc_id,
+                    &old_value
+                        .keys()
+                        .map(|k| Fv::from(k.clone()))
+                        .collect::<Vec<_>>(),
+                    &new_value
+                        .keys()
+                        .map(|k| Fv::from(k.clone()))
+                        .collect::<Vec<_>>(),
+                    now_ms,
+                )
+                .map(|(r, i)| i > 0 || r > 0);
         }
 
         let rt1 = self.remove(doc_id, old_value, now_ms);
-        let rt2 = self.insert(doc_id, new_value.clone(), now_ms)?;
+        let rt2 = self.insert(doc_id, new_value, now_ms)?;
         Ok(rt1 || rt2)
     }
 
-    pub fn remove_array(
+    fn remove_array(
         &self,
         doc_id: DocumentId,
-        field_values: &[Fv],
+        field_values: Vec<Fv>,
         now_ms: u64,
     ) -> Result<usize, DBError> {
         match &self {
             BTree::I64(btree) => {
                 let values: Vec<i64> = field_values
-                    .iter()
+                    .into_iter()
                     .filter_map(|val| val.try_into().ok())
                     .collect();
                 Ok(btree.index.remove_array(doc_id, values, now_ms))
             }
             BTree::U64(btree) => {
                 let values: Vec<u64> = field_values
-                    .iter()
+                    .into_iter()
                     .filter_map(|val| val.try_into().ok())
                     .collect();
                 Ok(btree.index.remove_array(doc_id, values, now_ms))
             }
             BTree::String(btree) => {
                 let values: Vec<String> = field_values
-                    .iter()
-                    .filter_map(|val| val.clone().try_into().ok())
+                    .into_iter()
+                    .filter_map(|val| val.try_into().ok())
                     .collect();
                 Ok(btree.index.remove_array(doc_id, values, now_ms))
             }
             BTree::Bytes(btree) => {
                 let values: Vec<Vec<u8>> = field_values
-                    .iter()
-                    .filter_map(|val| val.clone().try_into().ok())
+                    .into_iter()
+                    .filter_map(|val| val.try_into().ok())
                     .collect();
                 Ok(btree.index.remove_array(doc_id, values, now_ms))
             }

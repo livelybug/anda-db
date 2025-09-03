@@ -12,7 +12,13 @@ impl Serialize for FieldKey {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self {
             FieldKey::Text(x) => serializer.serialize_str(x),
-            FieldKey::Bytes(x) => x.serialize(serializer),
+            FieldKey::Bytes(x) => {
+                if serializer.is_human_readable() {
+                    BASE64_URL_SAFE.encode(x).serialize(serializer)
+                } else {
+                    serializer.serialize_bytes(x)
+                }
+            }
         }
     }
 }
@@ -27,7 +33,7 @@ impl<'de> de::Deserialize<'de> for FieldKey {
             && let FieldKey::Text(x) = &val
             && let Ok(decoded) = BASE64_URL_SAFE.decode(x)
         {
-            return Ok(FieldKey::Bytes(decoded.into()));
+            return Ok(FieldKey::Bytes(decoded));
         }
         Ok(val)
     }
@@ -119,17 +125,17 @@ impl<'de> de::Visitor<'de> for KeyVisitor {
 
     #[inline]
     fn visit_bytes<E: de::Error>(self, v: &[u8]) -> Result<Self::Value, E> {
-        Ok(FieldKey::Bytes(v.to_vec().into()))
+        Ok(FieldKey::Bytes(v.to_vec()))
     }
 
     #[inline]
     fn visit_borrowed_bytes<E: de::Error>(self, v: &'de [u8]) -> Result<Self::Value, E> {
-        Ok(FieldKey::Bytes(v.to_vec().into()))
+        Ok(FieldKey::Bytes(v.to_vec()))
     }
 
     #[inline]
     fn visit_byte_buf<E: de::Error>(self, v: Vec<u8>) -> Result<Self::Value, E> {
-        Ok(FieldKey::Bytes(v.into()))
+        Ok(FieldKey::Bytes(v))
     }
 
     #[inline]
@@ -140,7 +146,7 @@ impl<'de> de::Visitor<'de> for KeyVisitor {
             seq.push(elem);
         }
 
-        Ok(FieldKey::Bytes(seq.into()))
+        Ok(FieldKey::Bytes(seq))
     }
 }
 

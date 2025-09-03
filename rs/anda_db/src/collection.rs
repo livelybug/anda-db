@@ -394,7 +394,7 @@ impl Collection {
                                 continue;
                             }
                             // ignore errors
-                            let _ = index.insert(id, fv.into_owned(), now_ms);
+                            let _ = index.insert(id, &fv, now_ms);
                         }
                     }
 
@@ -955,7 +955,7 @@ impl Collection {
                     }
 
                     btree_inserted.insert(index, fv.clone());
-                    index.insert(id, fv.into_owned(), now_ms)?;
+                    index.insert(id, &fv, now_ms)?;
                 }
             }
 
@@ -1114,11 +1114,11 @@ impl Collection {
                     let old_value = self
                         .index_hooks
                         .btree_index_value(index, &old_doc)
-                        .unwrap_or_else(|| Cow::Owned(FieldValue::Null));
+                        .unwrap_or(Cow::Owned(FieldValue::Null));
                     let new_value = self
                         .index_hooks
                         .btree_index_value(index, &doc)
-                        .unwrap_or_else(|| Cow::Owned(FieldValue::Null));
+                        .unwrap_or(Cow::Owned(FieldValue::Null));
 
                     match index.update(id, &old_value, &new_value, now_ms) {
                         Ok(_) => {
@@ -1814,6 +1814,7 @@ mod tests {
         schema::{AndaDBSchema, Document, Fv, Json, Schema, Vector},
         storage::StorageConfig,
     };
+    use ic_auth_types::ByteArrayB64;
     use object_store::memory::InMemory;
     use serde::{Deserialize, Serialize};
     use std::{collections::BTreeMap, sync::Arc};
@@ -1826,6 +1827,8 @@ mod tests {
         pub age: u32,
         pub tags: Vec<String>,
         pub metadata: BTreeMap<String, Json>,
+
+        pub data: BTreeMap<ByteArrayB64<4>, u64>,
         pub vector: Vector,
     }
 
@@ -1874,6 +1877,7 @@ mod tests {
             age,
             tags: tags.iter().map(|s| s.to_string()).collect(),
             metadata: BTreeMap::new(),
+            data: BTreeMap::new(),
             vector: vec![0.1f32, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
                 .into_iter()
                 .map(bf16::from_f32)
@@ -2127,6 +2131,286 @@ mod tests {
 
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].name, "Bob");
+
+        db.close().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_array_btree_index_update_behavior() -> Result<(), DBError> {
+        let db = setup_test_db().await?;
+        let collection = create_test_collection(&db, async |collection| {
+            collection.create_btree_index_nx(&["tags"]).await?;
+            Ok(())
+        })
+        .await?;
+
+        // 添加一个包含 ["a", "b"] 标签的文档
+        let doc = create_test_doc(0, "Eve", 22, vec!["a", "b"]);
+        let id = collection.add_from(&doc).await?;
+
+        // 刷新确保建立索引
+        collection.flush(unix_ms()).await?;
+
+        // 查询 tags == "a" 应命中
+        let result: Vec<TestDoc> = collection
+            .search_as(Query {
+                filter: Some(Filter::Field((
+                    "tags".to_string(),
+                    RangeQuery::Eq(Fv::Text("a".to_string())),
+                ))),
+                ..Default::default()
+            })
+            .await?;
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "Eve");
+
+        // 更新 tags 为 ["b", "c"]，应移除 "a"，新增 "c"
+        let mut fields = BTreeMap::new();
+        fields.insert(
+            "tags".to_string(),
+            Fv::Array(vec![Fv::Text("b".to_string()), Fv::Text("c".to_string())]),
+        );
+        collection.update(id, fields).await?;
+        collection.flush(unix_ms()).await?;
+
+        // 查询 tags == "a" 应不命中
+        let result: Vec<TestDoc> = collection
+            .search_as(Query {
+                filter: Some(Filter::Field((
+                    "tags".to_string(),
+                    RangeQuery::Eq(Fv::Text("a".to_string())),
+                ))),
+                ..Default::default()
+            })
+            .await?;
+        assert_eq!(result.len(), 0);
+
+        // 查询 tags == "c" 应命中
+        let result: Vec<TestDoc> = collection
+            .search_as(Query {
+                filter: Some(Filter::Field((
+                    "tags".to_string(),
+                    RangeQuery::Eq(Fv::Text("c".to_string())),
+                ))),
+                ..Default::default()
+            })
+            .await?;
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "Eve");
+
+        // 验证 BTree 索引的 keys: 不应包含 "a"，应包含 "b" 和 "c"
+        let idx = collection.get_btree_index(&["tags"])?;
+        let keys = idx.keys(None, None);
+        let keys_text: Vec<String> = keys
+            .into_iter()
+            .filter_map(|fv| match fv {
+                Fv::Text(s) => Some(s),
+                _ => None,
+            })
+            .collect();
+        assert!(!keys_text.contains(&"a".to_string()));
+        assert!(keys_text.contains(&"b".to_string()));
+        assert!(keys_text.contains(&"c".to_string()));
+
+        db.close().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_map_btree_index_update_behavior() -> Result<(), DBError> {
+        let db = setup_test_db().await?;
+        let collection = create_test_collection(&db, async |collection| {
+            collection.create_btree_index_nx(&["metadata"]).await?;
+            collection.create_btree_index_nx(&["data"]).await?;
+            Ok(())
+        })
+        .await?;
+
+        let mut doc = create_test_doc(0, "Eve", 22, vec![]);
+        doc.metadata.insert("key1".to_string(), "a".into());
+        doc.metadata.insert("key2".to_string(), "b".into());
+        doc.data.insert([0, 0, 0, 1].into(), 1);
+        let id = collection.add_from(&doc).await?;
+
+        // 刷新确保建立索引
+        collection.flush(unix_ms()).await?;
+
+        // 查询 metadata.key == "key1" 应命中
+        let result: Vec<TestDoc> = collection
+            .search_as(Query {
+                filter: Some(Filter::Field((
+                    "metadata".to_string(),
+                    RangeQuery::Eq(Fv::Text("key1".to_string())),
+                ))),
+                ..Default::default()
+            })
+            .await?;
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "Eve");
+        let result: Vec<TestDoc> = collection
+            .search_as(Query {
+                filter: Some(Filter::Field((
+                    "data".to_string(),
+                    RangeQuery::Eq(Fv::Bytes([0, 0, 0, 1].into())),
+                ))),
+                ..Default::default()
+            })
+            .await?;
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "Eve");
+
+        println!("Initial search tests passed.");
+
+        let mut fields = BTreeMap::new();
+        fields.insert(
+            "metadata".to_string(),
+            Fv::Map(BTreeMap::from([
+                ("key2".into(), Fv::Text("b".to_string())),
+                ("key3".into(), Fv::Text("c".to_string())),
+            ])),
+        );
+        fields.insert(
+            "data".to_string(),
+            Fv::Map(BTreeMap::from([
+                ([0, 0, 0, 2].into(), Fv::U64(2)),
+                ([0, 0, 0, 3].into(), Fv::U64(3)),
+            ])),
+        );
+        collection.update(id, fields).await?;
+        collection.flush(unix_ms()).await?;
+
+        // 查询 metadata.key == "key1" 应不命中
+        let result: Vec<TestDoc> = collection
+            .search_as(Query {
+                filter: Some(Filter::Field((
+                    "metadata".to_string(),
+                    RangeQuery::Eq(Fv::Text("key1".to_string())),
+                ))),
+                ..Default::default()
+            })
+            .await?;
+        assert_eq!(result.len(), 0);
+        let result: Vec<TestDoc> = collection
+            .search_as(Query {
+                filter: Some(Filter::Field((
+                    "data".to_string(),
+                    RangeQuery::Eq(Fv::Bytes([0, 0, 0, 1].into())),
+                ))),
+                ..Default::default()
+            })
+            .await?;
+        assert_eq!(result.len(), 0);
+
+        // 查询 metadata.key == "key2" 应命中
+        let result: Vec<TestDoc> = collection
+            .search_as(Query {
+                filter: Some(Filter::Field((
+                    "metadata".to_string(),
+                    RangeQuery::Eq(Fv::Text("key2".to_string())),
+                ))),
+                ..Default::default()
+            })
+            .await?;
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "Eve");
+        let result: Vec<TestDoc> = collection
+            .search_as(Query {
+                filter: Some(Filter::Field((
+                    "data".to_string(),
+                    RangeQuery::Eq(Fv::Bytes([0, 0, 0, 3].into())),
+                ))),
+                ..Default::default()
+            })
+            .await?;
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "Eve");
+
+        let idx = collection.get_btree_index(&["metadata"])?;
+        let keys = idx.keys(None, None);
+        let keys_text: Vec<String> = keys
+            .into_iter()
+            .filter_map(|fv| match fv {
+                Fv::Text(s) => Some(s),
+                _ => None,
+            })
+            .collect();
+        assert!(!keys_text.contains(&"key1".to_string()));
+        assert!(keys_text.contains(&"key2".to_string()));
+        assert!(keys_text.contains(&"key3".to_string()));
+
+        let idx = collection.get_btree_index(&["data"])?;
+        let keys = idx.keys(None, None);
+        let keys_values: Vec<Vec<u8>> = keys
+            .into_iter()
+            .filter_map(|fv| match fv {
+                Fv::Bytes(b) => Some(b),
+                _ => None,
+            })
+            .collect();
+        assert!(!keys_values.contains(&[0, 0, 0, 1].to_vec()));
+        assert!(keys_values.contains(&[0, 0, 0, 2].to_vec()));
+        assert!(keys_values.contains(&[0, 0, 0, 3].to_vec()));
+
+        db.close().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_compound_btree_index_query() -> Result<(), DBError> {
+        let db = setup_test_db().await?;
+        let collection = create_test_collection(&db, async |collection| {
+            collection.create_btree_index_nx(&["name", "age"]).await?;
+            Ok(())
+        })
+        .await?;
+
+        // 添加三条数据
+        for (name, age) in [("Alice", 30), ("Alice", 31), ("Bob", 25)] {
+            let doc = create_test_doc(0, name, age as u32, vec!["x"]);
+            collection.add_from(&doc).await?;
+        }
+
+        collection.flush(unix_ms()).await?;
+
+        // 通过虚拟字段值（name-age）做 Eq 查询
+        let bytes = crate::index::virtual_field_value(&[
+            Some(&Fv::Text("Alice".to_string())),
+            Some(&Fv::U64(30)),
+        ])
+        .expect("virtual_field_value should produce bytes for composite fields");
+
+        let result: Vec<TestDoc> = collection
+            .search_as(Query {
+                filter: Some(Filter::Field((
+                    "name-age".to_string(),
+                    RangeQuery::Eq(bytes),
+                ))),
+                ..Default::default()
+            })
+            .await?;
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "Alice");
+        assert_eq!(result[0].age, 30);
+
+        // 错误的组合应不命中
+        let invalid = crate::index::virtual_field_value(&[
+            Some(&Fv::Text("Alice".to_string())),
+            Some(&Fv::U64(32)),
+        ])
+        .unwrap();
+
+        let result_none: Vec<TestDoc> = collection
+            .search_as(Query {
+                filter: Some(Filter::Field((
+                    "name-age".to_string(),
+                    RangeQuery::Eq(invalid),
+                ))),
+                ..Default::default()
+            })
+            .await?;
+        assert!(result_none.is_empty());
 
         db.close().await?;
         Ok(())

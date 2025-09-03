@@ -1,5 +1,4 @@
 use futures::future::join_all;
-use ic_auth_types::ByteBufB64;
 use object_store::ObjectStore;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
