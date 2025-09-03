@@ -1,5 +1,5 @@
 use anda_db_derive::AndaDBSchema;
-use anda_db_schema::{FieldEntry, FieldType, Json, Schema, SchemaError};
+use anda_db_schema::{FieldEntry, FieldKey, FieldType, Json, Schema, SchemaError};
 use serde::{Deserialize, Serialize};
 use serde_json::Map;
 use std::collections::BTreeMap;
@@ -111,6 +111,7 @@ struct TestConstraints {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anda_db_schema::TEXT_WILDCARD_KEY;
 
     #[test]
     fn test_generated_schema() {
@@ -160,7 +161,7 @@ mod tests {
         if let FieldType::Option(inner) = meta_field.r#type() {
             if let FieldType::Map(map_types) = inner.as_ref() {
                 assert_eq!(map_types.len(), 1);
-                assert_eq!(map_types.get("*"), Some(&FieldType::U64));
+                assert_eq!(map_types.get(&TEXT_WILDCARD_KEY), Some(&FieldType::U64));
             } else {
                 panic!("Expected Map");
             }
@@ -277,28 +278,28 @@ mod tests {
         // 验证 Map 类型
         let string_map_field = schema.get_field("string_map").unwrap();
         if let FieldType::Map(map_types) = string_map_field.r#type() {
-            assert_eq!(map_types.get("*"), Some(&FieldType::Text));
+            assert_eq!(map_types.get(&TEXT_WILDCARD_KEY), Some(&FieldType::Text));
         } else {
             panic!("Expected Map<String, String>");
         }
 
         let number_map_field = schema.get_field("number_map").unwrap();
         if let FieldType::Map(map_types) = number_map_field.r#type() {
-            assert_eq!(map_types.get("*"), Some(&FieldType::I64));
+            assert_eq!(map_types.get(&TEXT_WILDCARD_KEY), Some(&FieldType::I64));
         } else {
             panic!("Expected Map<String, I64>");
         }
 
         let json_map_field = schema.get_field("json_map").unwrap();
         if let FieldType::Map(map_types) = json_map_field.r#type() {
-            assert_eq!(map_types.get("*"), Some(&FieldType::Json));
+            assert_eq!(map_types.get(&TEXT_WILDCARD_KEY), Some(&FieldType::Json));
         } else {
             panic!("Expected Map<String, Json>");
         }
 
         let json_map2_field = schema.get_field("json_map2").unwrap();
         if let FieldType::Map(map_types) = json_map2_field.r#type() {
-            assert_eq!(map_types.get("*"), Some(&FieldType::Json));
+            assert_eq!(map_types.get(&TEXT_WILDCARD_KEY), Some(&FieldType::Json));
         } else {
             panic!("Expected Map<String, serde_json::Value>");
         }

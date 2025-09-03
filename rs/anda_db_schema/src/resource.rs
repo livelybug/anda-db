@@ -1,7 +1,9 @@
 use ic_auth_types::{ByteArrayB64, ByteBufB64};
 use serde::{Deserialize, Serialize};
 
-use crate::{AndaDBSchema, FieldEntry, FieldType, FieldTyped, Json, Map, Schema, SchemaError};
+use crate::{
+    AndaDBSchema, FieldEntry, FieldKey, FieldType, FieldTyped, Json, Map, Schema, SchemaError,
+};
 
 /// Represents a resource for AI Agents.
 /// It can be a file, a URL, or any other type of resource.

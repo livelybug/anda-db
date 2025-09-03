@@ -174,9 +174,9 @@ mod tests {
     fn test_virtual_searchable_text_with_map() {
         // 测试包含 Map 的字段
         let mut map = BTreeMap::new();
-        map.insert("key1".to_string(), Fv::Text("value1".to_string()));
-        map.insert("key2".to_string(), Fv::Text("value2".to_string()));
-        map.insert("key3".to_string(), Fv::I64(456)); // 非文本类型应该被忽略
+        map.insert("key1".into(), Fv::Text("value1".to_string()));
+        map.insert("key2".into(), Fv::Text("value2".to_string()));
+        map.insert("key3".into(), Fv::I64(456)); // 非文本类型应该被忽略
 
         let map_val = Fv::Map(map);
         let result = virtual_searchable_text(&[Some(&map_val)]);

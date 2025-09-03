@@ -322,7 +322,7 @@ impl Serialize for Document {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AndaDBSchema, FieldEntry, FieldType, Fv, Resource};
+    use crate::{AndaDBSchema, FieldEntry, FieldKey, FieldType, Fv, Resource};
     use serde::{Deserialize, Serialize};
     use std::collections::BTreeMap;
 
@@ -478,8 +478,8 @@ mod tests {
         // 检查映射字段
         if let Fv::Map(meta) = doc.get_field("meta").unwrap() {
             assert_eq!(meta.len(), 2);
-            assert_eq!(meta.get("created").unwrap(), &Fv::U64(1625097600));
-            assert_eq!(meta.get("updated").unwrap(), &Fv::U64(1625097600));
+            assert_eq!(meta.get(&"created".into()).unwrap(), &Fv::U64(1625097600));
+            assert_eq!(meta.get(&"updated".into()).unwrap(), &Fv::U64(1625097600));
         } else {
             panic!("Expected Map field");
         }

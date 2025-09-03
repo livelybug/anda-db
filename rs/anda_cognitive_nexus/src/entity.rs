@@ -19,7 +19,8 @@
 //!
 
 use anda_db_schema::{
-    AndaDBSchema, FieldEntry, FieldType, FieldTyped, FieldValue, Json, Map, Schema, SchemaError,
+    AndaDBSchema, FieldEntry, FieldKey, FieldType, FieldTyped, FieldValue, Json, Map, Schema,
+    SchemaError,
 };
 use anda_kip::{ConceptNode, ConceptNodeRef, EntityRef, PropositionLinkRef};
 use serde::{Deserialize, Serialize};
@@ -291,8 +292,8 @@ impl From<Properties> for FieldValue {
     /// Converts Properties into a FieldValue for database storage.
     fn from(value: Properties) -> Self {
         FieldValue::Map(BTreeMap::from([
-            ("a".to_string(), value.attributes.into()),
-            ("m".to_string(), value.metadata.into()),
+            ("a".into(), value.attributes.into()),
+            ("m".into(), value.metadata.into()),
         ]))
     }
 }
@@ -617,14 +618,14 @@ mod tests {
         assert_eq!(
             schema.get_field("attributes").unwrap().r#type(),
             &FieldType::Map(std::collections::BTreeMap::from([(
-                "*".to_string(),
+                "*".into(),
                 FieldType::Json
             )]))
         );
         assert_eq!(
             schema.get_field("metadata").unwrap().r#type(),
             &FieldType::Map(std::collections::BTreeMap::from([(
-                "*".to_string(),
+                "*".into(),
                 FieldType::Json
             )]))
         );
@@ -650,19 +651,19 @@ mod tests {
         assert_eq!(
             schema.get_field("properties").unwrap().r#type(),
             &FieldType::Map(std::collections::BTreeMap::from([(
-                "*".to_string(),
+                "*".into(),
                 FieldType::Map(std::collections::BTreeMap::from([
                     (
-                        "a".to_string(),
+                        "a".into(),
                         FieldType::Map(std::collections::BTreeMap::from([(
-                            "*".to_string(),
+                            "*".into(),
                             FieldType::Json
                         )]))
                     ),
                     (
-                        "m".to_string(),
+                        "m".into(),
                         FieldType::Map(std::collections::BTreeMap::from([(
-                            "*".to_string(),
+                            "*".into(),
                             FieldType::Json
                         )]))
                     )

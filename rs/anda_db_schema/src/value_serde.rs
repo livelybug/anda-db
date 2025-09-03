@@ -5,7 +5,33 @@ use serde::{
 };
 use std::collections::BTreeMap;
 
-use crate::FieldValue;
+use crate::{FieldKey, FieldValue};
+
+impl Serialize for FieldKey {
+    #[inline]
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            FieldKey::Text(x) => serializer.serialize_str(x),
+            FieldKey::Bytes(x) => x.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> de::Deserialize<'de> for FieldKey {
+    #[inline]
+    fn deserialize<D: de::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let is_human_readable = deserializer.is_human_readable();
+        let val = deserializer.deserialize_any(KeyVisitor)?;
+
+        if is_human_readable
+            && let FieldKey::Text(x) = &val
+            && let Ok(decoded) = BASE64_URL_SAFE.decode(x)
+        {
+            return Ok(FieldKey::Bytes(decoded.into()));
+        }
+        Ok(val)
+    }
+}
 
 impl Serialize for FieldValue {
     #[inline]
@@ -59,10 +85,62 @@ impl<'de> de::Deserialize<'de> for FieldValue {
 
         if is_human_readable
             && let FieldValue::Text(x) = &val
-                && let Ok(decoded) = BASE64_URL_SAFE.decode(x) {
-                    return Ok(FieldValue::Bytes(decoded));
-                }
+            && let Ok(decoded) = BASE64_URL_SAFE.decode(x)
+        {
+            return Ok(FieldValue::Bytes(decoded));
+        }
         Ok(val)
+    }
+}
+
+struct KeyVisitor;
+
+impl<'de> de::Visitor<'de> for KeyVisitor {
+    type Value = FieldKey;
+
+    fn expecting(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(formatter, "string or bytes")
+    }
+
+    #[inline]
+    fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+        Ok(FieldKey::Text(v.into()))
+    }
+
+    #[inline]
+    fn visit_borrowed_str<E: de::Error>(self, v: &'de str) -> Result<Self::Value, E> {
+        Ok(FieldKey::Text(v.into()))
+    }
+
+    #[inline]
+    fn visit_string<E: de::Error>(self, v: String) -> Result<Self::Value, E> {
+        Ok(FieldKey::Text(v))
+    }
+
+    #[inline]
+    fn visit_bytes<E: de::Error>(self, v: &[u8]) -> Result<Self::Value, E> {
+        Ok(FieldKey::Bytes(v.to_vec().into()))
+    }
+
+    #[inline]
+    fn visit_borrowed_bytes<E: de::Error>(self, v: &'de [u8]) -> Result<Self::Value, E> {
+        Ok(FieldKey::Bytes(v.to_vec().into()))
+    }
+
+    #[inline]
+    fn visit_byte_buf<E: de::Error>(self, v: Vec<u8>) -> Result<Self::Value, E> {
+        Ok(FieldKey::Bytes(v.into()))
+    }
+
+    #[inline]
+    fn visit_seq<A: de::SeqAccess<'de>>(self, mut acc: A) -> Result<Self::Value, A::Error> {
+        let mut seq: Vec<u8> = Vec::new();
+
+        while let Some(elem) = acc.next_element()? {
+            seq.push(elem);
+        }
+
+        Ok(FieldKey::Bytes(seq.into()))
     }
 }
 
@@ -218,7 +296,7 @@ impl<'de> de::Visitor<'de> for Visitor {
 
     #[inline]
     fn visit_map<A: de::MapAccess<'de>>(self, mut acc: A) -> Result<Self::Value, A::Error> {
-        let mut map = Vec::<(String, FieldValue)>::with_capacity(
+        let mut map = Vec::<(FieldKey, FieldValue)>::with_capacity(
             acc.size_hint().filter(|&l| l < 1024).unwrap_or(0),
         );
 

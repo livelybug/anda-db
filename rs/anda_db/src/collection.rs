@@ -2467,9 +2467,9 @@ mod tests {
         // 测试更新元数据字段
         let mut metadata_update = BTreeMap::new();
         let mut metadata_map = BTreeMap::new();
-        metadata_map.insert("key1".to_string(), Fv::Text("value1".to_string()));
-        metadata_map.insert("key2".to_string(), Fv::U64(42));
-        metadata_update.insert("metadata".to_string(), Fv::Map(metadata_map));
+        metadata_map.insert("key1".into(), Fv::Text("value1".to_string()));
+        metadata_map.insert("key2".into(), Fv::U64(42));
+        metadata_update.insert("metadata".into(), Fv::Map(metadata_map));
 
         collection.update(id, metadata_update).await?;
 

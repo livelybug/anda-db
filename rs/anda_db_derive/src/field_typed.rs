@@ -58,7 +58,7 @@ pub fn field_typed_derive(input: TokenStream) -> TokenStream {
         };
 
         quote! {
-            (#rename_attr.to_string(), #field_type)
+            (#rename_attr.into(), #field_type)
         }
     });
 

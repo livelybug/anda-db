@@ -19,10 +19,11 @@ pub fn find_rename_attr(attrs: &[Attribute]) -> Option<String> {
         for meta in args {
             if let Meta::NameValue(name_value) = meta
                 && name_value.path.is_ident("rename")
-                    && let Expr::Lit(expr_lit) = &name_value.value
-                        && let Lit::Str(s) = &expr_lit.lit {
-                            return Some(s.value());
-                        }
+                && let Expr::Lit(expr_lit) = &name_value.value
+                && let Lit::Str(s) = &expr_lit.lit
+            {
+                return Some(s.value());
+            }
         }
     }
     None
@@ -35,9 +36,10 @@ pub fn find_field_type_attr(attrs: &[Attribute]) -> Option<TokenStream> {
             // 尝试访问属性的参数
             if let Ok(meta_name_value) = attr.meta.require_name_value()
                 && let Expr::Lit(expr_lit) = &meta_name_value.value
-                    && let Lit::Str(lit_str) = &expr_lit.lit {
-                        return Some(parse_field_type_str(&lit_str.value()));
-                    }
+                && let Lit::Str(lit_str) = &expr_lit.lit
+            {
+                return Some(parse_field_type_str(&lit_str.value()));
+            }
         }
     }
     None
@@ -75,7 +77,18 @@ pub fn parse_field_type_str(type_str: &str) -> TokenStream {
             let inner_type = parse_field_type_str(inner);
             quote! {
                 FieldType::Map(std::collections::BTreeMap::from([(
-                    "*".to_string(),
+                    "*".into(),
+                    #inner_type
+                )]))
+            }
+        }
+
+        s if s.starts_with("Map<Bytes, ") && s.ends_with(">") => {
+            let inner = &s[12..s.len() - 1];
+            let inner_type = parse_field_type_str(inner);
+            quote! {
+                FieldType::Map(std::collections::BTreeMap::from([(
+                    b"*".into(),
                     #inner_type
                 )]))
             }
@@ -84,7 +97,7 @@ pub fn parse_field_type_str(type_str: &str) -> TokenStream {
         // 默认或不支持的类型
         _ => {
             let error_msg = format!(
-                "Unsupported field type: '{}'. Supported types: Bytes, Text, U64, I64, F64, F32, Bool, Json, Vector, Array<T>, Option<T>, Map<String, T>",
+                "Unsupported field type: '{}'. Supported types: Bytes, Text, U64, I64, F64, F32, Bool, Json, Vector, Array<T>, Option<T>, Map<String, T>, Map<Bytes, T>",
                 type_str
             );
             quote! { compile_error!(#error_msg) }
@@ -103,25 +116,27 @@ pub fn determine_field_type(ty: &Type) -> Result<TokenStream, String> {
             match type_name.as_str() {
                 "Option" => {
                     if let PathArguments::AngleBracketed(args) = &segment.arguments
-                        && let Some(GenericArgument::Type(inner_type)) = args.args.first() {
-                            let inner_field_type = determine_field_type(inner_type)?;
-                            return Ok(quote! { FieldType::Option(Box::new(#inner_field_type)) });
-                        }
+                        && let Some(GenericArgument::Type(inner_type)) = args.args.first()
+                    {
+                        let inner_field_type = determine_field_type(inner_type)?;
+                        return Ok(quote! { FieldType::Option(Box::new(#inner_field_type)) });
+                    }
                     Ok(quote! { FieldType::Option(Box::new(FieldType::Json)) })
                 }
                 "String" | "str" => Ok(quote! { FieldType::Text }),
                 "Vec" | "HashSet" | "BTreeSet" => {
                     if let PathArguments::AngleBracketed(args) = &segment.arguments
-                        && let Some(GenericArgument::Type(inner_type)) = args.args.first() {
-                            if is_u8_type(inner_type) {
-                                return Ok(quote! { FieldType::Bytes });
-                            } else if is_bf16_type(inner_type) {
-                                return Ok(quote! { FieldType::Vector });
-                            } else {
-                                let inner_field_type = determine_field_type(inner_type)?;
-                                return Ok(quote! { FieldType::Array(vec![#inner_field_type]) });
-                            }
+                        && let Some(GenericArgument::Type(inner_type)) = args.args.first()
+                    {
+                        if is_u8_type(inner_type) {
+                            return Ok(quote! { FieldType::Bytes });
+                        } else if is_bf16_type(inner_type) {
+                            return Ok(quote! { FieldType::Vector });
+                        } else {
+                            let inner_field_type = determine_field_type(inner_type)?;
+                            return Ok(quote! { FieldType::Array(vec![#inner_field_type]) });
                         }
+                    }
                     Err(format!(
                         "Unable to determine Vec element type for: {}",
                         type_name
@@ -140,28 +155,39 @@ pub fn determine_field_type(ty: &Type) -> Result<TokenStream, String> {
                 "HashMap" | "BTreeMap" | "Map" => {
                     // 处理 HashMap 和 BTreeMap 类型
                     if let PathArguments::AngleBracketed(args) = &segment.arguments
-                        && args.args.len() >= 2 {
-                            // 检查第一个泛型参数是否为 String 类型
-                            let key_type = &args.args[0];
-                            if let GenericArgument::Type(key_type) = key_type {
-                                if is_string_type(key_type) {
-                                    if let GenericArgument::Type(value_type) = &args.args[1] {
-                                        let value_field_type = determine_field_type(value_type)?;
-                                        return Ok(quote! {
-                                            FieldType::Map(std::collections::BTreeMap::from([(
-                                                "*".to_string(),
-                                                #value_field_type
-                                            )]))
-                                        });
-                                    }
-                                } else {
-                                    return Err(format!(
-                                        "Map key type must be String, found: {:?}",
-                                        key_type
-                                    ));
+                        && args.args.len() >= 2
+                    {
+                        let key_type = &args.args[0];
+                        let value_type = &args.args[1];
+                        if let GenericArgument::Type(key_type) = key_type {
+                            if is_string_type(key_type) {
+                                if let GenericArgument::Type(value_type) = value_type {
+                                    let value_field_type = determine_field_type(value_type)?;
+                                    return Ok(quote! {
+                                        FieldType::Map(std::collections::BTreeMap::from([(
+                                            FieldKey::Text("*".to_string()),
+                                            #value_field_type
+                                        )]))
+                                    });
                                 }
+                            } else if is_bytes_type(key_type) {
+                                if let GenericArgument::Type(value_type) = value_type {
+                                    let value_field_type = determine_field_type(value_type)?;
+                                    return Ok(quote! {
+                                        FieldType::Map(std::collections::BTreeMap::from([(
+                                            FieldKey::Bytes(vec![]),
+                                            #value_field_type
+                                        )]))
+                                    });
+                                }
+                            } else {
+                                return Err(format!(
+                                    "Map key type must be String or Vec<u8>, found: {:?}",
+                                    key_type
+                                ));
                             }
                         }
+                    }
                     Err(format!("Invalid map type: {}", type_name))
                 }
                 _ => {
@@ -215,35 +241,62 @@ pub fn determine_field_type(ty: &Type) -> Result<TokenStream, String> {
 /// 检查类型是否为 u8
 pub fn is_u8_type(ty: &Type) -> bool {
     if let Type::Path(type_path) = ty
-        && let Some(segment) = type_path.path.segments.first() {
-            return segment.ident == "u8";
-        }
+        && let Some(segment) = type_path.path.segments.first()
+    {
+        return segment.ident == "u8";
+    }
     false
 }
 
 /// 检查类型是否为 String 或 &str
 pub fn is_string_type(ty: &Type) -> bool {
     if let Type::Path(type_path) = ty
-        && let Some(segment) = type_path.path.segments.first() {
-            return segment.ident == "String" || segment.ident == "str";
+        && let Some(segment) = type_path.path.segments.first()
+    {
+        return segment.ident == "String" || segment.ident == "str";
+    }
+    false
+}
+
+pub fn is_bytes_type(ty: &Type) -> bool {
+    if let Type::Path(type_path) = ty
+        && let Some(segment) = type_path.path.segments.first()
+    {
+        // Vec<u8>
+        if segment.ident == "Vec" {
+            if let PathArguments::AngleBracketed(args) = &segment.arguments
+                && let Some(GenericArgument::Type(inner_ty)) = args.args.first()
+            {
+                return is_u8_type(inner_ty);
+            }
         }
+        // 其它 bytes/buf 类型
+        return segment.ident == "Bytes"
+            || segment.ident == "ByteBuf"
+            || segment.ident == "ByteArray"
+            || segment.ident == "ByteBufB64"
+            || segment.ident == "BytesB64"
+            || segment.ident == "ByteArrayB64";
+    }
     false
 }
 
 /// 检查类型是否为 bf16
 pub fn is_bf16_type(ty: &Type) -> bool {
     if let Type::Path(type_path) = ty
-        && let Some(segment) = type_path.path.segments.first() {
-            return segment.ident == "bf16";
-        }
+        && let Some(segment) = type_path.path.segments.first()
+    {
+        return segment.ident == "bf16";
+    }
     false
 }
 
 /// 检查类型是否为 u64
 pub fn is_u64_type(ty: &Type) -> bool {
     if let Type::Path(type_path) = ty
-        && let Some(segment) = type_path.path.segments.first() {
-            return segment.ident == "u64";
-        }
+        && let Some(segment) = type_path.path.segments.first()
+    {
+        return segment.ident == "u64";
+    }
     false
 }

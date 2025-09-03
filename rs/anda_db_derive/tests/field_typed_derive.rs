@@ -1,5 +1,5 @@
 use anda_db_derive::FieldTyped;
-use anda_db_schema::{FieldType, Json};
+use anda_db_schema::{FieldKey, FieldType, Json};
 use half::bf16;
 use ic_auth_types::Xid;
 use serde::{Deserialize, Serialize};
@@ -45,52 +45,52 @@ fn field_typed_derive_works() {
         user_ft,
         FieldType::Map(
             vec![
-                ("name".to_string(), FieldType::Text),
-                ("age".to_string(), FieldType::U64),
+                ("name".into(), FieldType::Text),
+                ("age".into(), FieldType::U64),
                 (
-                    "tags".to_string(),
+                    "tags".into(),
                     FieldType::Map(std::collections::BTreeMap::from([(
-                        "*".to_string(),
+                        "*".into(),
                         FieldType::Text
                     )]))
                 ),
                 (
-                    "properties".to_string(),
+                    "properties".into(),
                     FieldType::Map(std::collections::BTreeMap::from([(
-                        "*".to_string(),
+                        "*".into(),
                         FieldType::Bytes
                     )]))
                 ),
                 (
-                    "attributes".to_string(),
+                    "attributes".into(),
                     FieldType::Map(std::collections::BTreeMap::from([(
-                        "*".to_string(),
+                        "*".into(),
                         FieldType::Json
                     )]))
                 ),
                 (
-                    "attributes2".to_string(),
+                    "attributes2".into(),
                     FieldType::Map(std::collections::BTreeMap::from([(
-                        "*".to_string(),
+                        "*".into(),
                         FieldType::Json
                     )]))
                 ),
                 (
-                    "metadata".to_string(),
+                    "metadata".into(),
                     FieldType::Map(std::collections::BTreeMap::from([(
-                        "*".to_string(),
+                        "*".into(),
                         FieldType::Json
                     )]))
                 ),
                 (
-                    "optional_data".to_string(),
+                    "optional_data".into(),
                     FieldType::Option(Box::new(FieldType::Map(std::collections::BTreeMap::from(
-                        [("*".to_string(), FieldType::F64)]
+                        [("*".into(), FieldType::F64)]
                     ))))
                 ),
-                ("vector1".to_string(), FieldType::Vector),
-                ("b1".to_string(), FieldType::Bytes),
-                ("blob2".to_string(), FieldType::Bytes),
+                ("vector1".into(), FieldType::Vector),
+                ("b1".into(), FieldType::Bytes),
+                ("blob2".into(), FieldType::Bytes),
             ]
             .into_iter()
             .collect()
@@ -102,12 +102,12 @@ fn field_typed_derive_works() {
         doc_ft,
         FieldType::Map(
             vec![
-                ("id".to_string(), FieldType::Bytes),
+                ("id".into(), FieldType::Bytes),
                 (
-                    "ids".to_string(),
+                    "ids".into(),
                     FieldType::Option(Box::new(FieldType::Array(vec![FieldType::Bytes])))
                 ),
-                ("user".to_string(), user_ft),
+                ("user".into(), user_ft),
             ]
             .into_iter()
             .collect()
