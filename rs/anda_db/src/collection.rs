@@ -1746,6 +1746,11 @@ impl Collection {
         result
     }
 
+    /// Returns a vector of all document IDs in the collection in ascending order.
+    pub fn ids(&self) -> Vec<DocumentId> {
+        self.doc_ids.read().iter().collect()
+    }
+
     /// Updates the collection metadata with the provided function.
     ///
     /// # Arguments
@@ -1756,50 +1761,6 @@ impl Collection {
     {
         let mut metadata = self.metadata.write();
         f(&mut metadata);
-    }
-}
-
-/// Utility for counting the size of serialized CBOR data
-pub struct CountingWriter {
-    count: usize,
-}
-
-impl Default for CountingWriter {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl CountingWriter {
-    pub fn new() -> Self {
-        CountingWriter { count: 0 }
-    }
-
-    pub fn size(&self) -> usize {
-        self.count
-    }
-
-    // TODO: refactor this function to use a more efficient way to count the size
-    pub fn count_cbor(val: &impl Serialize) -> usize {
-        let mut writer = CountingWriter::new();
-        let _ = ciborium::into_writer(val, &mut writer);
-        writer.count
-    }
-}
-
-impl std::io::Write for CountingWriter {
-    /// Implements the write method for the Write trait
-    /// This simply counts the bytes without actually writing them
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let len = buf.len();
-        self.count += len;
-        Ok(len)
-    }
-
-    /// Implements the flush method for the Write trait
-    /// This is a no-op since we're not actually writing data
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
     }
 }
 

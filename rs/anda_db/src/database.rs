@@ -1,4 +1,4 @@
-use futures::future::join_all;
+use futures::stream::{self, StreamExt};
 use object_store::ObjectStore;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -280,7 +280,12 @@ impl AndaDB {
             .values()
             .cloned()
             .collect::<Vec<_>>();
-        let _rt = join_all(collections.iter().map(|collection| collection.close())).await;
+        let _ = stream::iter(collections.into_iter())
+            .map(|collection| async move { collection.close().await })
+            .buffer_unordered(32) // 限制最多 32 个并发
+            .collect::<Vec<_>>()
+            .await;
+
         let start = Instant::now();
         match self.flush_self(unix_ms()).await {
             Ok(_) => {
@@ -315,13 +320,12 @@ impl AndaDB {
             .values()
             .cloned()
             .collect::<Vec<_>>();
-        let now_ms = unix_ms();
-        let _rt = join_all(
-            collections
-                .iter()
-                .map(|collection| collection.flush(now_ms)),
-        )
-        .await;
+
+        let _ = stream::iter(collections.into_iter())
+            .map(|collection| async move { collection.flush(unix_ms()).await })
+            .buffer_unordered(16) // 限制最多 16 个并发
+            .collect::<Vec<_>>()
+            .await;
 
         self.flush_self(unix_ms()).await
     }
