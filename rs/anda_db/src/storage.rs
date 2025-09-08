@@ -144,7 +144,7 @@ impl From<&StorageStatsAtomic> for StorageStats {
     /// Creates `StorageStats` from `StorageStatsAtomic` by loading atomic values.
     fn from(stats: &StorageStatsAtomic) -> Self {
         StorageStats {
-            check_point: stats.version.load(Ordering::Relaxed),
+            check_point: stats.check_point.load(Ordering::Relaxed),
             version: stats.version.load(Ordering::Relaxed),
             last_saved: stats.last_saved.load(Ordering::Relaxed),
             total_cache_get_count: stats.total_cache_get_count.load(Ordering::Relaxed),
@@ -263,7 +263,7 @@ impl Storage {
     ///
     /// # Arguments
     ///
-    /// * `check_point` - The current checkpoint value, used for `check_point`.
+    /// * `check_point` - The current checkpoint value, used for `check_point`, usually the max document ID.
     /// * `now_ms` - The current timestamp in milliseconds, used for `last_saved`.
     ///
     /// # Errors
@@ -397,9 +397,6 @@ impl Storage {
         let size = result.meta.size;
         let version: ObjectVersion = (&result.meta).into();
         let bytes = result.bytes().await.map_err(DBError::from)?;
-        if (bytes.len() as u64) < size {
-            // TODO: get_range
-        }
 
         let bytes = try_decompress(
             bytes,
@@ -620,6 +617,7 @@ impl Storage {
             buf: Vec::new(),
             mode,
             flushing: None,
+            last_version: None,
         }
     }
 
@@ -724,6 +722,31 @@ impl Storage {
             })
             .boxed()) as _
     }
+
+    /// Lists object metadata in the storage, optionally filtering by prefix and starting from an offset.
+    pub fn list_meta(
+        &self,
+        prefix: Option<&str>,
+        offset: Option<&str>,
+    ) -> BoxStream<'_, Result<ObjectMeta, DBError>> {
+        let path_prefix = if let Some(p) = prefix {
+            self.full_path(p)
+        } else {
+            self.inner.base_path.clone()
+        };
+
+        let offset = offset.map(|o| self.full_path(o));
+
+        let stream = if let Some(offset) = offset {
+            self.inner
+                .object_store
+                .list_with_offset(Some(&path_prefix), &offset)
+        } else {
+            self.inner.object_store.list(Some(&path_prefix))
+        };
+
+        (stream.map_err(DBError::from).boxed()) as _
+    }
 }
 
 impl InnerStorage {
@@ -737,9 +760,10 @@ impl InnerStorage {
 
         let data_len = data.len();
         if data_len > self.metadata.config.max_small_object_size {
-            return Err(DBError::Generic {
-                name: self.base_path.to_string(),
-                source: "Payload size exceeds limit, please use `stream_writer`".into(),
+            return Err(DBError::PayloadTooLarge {
+                path: path.to_string(),
+                size: data_len,
+                limit: self.metadata.config.max_small_object_size,
             });
         }
 
@@ -782,6 +806,14 @@ pub struct SingleWriter {
     mode: PutMode,
     /// Holds the future for the ongoing flush operation.
     flushing: Option<BoxFuture<'static, Result<ObjectVersion, DBError>>>,
+    last_version: Option<ObjectVersion>,
+}
+
+impl SingleWriter {
+    /// Takes the last stored `ObjectVersion` after a successful flush.
+    pub fn take_version(&mut self) -> Option<ObjectVersion> {
+        self.last_version.take()
+    }
 }
 
 impl futures::io::AsyncWrite for SingleWriter {
@@ -800,7 +832,12 @@ impl futures::io::AsyncWrite for SingleWriter {
         _: &mut Context<'_>,
         bufs: &[io::IoSlice<'_>],
     ) -> Poll<io::Result<usize>> {
-        Poll::Ready(io::Write::write_vectored(&mut self.buf, bufs))
+        let mut written = 0;
+        for s in bufs {
+            self.buf.extend_from_slice(s);
+            written += s.len();
+        }
+        Poll::Ready(Ok(written))
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -822,7 +859,8 @@ impl futures::io::AsyncWrite for SingleWriter {
         // 如果有正在进行的 flush 操作，轮询它
         if let Some(fut) = &mut this.flushing {
             match fut.poll_unpin(cx) {
-                Poll::Ready(Ok(_)) => {
+                Poll::Ready(Ok(v)) => {
+                    this.last_version = Some(v);
                     this.flushing = None;
                     Poll::Ready(Ok(()))
                 }
@@ -882,19 +920,32 @@ fn try_decompress(data: Bytes, max_size: u64) -> Bytes {
         return data;
     }
 
-    let size = match zstd_safe::find_decompressed_size(data.as_ref()) {
-        Ok(Some(size)) if size <= max_size => size,
-        err => {
-            log::error!("Invalid decompressed size: {err:?}");
-            return data;
+    match zstd_safe::find_decompressed_size(data.as_ref()) {
+        Ok(Some(size)) => {
+            if size > max_size {
+                log::warn!(
+                    "Decompressed size {} exceeds max_size {}, skip decompress",
+                    size,
+                    max_size
+                );
+                return data;
+            }
+            let mut buf = Vec::with_capacity(size as usize);
+            match zstd_safe::decompress(&mut buf, &data[..]) {
+                Ok(_) => buf.into(),
+                Err(err) => {
+                    log::error!("Failed to decompress (known size): {err:?}");
+                    data
+                }
+            }
         }
-    };
-
-    let mut buf = Vec::with_capacity(size as usize);
-    match zstd_safe::decompress(&mut buf, &data[..]) {
-        Ok(_) => buf.into(),
+        // Unknown size => 目前仍返回原数据（保持旧语义），但标注改进点
+        Ok(None) => {
+            log::debug!("Unknown decompressed size (zstd frame). Consider streaming fallback.");
+            data
+        }
         Err(err) => {
-            log::error!("Failed to decompress data: {err:?}");
+            log::error!("find_decompressed_size error: {err:?}");
             data
         }
     }
