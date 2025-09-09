@@ -1,4 +1,4 @@
-use futures::stream::{self, StreamExt};
+use futures::{stream, stream::StreamExt};
 use object_store::ObjectStore;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -44,6 +44,8 @@ struct InnerDB {
     collections: RwLock<BTreeMap<String, Arc<Collection>>>,
     /// Flag indicating whether the database is in read-only mode
     read_only: AtomicBool,
+    /// Set of collection names being dropped
+    dropping_collections: RwLock<BTreeSet<String>>,
 }
 
 /// Database configuration parameters.
@@ -144,6 +146,7 @@ impl AndaDB {
                 metadata: RwLock::new(metadata),
                 collections: RwLock::new(BTreeMap::new()),
                 read_only: AtomicBool::new(false),
+                dropping_collections: RwLock::new(BTreeSet::new()),
             }),
         })
     }
@@ -196,6 +199,7 @@ impl AndaDB {
                         metadata: RwLock::new(metadata),
                         collections: RwLock::new(BTreeMap::new()),
                         read_only: AtomicBool::new(false),
+                        dropping_collections: RwLock::new(BTreeSet::new()),
                     }),
                 };
 
@@ -227,6 +231,7 @@ impl AndaDB {
                         metadata: RwLock::new(metadata),
                         collections: RwLock::new(BTreeMap::new()),
                         read_only: AtomicBool::new(false),
+                        dropping_collections: RwLock::new(BTreeSet::new()),
                     }),
                 })
             }
@@ -413,6 +418,22 @@ impl AndaDB {
             }
         }
 
+        {
+            if self
+                .inner
+                .dropping_collections
+                .read()
+                .contains(&config.name)
+            {
+                return Err(DBError::AlreadyExists {
+                    name: config.name,
+                    path: self.inner.name.clone(),
+                    source: "collection is being dropped".to_string().into(),
+                    _id: 0,
+                });
+            }
+        }
+
         let start = Instant::now();
         // self.metadata.collections will check it exists again in Collection::create
         let mut collection = Collection::create(self.clone(), schema, config).await?;
@@ -478,6 +499,22 @@ impl AndaDB {
         }
 
         {
+            if self
+                .inner
+                .dropping_collections
+                .read()
+                .contains(&config.name)
+            {
+                return Err(DBError::AlreadyExists {
+                    name: config.name,
+                    path: self.inner.name.clone(),
+                    source: "collection is being dropped".to_string().into(),
+                    _id: 0,
+                });
+            }
+        }
+
+        {
             if !self
                 .inner
                 .metadata
@@ -512,6 +549,18 @@ impl AndaDB {
                 return Ok(collection.clone());
             }
         }
+
+        {
+            if self.inner.dropping_collections.read().contains(&name) {
+                return Err(DBError::AlreadyExists {
+                    name,
+                    path: self.inner.name.clone(),
+                    source: "collection is being dropped".to_string().into(),
+                    _id: 0,
+                });
+            }
+        }
+
         {
             if !self.inner.metadata.read().collections.contains(&name) {
                 return Err(DBError::NotFound {
@@ -532,6 +581,35 @@ impl AndaDB {
         let now = unix_ms();
         collection.flush(now).await?;
         Ok(collection)
+    }
+
+    pub async fn delete_collection(&self, name: &str) -> Result<(), DBError> {
+        if self.inner.read_only.load(Ordering::Relaxed) {
+            return Err(DBError::Generic {
+                name: self.inner.name.clone(),
+                source: "database is read-only".into(),
+            });
+        }
+
+        // 更新元数据并持久化
+        {
+            if !self.inner.metadata.write().collections.remove(name) {
+                return Ok(());
+            }
+
+            self.inner
+                .dropping_collections
+                .write()
+                .insert(name.to_string());
+        }
+
+        self.flush_self(unix_ms()).await?;
+        if let Some(col) = { self.inner.collections.write().remove(name) } {
+            let _ = col.drop_data().await;
+        }
+
+        self.inner.dropping_collections.write().remove(name);
+        Ok(())
     }
 
     async fn set_lock(&self, lock: ByteBufB64) -> Result<(), DBError> {
@@ -772,5 +850,49 @@ mod tests {
 
         // Database should be in read-only mode after closing
         assert!(db.inner.read_only.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn test_delete_collection() {
+        let object_store = Arc::new(InMemory::new());
+        let config = DBConfig::default();
+        let db = AndaDB::create(object_store, config).await.unwrap();
+
+        // 构建 schema
+        let mut schema_builder = Schema::builder();
+        schema_builder
+            .add_field(Fe::new("name".to_string(), Ft::Text).unwrap())
+            .unwrap();
+        let schema = schema_builder.build().unwrap();
+
+        let collection_config = CollectionConfig {
+            name: "test_collection".to_string(),
+            description: "Test Collection".to_string(),
+        };
+
+        // 创建集合
+        db.create_collection(schema.clone(), collection_config.clone(), async |_| Ok(()))
+            .await
+            .unwrap();
+        assert!(db.metadata().collections.contains("test_collection"));
+
+        // 删除集合
+        db.delete_collection("test_collection").await.unwrap();
+        assert!(!db.metadata().collections.contains("test_collection"));
+
+        // 再次打开应返回 NotFound
+        let res = db
+            .open_collection("test_collection".to_string(), async |_| Ok(()))
+            .await;
+        match res {
+            Err(DBError::NotFound { .. }) => {}
+            _ => panic!("expected NotFound after delete_collection"),
+        }
+
+        // 可以重新创建同名集合
+        db.create_collection(schema, collection_config, async |_| Ok(()))
+            .await
+            .unwrap();
+        assert!(db.metadata().collections.contains("test_collection"));
     }
 }

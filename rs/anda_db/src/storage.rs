@@ -747,6 +747,25 @@ impl Storage {
 
         (stream.map_err(DBError::from).boxed()) as _
     }
+
+    /// Drops all objects under the storage's base path, effectively deleting the entire storage.
+    pub async fn drop_data(&self) -> Result<(), DBError> {
+        // 并发删除 base_path 下的所有对象，失败立即返回
+        self.inner
+            .object_store
+            .list(Some(&self.inner.base_path))
+            .map_err(DBError::from)
+            .try_for_each_concurrent(16, move |meta| {
+                let object_store = self.inner.object_store.clone();
+                async move {
+                    // 删除对象
+                    object_store.delete(&meta.location).await?;
+                    Ok(())
+                }
+            })
+            .await?;
+        Ok(())
+    }
 }
 
 impl InnerStorage {
@@ -1442,5 +1461,38 @@ mod tests {
             .await
             .expect("Failed to fetch new data");
         assert_eq!(&fetched_data[..], b"Completely new data!");
+    }
+
+    #[tokio::test]
+    async fn test_storage_drop_all() {
+        let storage = create_test_storage().await;
+
+        #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+        struct T {
+            k: &'static str,
+        }
+
+        storage.create("a", &T { k: "1" }).await.unwrap();
+        storage.create("b", &T { k: "2" }).await.unwrap();
+        storage.create("dir/c", &T { k: "3" }).await.unwrap();
+
+        // 确认存在对象
+        let before = storage
+            .list_meta(None, None)
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        assert!(before.len() >= 3);
+
+        // 删除全部
+        storage.drop_data().await.unwrap();
+
+        // 应为空
+        let after = storage
+            .list_meta(None, None)
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        assert!(after.is_empty());
     }
 }
