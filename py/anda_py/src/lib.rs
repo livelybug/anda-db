@@ -5,11 +5,13 @@ use anda_engine::store::LocalFileSystem;
 use anda_kip::{CommandType, KipError, Request, Response};
 use object_store::memory::InMemory;
 use pyo3::prelude::*;
+use pyo3::exceptions::PyRuntimeError;
+use pyo3::types::PyDict;
+use pyo3::wrap_pyfunction;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use std::collections::HashMap;
 use std::sync::Arc;
-use anda_object_store::{MetaStore, MetaStoreBuilder};
+use anda_object_store::{MetaStoreBuilder};
 use anda_kip::Json;
 use anda_kip::executor::Executor;
 
@@ -19,9 +21,67 @@ fn sum_as_string(a: usize, b: usize) -> PyResult<String> {
     Ok((a + b).to_string())
 }
 
+#[pyclass]
+pub struct PyAndaDB {
+    nexus: Arc<CognitiveNexus>,
+}
+
+#[pymethods]
+impl PyAndaDB {
+    #[staticmethod]
+    pub fn create<'py>(py: Python<'py>, db_config: &'py PyDict) -> PyResult<&'py PyAny> {
+        let json_mod = py.import("json")?;
+        let json_str: String = json_mod.call_method1("dumps", (db_config,))?.extract()?;
+        let config: AndaDbConfig = serde_json::from_str(&json_str)
+            .map_err(|e| PyRuntimeError::new_err(format!("Config deserialization error: {}", e)))?;
+        let fut = async move {
+            match create_kip_db(config).await {
+                Ok(nexus) => Ok(PyAndaDB { nexus }),
+                Err(e) => Err(PyRuntimeError::new_err(format!("DB creation error: {}", e)))
+            }
+        };
+        Ok(pyo3_asyncio::tokio::future_into_py(py, fut)?)
+    }
+
+    #[pyo3(signature = (command, dry_run = false, parameters = None))]
+    pub fn execute_kip<'py>(
+        &self,
+        py: Python<'py>,
+        command: String,
+        dry_run: bool,
+        parameters: Option<&PyDict>,
+    ) -> PyResult<&'py PyAny> {
+        let params_map = parameters
+            .map(|dict| {
+                let json_mod = py.import("json").unwrap();
+                let json_str: String = json_mod.call_method1("dumps", (dict,)).unwrap().extract().unwrap();
+                serde_json::from_str::<Map<String, Value>>(&json_str).unwrap()
+            })
+            .unwrap_or_default();
+        let nexus = self.nexus.clone();
+        let fut = async move {
+            match execute_kip(
+                nexus.as_ref(),
+                command,
+                Some(params_map.into_iter().map(|(k, v)| (k, Json::from(v))).collect()),
+                dry_run,
+            ).await {
+                Ok((cmd_type, response)) => {
+                    let cmd_type_str = format!("{:?}", cmd_type);
+                    let result_json = serde_json::to_string(&response).unwrap();
+                    Ok((cmd_type_str, result_json))
+                }
+                Err(e) => Err(PyRuntimeError::new_err(format!("KIP execution error: {}", e)))
+            }
+        };
+        Ok(pyo3_asyncio::tokio::future_into_py(py, fut)?)
+    }
+}
+
 /// A Python module implemented in Rust.
 #[pymodule]
-fn anda_py(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn anda_py(_py: Python, m: &PyModule) -> PyResult<()> {
+    m.add_class::<PyAndaDB>()?;
     m.add_function(wrap_pyfunction!(sum_as_string, m)?)?;
     Ok(())
 }
@@ -36,9 +96,9 @@ pub enum StoreLocationType {
 #[derive(Debug, Deserialize)]
 pub struct AndaDbConfig {
     pub store_location_type: StoreLocationType,
-    pub store_location: String, // changed from Option<String> to String
-    pub DB_name: String,
-    pub DB_desc: Option<String>,
+    pub store_location: String,
+    pub db_name: String,
+    pub db_desc: Option<String>,
     pub meta_cache_capacity: Option<u64>,
 }
 
@@ -82,8 +142,8 @@ pub async fn create_kip_db(
     db_config.verify_config()
         .map_err(|e| KipError::Execution(e))?;
 
-    let db_name = db_config.DB_name.as_str();
-    let db_desc = db_config.DB_desc.as_deref().unwrap_or_default();
+    let db_name = db_config.db_name.as_str();
+    let db_desc = db_config.db_desc.as_deref().unwrap_or_default();
     let meta_cache_capacity = db_config.meta_cache_capacity.unwrap_or(10000);
 
     let object_store: Arc<dyn object_store::ObjectStore> = match db_config.store_location_type {
@@ -288,8 +348,8 @@ mod tests {
         let db_config_in_mem = AndaDbConfig {
             store_location_type: StoreLocationType::InMem,
             store_location: "".to_owned(),
-            DB_name: "test_medical_db".to_string(),
-            DB_desc: Some("Ephemeral DB for medical KIP test".to_string()),
+            db_name: "test_medical_db".to_string(),
+            db_desc: Some("Ephemeral DB for medical KIP test".to_string()),
             meta_cache_capacity: Some(10000),
         };
 

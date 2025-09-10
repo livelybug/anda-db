@@ -9,8 +9,12 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 # Python Bindings
-pyo3 = { workspace = true, features = ["extension-module", "serde"] }
+pyo3 = { workspace = true, features = [ "extension-module", "serde"] }
+pyo3-asyncio = { workspace = true, features = ["attributes", "async-std-runtime", "tokio-runtime"] }  
+async-std = { workspace = true }
+tokio = { workspace = true }
 
+# Anda
 anda_core = { workspace = true }
 anda_engine = { workspace = true }
 
@@ -20,7 +24,6 @@ anda_kip = { path = "../../rs/anda_kip" }
 anda_object_store = { path = "../../rs/anda_object_store" }
 
 # Other Crates
-tokio = { workspace = true }
 serde_json = { workspace = true }
 serde = { workspace = true }
 candid = { workspace = true }

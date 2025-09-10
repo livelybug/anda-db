@@ -71,7 +71,9 @@ nom-language = "0.1"
 regex = "1.11"
 rustc-hash = "2"
 candid = "0.10"
-pyo3 = "0.21.2"
+pyo3 = "0.20.3"
+pyo3-asyncio = "0.20.0"
+async-std = "1.9"
 
 # From Anda
 anda_core = "0.8.0"
