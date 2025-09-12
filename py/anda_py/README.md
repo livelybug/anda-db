@@ -18,8 +18,8 @@ Before you begin, ensure you have the following tools installed on your system:
 ```bash
 git clone REPO_URL
 cd anda_db
+cargo check -p andy_py
 cargo test --package anda_py -- tests::test_execute_kip_in_mem --show-output
-
 cargo run --example test_kip_stateful_execution
 ```
 
@@ -65,7 +65,7 @@ To run the tests, execute the following command from the project root:
 
 ```bash
 # Make sure your virtual environment is activated
-pytest tests_py/
+pytest -s --log-cli-level=INFO tests_py/
 ```
 
 You should see an output indicating that all tests have passed.

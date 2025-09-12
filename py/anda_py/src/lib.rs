@@ -9,6 +9,7 @@ use pyo3::exceptions::PyRuntimeError;
 use pyo3::types::PyDict;
 use pyo3::wrap_pyfunction;
 use serde::{Deserialize, Serialize};
+use serde_pyobject::to_pyobject;
 use serde_json::{Map, Value};
 use std::sync::Arc;
 use anda_object_store::{MetaStoreBuilder};
@@ -26,12 +27,59 @@ pub struct PyAndaDB {
     nexus: Arc<CognitiveNexus>,
 }
 
+#[pyclass]
+#[derive(Clone)]
+pub enum PyCommandType {
+    Kml,
+    Kql,
+    Meta,
+    Unknown,
+}
+
+impl From<CommandType> for PyCommandType {
+    fn from(cmd: CommandType) -> Self {
+        match cmd {
+            CommandType::Kml => PyCommandType::Kml,
+            CommandType::Kql => PyCommandType::Kql,
+            CommandType::Meta => PyCommandType::Meta,
+            _ => PyCommandType::Unknown,
+        }
+    }
+}
+
+#[pymethods]
+impl PyCommandType {
+    #[staticmethod]
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "Kml" => PyCommandType::Kml,
+            "Kql" => PyCommandType::Kql,
+            "Meta" => PyCommandType::Meta,
+            _ => PyCommandType::Unknown,
+        }
+    }
+}
+
 #[pymethods]
 impl PyAndaDB {
     #[staticmethod]
+    #[pyo3(text_signature = "(db_config: dict) -> Awaitable[PyAndaDB]")]
+    /// Create a new AndaDB instance from a Python dict config.
+    ///
+    /// Args:
+    ///     db_config (dict): Database configuration as a Python dict.
+    ///
+    /// Returns:
+    ///     Awaitable[PyAndaDB]: An awaitable AndaDB instance.
+    ///
+    /// Raises:
+    ///     RuntimeError: If config deserialization or DB creation fails.
     pub fn create<'py>(py: Python<'py>, db_config: &'py PyDict) -> PyResult<&'py PyAny> {
+        log::info!("AndaDB.create called with db_config.");
         let json_mod = py.import("json")?;
         let json_str: String = json_mod.call_method1("dumps", (db_config,))?.extract()?;
+        log::info!("db_config: {}", json_str);
+
         let config: AndaDbConfig = serde_json::from_str(&json_str)
             .map_err(|e| PyRuntimeError::new_err(format!("Config deserialization error: {}", e)))?;
         let fut = async move {
@@ -44,6 +92,22 @@ impl PyAndaDB {
     }
 
     #[pyo3(signature = (command, dry_run = false, parameters = None))]
+    #[pyo3(text_signature = "(command: str, dry_run: bool = False, parameters: dict = None) -> Awaitable[Dict[str, Any]]")]
+    /// Execute a KIP command asynchronously.
+    ///
+    /// Args:
+    ///     command (str): KIP command string (KML/KQL/META).
+    ///     dry_run (bool, optional): If True, performs a dry run. Defaults to False.
+    ///     parameters (dict, optional): Command parameters. Defaults to None.
+    ///
+    /// Returns:
+    ///     Awaitable[Dict[str, Any]]: Awaitable Python dictionary with:
+    ///         - "type" (PyCommandType): The type of the executed command.
+    ///         - "response" (dict): The command response as a native Python dictionary
+    ///           (converted from the underlying `serde_json::Value`).
+    ///
+    /// Raises:
+    ///     RuntimeError: If KIP execution fails.
     pub fn execute_kip<'py>(
         &self,
         py: Python<'py>,
@@ -51,37 +115,78 @@ impl PyAndaDB {
         dry_run: bool,
         parameters: Option<&PyDict>,
     ) -> PyResult<&'py PyAny> {
+        log::info!(
+            "AndaDB.execute_kip called: command={}, dry_run={}",
+            command,
+            dry_run
+        );
+
+        // Convert Python dict -> serde_json::Map<String, Value>
         let params_map = parameters
             .map(|dict| {
                 let json_mod = py.import("json").unwrap();
-                let json_str: String = json_mod.call_method1("dumps", (dict,)).unwrap().extract().unwrap();
+                let json_str: String = json_mod
+                    .call_method1("dumps", (dict,))
+                    .unwrap()
+                    .extract()
+                    .unwrap();
                 serde_json::from_str::<Map<String, Value>>(&json_str).unwrap()
             })
             .unwrap_or_default();
+
+        log::info!("params_map: {}", serde_json::to_string(&params_map).unwrap());
+
         let nexus = self.nexus.clone();
+
+        // Async future that returns a PyObject (a Python dict)
         let fut = async move {
             match execute_kip(
                 nexus.as_ref(),
                 command,
-                Some(params_map.into_iter().map(|(k, v)| (k, Json::from(v))).collect()),
+                Some(
+                    params_map
+                        .into_iter()
+                        .map(|(k, v)| (k, Json::from(v)))
+                        .collect(),
+                ),
                 dry_run,
-            ).await {
+            )
+            .await
+            {
                 Ok((cmd_type, response)) => {
-                    let cmd_type_str = format!("{:?}", cmd_type);
-                    let result_json = serde_json::to_string(&response).unwrap();
-                    Ok((cmd_type_str, result_json))
+                    // Convert both the cmd_type and the response into Python objects while holding the GIL
+                    let py_obj: PyObject = Python::with_gil(|py| -> PyResult<PyObject> {
+                        // 1) Wrap cmd_type into the Python-visible class
+                        let py_cmd_wrapper = Py::new(py, PyCommandType::from(cmd_type))?;
+
+                        // 2) Convert response (serde-serializable) into a Python object using serde-pyobject
+                        let py_response = to_pyobject(py, &response)
+                            .map_err(|e| PyRuntimeError::new_err(format!("Response conversion error: {}", e)))?;
+
+                        // 3) Build the resulting Python dict {"type": <PyCommandType>, "response": <py_response>}
+                        let out_dict = PyDict::new(py);
+                        out_dict.set_item("type", py_cmd_wrapper.as_ref(py))?;
+                        out_dict.set_item("response", py_response)?;
+
+                        Ok(out_dict.into())
+                    })?;
+
+                    Ok(py_obj)
                 }
-                Err(e) => Err(PyRuntimeError::new_err(format!("KIP execution error: {}", e)))
+                Err(e) => Err(PyRuntimeError::new_err(format!("KIP execution error: {}", e))),
             }
         };
+
+        // Convert the Rust Future -> Python awaitable
         Ok(pyo3_asyncio::tokio::future_into_py(py, fut)?)
-    }
+    }    
 }
 
 /// A Python module implemented in Rust.
 #[pymodule]
 fn anda_py(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<PyAndaDB>()?;
+    m.add_class::<PyCommandType>()?;
     m.add_function(wrap_pyfunction!(sum_as_string, m)?)?;
     Ok(())
 }

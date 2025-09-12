@@ -13,6 +13,7 @@ pyo3 = { workspace = true, features = [ "extension-module", "serde"] }
 pyo3-asyncio = { workspace = true, features = ["attributes", "async-std-runtime", "tokio-runtime"] }  
 async-std = { workspace = true }
 tokio = { workspace = true }
+serde-pyobject = { workspace = true }
 
 # Anda
 anda_core = { workspace = true }
@@ -28,3 +29,4 @@ serde_json = { workspace = true }
 serde = { workspace = true }
 candid = { workspace = true }
 object_store = { workspace = true }
+log = { workspace = true }

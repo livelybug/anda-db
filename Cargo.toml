@@ -74,6 +74,7 @@ candid = "0.10"
 pyo3 = "0.20.3"
 pyo3-asyncio = "0.20.0"
 async-std = "1.9"
+serde-pyobject = "0.2.0"
 
 # From Anda
 anda_core = "0.8.0"
