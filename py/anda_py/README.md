@@ -65,7 +65,12 @@ To run the tests, execute the following command from the project root:
 
 ```bash
 # Make sure your virtual environment is activated
-pytest -s --log-cli-level=INFO tests_py/
+# pytest -s --log-cli-level=INFO tests_py/
+pytest -v tests_py/
+
+# Test a single case with debug level log
+export RUST_LOG=debug
+pytest -s -k test_create_success
 ```
 
 You should see an output indicating that all tests have passed.

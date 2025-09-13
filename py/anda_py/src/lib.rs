@@ -7,7 +7,6 @@ use object_store::memory::InMemory;
 use pyo3::prelude::*;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::types::PyDict;
-use pyo3::wrap_pyfunction;
 use serde::{Deserialize, Serialize};
 use serde_pyobject::to_pyobject;
 use serde_json::{Map, Value};
@@ -78,10 +77,11 @@ impl PyAndaDB {
         log::info!("AndaDB.create called with db_config.");
         let json_mod = py.import("json")?;
         let json_str: String = json_mod.call_method1("dumps", (db_config,))?.extract()?;
-        log::info!("db_config: {}", json_str);
+        log::debug!("json_str db_config: {}", json_str);
 
         let config: AndaDbConfig = serde_json::from_str(&json_str)
             .map_err(|e| PyRuntimeError::new_err(format!("Config deserialization error: {}", e)))?;
+        log::debug!("rust struct db_config: {:?}", config);
         let fut = async move {
             match create_kip_db(config).await {
                 Ok(nexus) => Ok(PyAndaDB { nexus }),
@@ -134,7 +134,7 @@ impl PyAndaDB {
             })
             .unwrap_or_default();
 
-        log::info!("params_map: {}", serde_json::to_string(&params_map).unwrap());
+        log::debug!("params_map: {}", serde_json::to_string(&params_map).unwrap());
 
         let nexus = self.nexus.clone();
 
@@ -185,17 +185,31 @@ impl PyAndaDB {
 /// A Python module implemented in Rust.
 #[pymodule]
 fn anda_py(_py: Python, m: &PyModule) -> PyResult<()> {
+    structured_logger::init();
     m.add_class::<PyAndaDB>()?;
     m.add_class::<PyCommandType>()?;
+    m.add_class::<StoreLocationType>()?;
     m.add_function(wrap_pyfunction!(sum_as_string, m)?)?;
     Ok(())
 }
 
+#[pyclass]
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "snake_case")]
 pub enum StoreLocationType {
     InMem,
     LocalFile,
+}
+
+#[pymethods]
+impl StoreLocationType {
+    /// str(self) -> "in_mem" or "local_file"
+    fn __str__(&self) -> &'static str {
+        match self {
+            StoreLocationType::InMem => "in_mem",
+            StoreLocationType::LocalFile => "local_file",
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]

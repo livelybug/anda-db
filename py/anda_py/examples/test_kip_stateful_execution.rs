@@ -137,8 +137,8 @@ async fn main() {
     let db_config_local_file = AndaDbConfig {
         store_location_type: StoreLocationType::LocalFile,
         store_location: "/tmp/anda_py_test_db".to_string(),
-        DB_name: "test_medical_db".to_string(),
-        DB_desc: Some("Local file DB for medical KIP test".to_string()),
+        db_name: "test_medical_db".to_string(),
+        db_desc: Some("Local file DB for medical KIP test".to_string()),
         meta_cache_capacity: Some(10000),
     };
 

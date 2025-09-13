@@ -1,7 +1,7 @@
 import pytest
 import asyncio
 import anda_py
-from anda_py import PyCommandType, PyAndaDB
+from anda_py import PyCommandType, PyAndaDB, StoreLocationType
 
 import logging
 logging.basicConfig(level=logging.INFO)
@@ -9,7 +9,7 @@ logging.basicConfig(level=logging.INFO)
 @pytest.mark.asyncio
 async def test_create_success():
     db_config = {
-        "store_location_type": "in_mem",
+        "store_location_type": str(StoreLocationType.InMem),
         "store_location": "",
         "db_name": "test_db",
         "db_desc": "Test DB",

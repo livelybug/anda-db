@@ -30,3 +30,4 @@ serde = { workspace = true }
 candid = { workspace = true }
 object_store = { workspace = true }
 log = { workspace = true }
+structured-logger = { workspace = true }
