@@ -1083,7 +1083,7 @@ impl Collection {
     /// * `fields` - The new field values to apply
     ///
     /// # Returns
-    /// Ok(()) if successful, or an error if update fails
+    /// Ok(Document) if successful, or an error if update fails
     ///
     /// # Errors
     /// Returns an error if:
@@ -1097,7 +1097,7 @@ impl Collection {
         &self,
         id: DocumentId,
         fields: BTreeMap<String, Fv>,
-    ) -> Result<(), DBError> {
+    ) -> Result<Document, DBError> {
         if self.read_only.load(Ordering::Relaxed) {
             return Err(DBError::Generic {
                 name: self.name.clone(),
@@ -1115,7 +1115,10 @@ impl Collection {
         }
 
         if fields.is_empty() {
-            return Ok(());
+            return Err(DBError::Generic {
+                name: self.name.clone(),
+                source: "No fields to update".into(),
+            });
         }
 
         let (doc, ver) = self
@@ -1247,7 +1250,7 @@ impl Collection {
             meta.stats.update_count += 1;
         });
 
-        Ok(())
+        Ok(doc)
     }
 
     /// Removes a document from the collection by its ID.
