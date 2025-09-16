@@ -3,149 +3,140 @@
 [![Build Status](https://github.com/ldclabs/anda-db/actions/workflows/test.yml/badge.svg)](https://github.com/ldclabs/anda-db/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/ldclabs/anda-db/blob/main/LICENSE)
 
-**Anda DB** is a Rust library designed as a specialized database for AI Agents, focusing on knowledge memory. It supports multimodal data storage, full-text search, and vector similarity search, integrating seamlessly as a local database within AI Agent applications.
+**Anda DB** is a next-generation, embedded database system written in Rust, specifically engineered for AI applications and intelligent agents. It functions as a powerful library for managing complex knowledge and memory, supporting multi-modal data, full-text search, and high-performance vector similarity search.
 
-At its core, Anda DB powers the **[Anda Cognitive Nexus](https://github.com/ldclabs/anda-db/tree/main/rs/anda_cognitive_nexus)**, a powerful, persistent, and graph-based long-term memory system for AI Agents. It implements the **KIP (Knowledge Interaction Protocol)**, enabling AI to learn, reason, and evolve through a structured, auditable knowledge graph.
+At its heart, Anda DB powers the **[Anda Cognitive Nexus](./rs/anda_cognitive_nexus/)**, an advanced long-term memory system for AI. By implementing the **KIP (Knowledge Interaction Protocol)**, it enables an AI to build, query, and reason over a persistent and evolving knowledge graph.
 
 ## Key Features
 
--   **Embedded Library:** Functions as a Rust library, not a standalone remote database service, enabling direct integration into AI Agent builds.
--   **Pluggable Storage Backend:** Leverages the [`object_store`](https://docs.rs/object_store) interface, supporting various backends like AWS S3, Google Cloud Storage, Azure Blob Storage, and the local filesystem.
--   **Encrypted & Resilient Storage:** Offers optional, transparent AES-256-GCM encryption for all data at rest, ensuring privacy and security, powered by [`anda_object_store`](https://docs.rs/anda_object_store).
--   **Flexible Schema & ORM:** A document-oriented design with a flexible schema and built-in ORM support via the `AndaDBSchema` derive macro.
--   **Multimodal Data:** Natively handles diverse data types including text, `bfloat16` vectors, binary data, JSON, and more.
+-   **Embedded & Performant:** Designed as a Rust library, not a standalone server, for direct integration and high performance within your application.
+-   **Multi-Modal Data:** Natively store and index diverse data types, including documents, key-value pairs, and vector embeddings (`bfloat16`).
+-   **Pluggable & Secure Storage:** Built on the [`object_store`](https://docs.rs/object_store) crate, allowing for various storage backends (local filesystem, AWS S3, GCS) with optional, transparent AES-256-GCM encryption at rest.
 -   **Advanced Indexing:**
-    -   **BTree Index:** Enables precise matching, range queries, and multi-conditional logical queries on various data types.
-    -   **BM25 Index:** Provides efficient, full-text search with customizable tokenizers (including Chinese via Jieba).
-    -   **HNSW Index:** Offers high-performance approximate nearest neighbor (ANN) search for vector similarity.
--   **Hybrid Search:** Automatically combines and weights text (BM25) and vector (HNSW) search results using Reciprocal Rank Fusion (RRF) for comprehensive retrieval.
--   **Knowledge Graph Capabilities:** Implements the **KIP (Knowledge Interaction Protocol)** for building and querying a self-evolving knowledge graph of concepts and propositions.
--   **Incremental & Persistent:** Supports efficient incremental index updates and document deletions without requiring costly full rebuilds. The entire database state can be saved and loaded, ensuring data durability.
+    -   **B-Tree Index:** For efficient, exact-match, and range-based queries.
+    -   **BM25 Index:** For robust, full-text search capabilities.
+    -   **HNSW Index:** For state-of-the-art, approximate nearest neighbor (ANN) vector search.
+-   **Hybrid Search:** Intelligently combines full-text (BM25) and vector (HNSW) search results using Reciprocal Rank Fusion (RRF) to deliver more relevant and comprehensive answers.
+-   **Knowledge Graph Engine:** Implements the **KIP (Knowledge Interaction Protocol)**, a declarative language for manipulating (KML) and querying (KQL) the database as a graph of concepts and propositions.
+-   **Flexible Schema:** A document-oriented model with a derive macro (`AndaDBSchema`) for easily defining and evolving data schemas.
+-   **Transactional & Persistent:** Supports incremental index updates and ensures data durability, allowing the entire database state to be saved and loaded efficiently.
 
 ## Architecture
 
-Anda DB is a modular project composed of several crates, each providing a specific piece of functionality:
+Anda DB features a highly modular design, with each crate providing a distinct component of its functionality:
 
--   [`anda_cognitive_nexus`](./rs/anda_cognitive_nexus/): A KIP-based knowledge graph implementation for AI long-term memory.
--   [`anda_db`](./rs/anda_db/): The core database library, integrating storage, indexing, and collection management.
--   [`anda_db_schema`](./rs/anda_db_schema/): Defines the schema structures and types for Anda DB.
--   [`anda_db_derive`](./rs/anda_db_derive/): Provides procedural macros (`AndaDBSchema`, `FieldTyped`) for convenient schema definition.
--   [`anda_object_store`](./rs/anda_object_store/): An extension for `object_store` that adds metadata management and transparent encryption.
--   [`anda_db_btree`](./rs/anda_db_btree/): A high-performance B-tree index implementation.
--   [`anda_db_tfs`](./rs/anda_db_tfs/): A full-text search implementation using the BM25 ranking algorithm.
--   [`anda_db_hnsw`](./rs/anda_db_hnsw/): A high-performance HNSW index for vector similarity search.
--   [`anda_kip`](./rs/anda_kip/): A Rust SDK for the KIP (Knowledge Interaction Protocol), including a parser and executor framework.
+-   `anda_db`: The core database engine that integrates collections, indexing, and query execution.
+-   `anda_cognitive_nexus`: The high-level implementation of the KIP-based knowledge graph, providing long-term memory for AI agents.
+-   `anda_kip`: A complete parser and execution framework for the KIP language (KQL and KML).
+-   `anda_db_schema`: Defines the data structures, types, and schema system.
+-   `anda_db_derive`: Provides the procedural macros (`AndaDBSchema`) for convenient schema definition.
+-   `anda_object_store`: A wrapper around `object_store` that adds metadata and transparent encryption.
+-   `anda_db_btree`: The B-Tree index implementation.
+-   `anda_db_tfs`: The full-text search (BM25) implementation.
+-   `anda_db_hnsw`: The Hierarchical Navigable Small World (HNSW) vector index implementation.
 
 ## Getting Started
 
-### Basic Usage
+Add `anda_db` and its related components to your `Cargo.toml`.
 
-Here's a simplified example demonstrating how to connect to a database, define a schema, create a collection, add documents, and perform a query.
+```toml
+[dependencies]
+anda_db = "0.7"
+anda_cognitive_nexus = "0.4"
+anda_kip = "0.5"
+# Add an object_store backend, e.g., object_store = { version = "0.12", features = ["local"] }
+tokio = { version = "1", features = ["full"] }
+```
 
-Source code: https://github.com/ldclabs/anda-db/blob/main/rs/anda_db/examples/db_demo.rs
+### Example: Basic Database Usage
 
-### Build Anda Cognitive Nexus
+The following example demonstrates setting up a database, defining a schema, adding documents, and performing a hybrid search query.
 
-Here's a core snippet of Anda Cognitive Nexus that built on top of Anda DB:
-```rs
-impl CognitiveNexus {
-    pub async fn connect<F>(db: Arc<AndaDB>, f: F) -> Result<Self, KipError>
-    where
-        F: AsyncFnOnce(&CognitiveNexus) -> Result<(), KipError>,
-    {
-        let schema = Concept::schema().map_err(KipError::parse)?;
-        let concepts = db
-            .open_or_create_collection(
-                schema,
-                CollectionConfig {
-                    name: "concepts".to_string(),
-                    description: "Concept nodes".to_string(),
-                },
-                async |collection| {
-                    // set tokenizer
-                    collection.set_tokenizer(jieba_tokenizer());
-                    // create BTree indexes if not exists
-                    collection.create_btree_index_nx(&["type", "name"]).await?;
-                    collection.create_btree_index_nx(&["type"]).await?;
-                    collection.create_btree_index_nx(&["name"]).await?;
-                    collection
-                        .create_bm25_index_nx(&["name", "attributes", "metadata"])
-                        .await?;
+```rust
+use anda_db::{
+    collection::{Collection, CollectionConfig},
+    database::{AndaDB, DBConfig},
+    error::DBError,
+    index::HnswConfig,
+    query::{Filter, Query, RangeQuery, Search},
+    schema::{AndaDBSchema, FieldType, Fv, Json, Vector, vector_from_f32},
+};
+use anda_object_store::MetaStoreBuilder;
+use object_store::local::LocalFileSystem;
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
-                    Ok::<(), DBError>(())
-                },
-            )
-            .await
-            .map_err(db_to_kip_error)?;
+#[derive(Debug, Clone, Serialize, Deserialize, AndaDBSchema)]
+pub struct Knowledge {
+    pub _id: u64,
+    pub description: String,
+    pub embedding: Vector,
+    pub author: String,
+}
 
-        let schema = Proposition::schema().map_err(KipError::parse)?;
-        let propositions = db
-            .open_or_create_collection(
-                schema,
-                CollectionConfig {
-                    name: "propositions".to_string(),
-                    description: "Proposition links".to_string(),
-                },
-                async |collection| {
-                    // set tokenizer
-                    collection.set_tokenizer(jieba_tokenizer());
-                    // create BTree indexes if not exists
-                    collection
-                        .create_btree_index_nx(&["subject", "object"])
-                        .await?;
-                    collection.create_btree_index_nx(&["subject"]).await?;
-                    collection.create_btree_index_nx(&["object"]).await?;
-                    collection.create_btree_index_nx(&["predicates"]).await?;
-                    collection
-                        .create_bm25_index_nx(&["predicates", "properties"])
-                        .await?;
+#[tokio::main]
+async fn main() -> Result<(), DBError> {
+    // 1. Initialize storage
+    let object_store = MetaStoreBuilder::new(LocalFileSystem::new_with_prefix("./db")?, 10000).build();
+    let db = AndaDB::connect(Arc::new(object_store), DBConfig::default()).await?;
 
-                    Ok::<(), DBError>(())
-                },
-            )
-            .await
-            .map_err(db_to_kip_error)?;
-        let this = Self {
-            db,
-            concepts,
-            propositions,
-        };
+    // 2. Define a collection and its indexes
+    let collection = db
+        .open_or_create_collection(Knowledge::schema()?, CollectionConfig::new("knowledge"), |coll| async {
+            coll.create_btree_index_nx(&["author"]).await?;
+            coll.create_bm25_index_nx(&["description"]).await?;
+            coll.create_hnsw_index_nx("embedding", HnswConfig { dimension: 4, ..Default::default() }).await?;
+            Ok(())
+        })
+        .await?;
 
-        if !this
-            .has_concept(&ConceptPK::Object {
-                r#type: META_CONCEPT_TYPE.to_string(),
-                name: META_CONCEPT_TYPE.to_string(),
-            })
-            .await
-        {
-            this.execute_kml(parse_kml(GENESIS_KIP)?, false).await?;
-        }
+    // 3. Add documents
+    collection.add_from(&Knowledge {
+        _id: 0,
+        description: "Rust is a systems programming language focused on safety.".to_string(),
+        embedding: vector_from_f32(vec![0.1, 0.2, 0.3, 0.4]),
+        author: "Graydon".to_string(),
+    }).await?;
 
-        if !this
-            .has_concept(&ConceptPK::Object {
-                r#type: META_CONCEPT_TYPE.to_string(),
-                name: PERSON_TYPE.to_string(),
-            })
-            .await
-        {
-            this.execute_kml(parse_kml(PERSON_KIP)?, false).await?;
-        }
+    collection.add_from(&Knowledge {
+        _id: 0,
+        description: "A vector database is used for similarity search.".to_string(),
+        embedding: vector_from_f32(vec![0.5, 0.6, 0.7, 0.8]),
+        author: "Anda".to_string(),
+    }).await?;
 
-        f(&this).await?;
-        Ok(this)
+    collection.flush(anda_db::unix_ms()).await?;
+
+    // 4. Perform a hybrid search
+    let query_text = "language";
+    let query_vector = vec![0.15, 0.25, 0.35, 0.45];
+
+    let results: Vec<Knowledge> = collection.search_as(Query {
+        search: Some(Search {
+            text: Some(query_text.to_string()),
+            vector: Some(query_vector),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }).await?;
+
+    println!("Found {} results for query '{}':", results.len(), query_text);
+    for doc in results {
+        println!("- ID: {}, Description: {}", doc._id, doc.description);
     }
 
-    // ...
+    db.close().await?;
+    Ok(())
 }
 ```
 
-### Anda Cognitive Nexus Example
+### Example: Using the Cognitive Nexus with KIP
 
-Here's a brief example of how to initialize the nexus, insert knowledge using KML, and retrieve it with KQL.
+The `anda_cognitive_nexus` provides a higher-level API for interacting with the database as a knowledge graph using KML (Knowledge Manipulation Language) and KQL (Knowledge Query Language).
 
 ```rust
 use anda_cognitive_nexus::{CognitiveNexus, KipError};
-use anda_db::{database::{AndaDB, DBConfig}, storage::StorageConfig};
+use anda_db::database::{AndaDB, DBConfig};
 use anda_kip::{parse_kml, parse_kql};
 use anda_object_store::MetaStoreBuilder;
 use object_store::local::LocalFileSystem;
@@ -153,76 +144,31 @@ use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<(), KipError> {
-    // 1. Set up storage and database
-    let object_store = MetaStoreBuilder::new(LocalFileSystem::new_with_prefix("./db")?, 10000).build();
-    let db_config = DBConfig::default();
-    let db = AndaDB::connect(Arc::new(object_store), db_config).await?;
-
-    // 2. Connect to the Cognitive Nexus
+    // 1. Setup database and connect to the nexus
+    let object_store = MetaStoreBuilder::new(LocalFileSystem::new_with_prefix("./nexus_db")?, 10000).build();
+    let db = AndaDB::connect(Arc::new(object_store), DBConfig::default()).await?;
     let nexus = CognitiveNexus::connect(Arc::new(db), |_| async { Ok(()) }).await?;
-    println!("Connected to Anda Cognitive Nexus: {}", nexus.name());
 
-    // 3. Manipulate Knowledge with KML (Knowledge Manipulation Language)
-    let kml_string = r#"
+    // 2. Insert knowledge using KML
+    let kml_str = r#"
     UPSERT {
-        // Define concept types
-        CONCEPT ?drug_type {
-            {type: "$ConceptType", name: "Drug"}
-            SET ATTRIBUTES {
-                description: "Pharmaceutical drug concept type"
-            }
-        }
-
-        CONCEPT ?symptom_type {
-            {type: "$ConceptType", name: "Symptom"}
-            SET ATTRIBUTES {
-                description: "Medical symptom concept type"
-            }
-        }
-
-        // Define relation types
-        CONCEPT ?treats_relation {
-            {type: "$PropositionType", name: "treats"}
-            SET ATTRIBUTES {
-                description: "Drug treats symptom relationship"
-            }
-        }
-
-        // Create symptom concepts
-        CONCEPT ?headache {
-            {type: "Symptom", name: "Headache"}
-            SET ATTRIBUTES {
-                severity_scale: "1-10",
-                description: "Pain in the head or neck area"
-            }
-        }
-
-        // Create a drug and the symptom it treats
-        CONCEPT ?aspirin {
-            {type: "Drug", name: "Aspirin"}
-            SET ATTRIBUTES { molecular_formula: "C9H8O4", risk_level: 1 }
-            SET PROPOSITIONS {
-                ("treats", {type: "Symptom", name: "Headache"})
-            }
-        }
+        CONCEPT ?rust { {type: "Language", name: "Rust"} }
+        CONCEPT ?db { {type: "Field", name: "Database"} }
+        PROPOSITION (?rust, "is_good_for", ?db)
     }
-    WITH METADATA { source: "Basic Medical Knowledge" }
     "#;
+    nexus.execute_kml(parse_kml(kml_str)?, false).await?;
 
-    let kml_commands = parse_kml(kml_string)?;
-    let kml_result = nexus.execute_kml(kml_commands, false).await?;
-    println!("KML Execution Result: {:#?}", kml_result);
-
-    // 4. Query Knowledge with KQL (Knowledge Query Language)
-    let kql_query = r#"
-    FIND(?drug.name, ?drug.attributes.risk_level)
+    // 3. Query the knowledge graph using KQL
+    let kql_str = r#"
+    FIND(?lang.name)
     WHERE {
-        ?drug {type: "Drug"}
-        (?drug, "treats", {type: "Symptom", name: "Headache"})
+        ?lang {type: "Language"}
+        (?lang, "is_good_for", {type: "Field", name: "Database"})
     }
     "#;
+    let (kql_result, _) = nexus.execute_kql(parse_kql(kql_str)?).await?;
 
-    let (kql_result, _) = nexus.execute_kql(parse_kql(kql_query)?).await?;
     println!("KQL Query Result: {:#?}", kql_result);
 
     nexus.close().await?;
@@ -230,8 +176,20 @@ async fn main() -> Result<(), KipError> {
 }
 ```
 
+## Building and Testing
+
+To build the project and run the tests, use the standard Cargo commands:
+
+```bash
+# Build in release mode
+cargo build --release
+
+# Run all tests
+cargo test
+```
+
 ## License
 
-Copyright © 2025 [LDC Labs](https://github.com/ldclabs).
+Anda DB is licensed under the MIT License. See the [LICENSE](./LICENSE) file for details.
 
-`ldclabs/anda-db` is licensed under the MIT License. See [LICENSE](./LICENSE-MIT) for the full license text.
+Copyright © 2025 [LDC Labs](https://github.com/ldclabs)
