@@ -5,7 +5,7 @@ use anda_engine::store::LocalFileSystem;
 use anda_kip::{CommandType, KipError, Request, Response};
 use object_store::memory::InMemory;
 use pyo3::prelude::*;
-use pyo3::exceptions::PyRuntimeError;
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::types::PyDict;
 use serde::{Deserialize, Serialize};
 use serde_pyobject::to_pyobject;
@@ -73,17 +73,10 @@ impl PyAndaDB {
     ///
     /// Raises:
     ///     RuntimeError: If config deserialization or DB creation fails.
-    pub fn create<'py>(py: Python<'py>, db_config: &'py PyDict) -> PyResult<&'py PyAny> {
+    pub fn create<'py>(py: Python<'py>, db_config: AndaDbConfig) -> PyResult<&'py PyAny> {
         log::info!("AndaDB.create called with db_config.");
-        let json_mod = py.import("json")?;
-        let json_str: String = json_mod.call_method1("dumps", (db_config,))?.extract()?;
-        log::debug!("json_str db_config: {}", json_str);
-
-        let config: AndaDbConfig = serde_json::from_str(&json_str)
-            .map_err(|e| PyRuntimeError::new_err(format!("Config deserialization error: {}", e)))?;
-        log::debug!("rust struct db_config: {:?}", config);
         let fut = async move {
-            match create_kip_db(config).await {
+            match create_kip_db(db_config).await {
                 Ok(nexus) => Ok(PyAndaDB { nexus }),
                 Err(e) => Err(PyRuntimeError::new_err(format!("DB creation error: {}", e)))
             }
@@ -182,6 +175,64 @@ impl PyAndaDB {
     }    
 }
 
+#[pyclass]
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct AndaDbConfig {
+    #[pyo3(get, set)]
+    pub store_location_type: StoreLocationType,
+    #[pyo3(get, set)]
+    pub store_location: String,
+    #[pyo3(get, set)]
+    pub db_name: String,
+    #[pyo3(get, set)]
+    pub db_desc: Option<String>,
+    #[pyo3(get, set)]
+    pub meta_cache_capacity: Option<u64>,
+}
+
+#[pymethods]
+impl AndaDbConfig {
+    #[new]
+    pub fn new(
+        store_location_type: StoreLocationType,
+        store_location: String,
+        db_name: String,
+        db_desc: Option<String>,
+        meta_cache_capacity: Option<u64>,
+    ) -> PyResult<Self> {
+        Ok(
+            AndaDbConfig {
+            store_location_type,
+            store_location,
+            db_name,
+            db_desc,
+            meta_cache_capacity,
+        })
+    }
+}
+
+impl AndaDbConfig {
+    /// Verifies the configuration for AndaDbConfig.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - `store_location_type` is `LocalFile` and `store_location` is empty.
+    /// - `store_location` does not exist on the filesystem.
+    pub fn verify_config(&self) -> Result<(), String> {
+        if let StoreLocationType::LocalFile = self.store_location_type {
+            if self.store_location.trim().is_empty() {
+                return Err("store_location is required when store_location_type is LocalFile".to_string());
+            }
+            use std::path::Path;
+            if !Path::new(&self.store_location).exists() {
+                return Err(format!("store_location path does not exist: {}", self.store_location));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// A Python module implemented in Rust.
 #[pymodule]
 fn anda_py(_py: Python, m: &PyModule) -> PyResult<()> {
@@ -189,6 +240,7 @@ fn anda_py(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<PyAndaDB>()?;
     m.add_class::<PyCommandType>()?;
     m.add_class::<StoreLocationType>()?;
+    m.add_class::<AndaDbConfig>()?;
     m.add_function(wrap_pyfunction!(sum_as_string, m)?)?;
     Ok(())
 }
@@ -212,34 +264,19 @@ impl StoreLocationType {
     }
 }
 
-#[derive(Debug, Deserialize)]
-pub struct AndaDbConfig {
-    pub store_location_type: StoreLocationType,
-    pub store_location: String,
-    pub db_name: String,
-    pub db_desc: Option<String>,
-    pub meta_cache_capacity: Option<u64>,
-}
+impl TryFrom<&str> for StoreLocationType {
+    type Error = PyErr;
 
-impl AndaDbConfig {
-    /// Verifies the configuration for AndaDbConfig.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - `store_location_type` is `LocalFile` and `store_location` is empty.
-    /// - `store_location` does not exist on the filesystem.
-    pub fn verify_config(&self) -> Result<(), String> {
-        if let StoreLocationType::LocalFile = self.store_location_type {
-            if self.store_location.trim().is_empty() {
-                return Err("store_location is required when store_location_type is LocalFile".to_string());
-            }
-            use std::path::Path;
-            if !Path::new(&self.store_location).exists() {
-                return Err(format!("store_location path does not exist: {}", self.store_location));
-            }
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        let s: String = value.to_string();
+
+        if StoreLocationType::InMem.__str__() == s
+            { Ok(StoreLocationType::InMem) }
+        else if  StoreLocationType::LocalFile.__str__() == s
+            { Ok(StoreLocationType::LocalFile) }
+        else { 
+            Err(PyValueError::new_err(format!("Invalid StoreLocationType: {}", s)))
         }
-        Ok(())
     }
 }
 
