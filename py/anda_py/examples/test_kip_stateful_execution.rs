@@ -1,8 +1,5 @@
-use std::collections::HashMap;
 use anda_kip::{Response, Json, Map};
 use anda_py::{execute_kip, create_kip_db, AndaDbConfig, StoreLocationType};
-use serde_json::json;
-
 // Create basic concept types and medical knowledge capsule
 static MEDICAL_KNOWLEDGE_KML: &str = r#"
     UPSERT {

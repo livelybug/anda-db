@@ -99,3 +99,36 @@ Run it with:
 ```bash
 python main.py
 ```
+
+---
+
+## Creating a Database and Executing a KIP Command (New API)
+
+The API now exposes configuration and enums as Python classes, not dicts or strings. Construct configs using `AndaDbConfig` and `StoreLocationType` directly:
+
+```python
+import anda
+
+# Construct the config using Python classes (not dicts)
+config = anda.AndaDbConfig(
+	store_location_type=anda.StoreLocationType.InMem,  # Use enum variant as a class attribute
+	store_location="",
+	db_name="test_db",
+	db_desc="Test database",
+	meta_cache_capacity=10000
+)
+
+# Create the database (async)
+import asyncio
+async def main():
+	db = await anda.PyAndaDB.create(config)
+	# Execute a KIP command (async)
+	result = await db.execute_kip("KIP_COMMAND_STRING")
+	print(result)  # result is a Python dict, not a JSON string
+
+asyncio.run(main())
+```
+
+**Notes:**
+- `StoreLocationType` and other enums are exposed as Python classes, not as `enum.Enum`. Use `anda.StoreLocationType.InMem` (not a string or dict).
+- See the Python tests in `tests_py/` for more usage examples.

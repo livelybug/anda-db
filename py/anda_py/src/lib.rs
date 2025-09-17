@@ -15,17 +15,26 @@ use anda_object_store::{MetaStoreBuilder};
 use anda_kip::Json;
 use anda_kip::executor::Executor;
 
-/// Formats the sum of two numbers as a string.
+/// This is a simple example of exposing a Rust function to Python using PyO3.
+///
+/// # Python Example
+///     sum_as_string(2, 3)  # returns '5'
 #[pyfunction]
 fn sum_as_string(a: usize, b: usize) -> PyResult<String> {
     Ok((a + b).to_string())
 }
 
+/// Python-facing wrapper for the Rust CognitiveNexus.
+///
+/// Exposed as a Python class. Use `PyAndaDB.create(db_config)` to construct from Python.
 #[pyclass]
 pub struct PyAndaDB {
     nexus: Arc<CognitiveNexus>,
 }
 
+/// Python-facing wrapper for the Rust CommandType enum.
+///
+/// Exposed as a Python class, not a true Python enum.Enum. Use PyCommandType.Kml, etc.
 #[pyclass]
 #[derive(Clone)]
 pub enum PyCommandType {
@@ -46,11 +55,9 @@ impl From<CommandType> for PyCommandType {
     }
 }
 
-#[pymethods]
-impl PyCommandType {
-    #[staticmethod]
-    pub fn from_str(s: &str) -> Self {
-        match s {
+impl From<&str> for PyCommandType {
+    fn from(s: &str) -> Self {
+        match s.trim() {
             "Kml" => PyCommandType::Kml,
             "Kql" => PyCommandType::Kql,
             "Meta" => PyCommandType::Meta,
@@ -60,13 +67,21 @@ impl PyCommandType {
 }
 
 #[pymethods]
+impl PyCommandType {
+    #[staticmethod]
+    pub fn from_str(s: &str) -> Self {
+        PyCommandType::from(s)
+    }
+}
+
+#[pymethods]
 impl PyAndaDB {
     #[staticmethod]
-    #[pyo3(text_signature = "(db_config: dict) -> Awaitable[PyAndaDB]")]
-    /// Create a new AndaDB instance from a Python dict config.
+    #[pyo3(text_signature = "(db_config: AndaDbConfig) -> Awaitable[PyAndaDB]")]
+    /// Create a new AndaDB instance from a Python AndaDbConfig object.
     ///
     /// Args:
-    ///     db_config (dict): Database configuration as a Python dict.
+    ///     db_config (AndaDbConfig): Database configuration as a Python class (see AndaDbConfig).
     ///
     /// Returns:
     ///     Awaitable[PyAndaDB]: An awaitable AndaDB instance.
@@ -95,9 +110,9 @@ impl PyAndaDB {
     ///
     /// Returns:
     ///     Awaitable[Dict[str, Any]]: Awaitable Python dictionary with:
-    ///         - "type" (PyCommandType): The type of the executed command.
+    ///         - "type" (PyCommandType): The type of the executed command (Python class, not enum.Enum).
     ///         - "response" (dict): The command response as a native Python dictionary
-    ///           (converted from the underlying `serde_json::Value`).
+    ///           (converted from the underlying `serde_json::Value` using serde-pyobject).
     ///
     /// Raises:
     ///     RuntimeError: If KIP execution fails.
@@ -175,6 +190,18 @@ impl PyAndaDB {
     }    
 }
 
+/// Exposes the Rust AndaDbConfig struct as a Python class.
+///
+/// All fields are accessible and mutable from Python. Construct directly in Python and pass to PyAndaDB.create.
+///
+/// Example:
+///     config = AndaDbConfig(
+///         store_location_type=StoreLocationType.InMem,
+///         store_location="",
+///         db_name="test_db",
+///         db_desc="Test database",
+///         meta_cache_capacity=10000
+///     )
 #[pyclass]
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct AndaDbConfig {
@@ -245,6 +272,9 @@ fn anda_py(_py: Python, m: &PyModule) -> PyResult<()> {
     Ok(())
 }
 
+/// Exposes the Rust StoreLocationType enum as a Python class.
+///
+/// Use StoreLocationType.InMem and StoreLocationType.LocalFile in Python configs.
 #[pyclass]
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "snake_case")]
