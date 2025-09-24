@@ -1,5 +1,5 @@
 use anda_kip::{Response, Json, Map};
-use anda_py::{execute_kip, create_kip_db, AndaDbConfig, StoreLocationType};
+use anda_cognitive_nexus_py::{execute_kip, create_kip_db, AndaDbConfig, StoreLocationType};
 // Create basic concept types and medical knowledge capsule
 static MEDICAL_KNOWLEDGE_KML: &str = r#"
     UPSERT {
@@ -133,7 +133,7 @@ async fn main() {
     // Add db_config for local_file DB (as AndaDbConfig struct expects)
     let db_config_local_file = AndaDbConfig {
         store_location_type: StoreLocationType::LocalFile,
-        store_location: "/tmp/anda_py_test_db".to_string(),
+        store_location: "/tmp/anda_cognitive_nexus_py_test_db".to_string(),
         db_name: "test_medical_db".to_string(),
         db_desc: Some("Local file DB for medical KIP test".to_string()),
         meta_cache_capacity: Some(10000),

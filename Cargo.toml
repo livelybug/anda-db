@@ -11,7 +11,7 @@ members = [
   "rs/anda_db_utils",
   "rs/anda_kip",
   "rs/anda_object_store",
-  "py/anda_py",
+  "py/anda_cognitive_nexus_py",
 ]
 
 [workspace.package]

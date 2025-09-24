@@ -1,10 +1,10 @@
 [package]
-name = "anda_py"
+name = "anda_cognitive_nexus_py"
 version = "0.1.0"
 edition = "2021"
 
 [lib]
-name = "anda_py"
+name = "anda_cognitive_nexus_py"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
@@ -16,9 +16,6 @@ tokio = { workspace = true }
 serde-pyobject = { workspace = true }
 
 # Anda
-anda_core = { workspace = true }
-anda_engine = { workspace = true }
-
 anda_db = { path = "../../rs/anda_db" }
 anda_cognitive_nexus = { path = "../../rs/anda_cognitive_nexus" }
 anda_kip = { path = "../../rs/anda_kip" }

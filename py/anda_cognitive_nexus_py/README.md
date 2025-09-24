@@ -1,4 +1,4 @@
-# Anda Python Bindings (anda_py)
+# Anda Python Bindings (anda_cognitive_nexus_py)
 
 This crate provides the official Python bindings for the Anda engine, allowing Python applications to interact with an agent's cognitive nexus (Anda DB) using the Knowledge Interaction Protocol (KIP).
 
@@ -19,13 +19,13 @@ Before you begin, ensure you have the following tools installed on your system:
 git clone REPO_URL
 cd anda_db
 cargo check -p andy_py
-cargo test --package anda_py -- tests::test_execute_kip_in_mem --show-output
+cargo test --package anda_cognitive_nexus_py -- tests::test_execute_kip_in_mem --show-output
 cargo run --example test_kip_stateful_execution
 ```
 
 ## Python Development Setup
 
-These instructions will guide you through setting up a local development environment to work on the `anda_py` bindings.
+These instructions will guide you through setting up a local development environment to work on the `anda_cognitive_nexus_py` bindings.
 
 All commands should be run from the **root of the `anda` repository**.
 
@@ -34,7 +34,7 @@ All commands should be run from the **root of the `anda` repository**.
 First, create and activate a Python virtual environment. This isolates our dependencies.
 
 ```bash
-cd py/anda_py
+cd py/anda_cognitive_nexus_py
 # Create the virtual environment
 uv venv
 
@@ -65,6 +65,9 @@ To run the tests, execute the following command from the project root:
 
 ```bash
 # Make sure your virtual environment is activated
+pytest --cache-clear
+# find . -type d -name "__pycache__" -exec rm -rf {} +
+
 # pytest -s --log-cli-level=INFO tests_py/
 pytest -v tests_py/
 

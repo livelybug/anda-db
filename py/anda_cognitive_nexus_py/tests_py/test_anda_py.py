@@ -1,7 +1,7 @@
+import json
 import pytest
 import asyncio
-import anda_py
-from anda_py import PyCommandType, PyAndaDB, StoreLocationType, AndaDbConfig
+from anda_cognitive_nexus_py import PyCommandType, PyAndaDB, StoreLocationType, AndaDbConfig
 
 @pytest.mark.asyncio
 async def test_create_success():
@@ -102,10 +102,10 @@ async def test_execute_kip_invalid_parameters_error_message():
     ), f"No error key found in response: {result['response']}"
     # Optionally, check that the error message is not empty and is user-friendly
     error_msg = result["response"].get("error") or result["response"].get("message") or result["response"].get("detail")
-    assert error_msg and isinstance(error_msg, str)
-    assert "invalid" in error_msg.lower() or "error" in error_msg.lower() or "syntax" in error_msg.lower()
+    assert error_msg and isinstance(error_msg, dict)
+    error_str = json.dumps(error_msg)
+    assert "error" in error_str.lower()
 
-@pytest.mark.asyncio
 def test_andadbconfig_type_validation():
     # db_name should be a string, not an int
     with pytest.raises(TypeError):

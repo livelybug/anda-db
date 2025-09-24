@@ -1,7 +1,6 @@
 use anda_cognitive_nexus::CognitiveNexus;
-use anda_core::BoxError;
 use anda_db::database::{AndaDB, DBConfig};
-use anda_engine::store::LocalFileSystem;
+use object_store::local::LocalFileSystem;
 use anda_kip::{CommandType, KipError, Request, Response};
 use object_store::memory::InMemory;
 use pyo3::prelude::*;
@@ -14,6 +13,7 @@ use std::sync::Arc;
 use anda_object_store::{MetaStoreBuilder};
 use anda_kip::Json;
 use anda_kip::executor::Executor;
+type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 /// This is a simple example of exposing a Rust function to Python using PyO3.
 ///
@@ -262,7 +262,7 @@ impl AndaDbConfig {
 
 /// A Python module implemented in Rust.
 #[pymodule]
-fn anda_py(_py: Python, m: &PyModule) -> PyResult<()> {
+fn anda_cognitive_nexus_py(_py: Python, m: &PyModule) -> PyResult<()> {
     structured_logger::init();
     m.add_class::<PyAndaDB>()?;
     m.add_class::<PyCommandType>()?;
@@ -374,7 +374,7 @@ pub async fn create_kip_db(
 ///
 /// # Example
 /// 
-/// Refer to tools/anda_py/examples directory
+/// Refer to tools/anda_cognitive_nexus_py/examples directory
 pub async fn execute_kip(
     nexus: &(impl Executor + Sync),
     command: String,
