@@ -42,6 +42,13 @@ pub enum DBError {
 
     #[error("Serialization error: {source:?}")]
     Serialization { name: String, source: BoxError },
+
+    #[error("Payload too large at location {path}: size {size} exceeds limit {limit}")]
+    PayloadTooLarge {
+        path: String,
+        size: usize,
+        limit: usize,
+    },
 }
 
 impl From<object_store::Error> for DBError {

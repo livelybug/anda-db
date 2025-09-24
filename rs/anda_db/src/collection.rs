@@ -1,6 +1,6 @@
 use anda_db_utils::UniqueVec;
 use croaring::{Portable, Treemap};
-use futures::{future::try_join_all, try_join as try_join_await};
+use futures::{StreamExt, future::try_join_all, try_join as try_join_await};
 use object_store::path::Path;
 use parking_lot::RwLock;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -487,6 +487,40 @@ impl Collection {
         Ok(true)
     }
 
+    /// Drops the collection, deleting all associated data from storage.
+    pub async fn drop_data(&self) -> Result<(), DBError> {
+        // 禁止进一步写入
+        self.set_read_only(true);
+
+        // 列举并发删除集合存储下的全部对象
+        let start = Instant::now();
+        let ids = self.ids();
+        let total = ids.len();
+        let _ = futures::stream::iter(ids.into_iter())
+            .map(|id| {
+                let storage = self.storage.clone();
+                async move {
+                    let _ = storage.delete(&Self::doc_path(id)).await;
+                }
+            })
+            .buffer_unordered(32)
+            .collect::<Vec<_>>()
+            .await;
+
+        // delete metadata, ids, indexes and others
+        self.storage.drop_data().await?;
+        let elapsed = start.elapsed();
+        log::info!(
+            action = "drop_data",
+            collection = self.name,
+            deleted = total,
+            elapsed = elapsed.as_millis();
+            "Collection dropped. deleted={total}, elapsed={elapsed:?}"
+        );
+
+        Ok(())
+    }
+
     /// Stores collection metadata to storage if it has changed.
     ///
     /// # Arguments
@@ -600,6 +634,16 @@ impl Collection {
     /// Returns the maximum document ID in the collection.
     pub fn max_document_id(&self) -> DocumentId {
         self.max_document_id.load(Ordering::Relaxed)
+    }
+
+    /// Returns the latest (highest) document ID in the collection, if any.
+    pub fn latest_document_id(&self) -> Option<DocumentId> {
+        self.doc_ids_index.read().last().cloned()
+    }
+
+    /// Returns a vector of all document IDs in the collection in ascending order.
+    pub fn ids(&self) -> Vec<DocumentId> {
+        self.doc_ids.read().iter().collect()
     }
 
     /// Checks if a document with the given ID exists in the collection.
@@ -1039,7 +1083,7 @@ impl Collection {
     /// * `fields` - The new field values to apply
     ///
     /// # Returns
-    /// Ok(()) if successful, or an error if update fails
+    /// Ok(Document) if successful, or an error if update fails
     ///
     /// # Errors
     /// Returns an error if:
@@ -1053,7 +1097,7 @@ impl Collection {
         &self,
         id: DocumentId,
         fields: BTreeMap<String, Fv>,
-    ) -> Result<(), DBError> {
+    ) -> Result<Document, DBError> {
         if self.read_only.load(Ordering::Relaxed) {
             return Err(DBError::Generic {
                 name: self.name.clone(),
@@ -1071,7 +1115,10 @@ impl Collection {
         }
 
         if fields.is_empty() {
-            return Ok(());
+            return Err(DBError::Generic {
+                name: self.name.clone(),
+                source: "No fields to update".into(),
+            });
         }
 
         let (doc, ver) = self
@@ -1203,7 +1250,7 @@ impl Collection {
             meta.stats.update_count += 1;
         });
 
-        Ok(())
+        Ok(doc)
     }
 
     /// Removes a document from the collection by its ID.
@@ -1744,11 +1791,6 @@ impl Collection {
         }
 
         result
-    }
-
-    /// Returns a vector of all document IDs in the collection in ascending order.
-    pub fn ids(&self) -> Vec<DocumentId> {
-        self.doc_ids.read().iter().collect()
     }
 
     /// Updates the collection metadata with the provided function.
