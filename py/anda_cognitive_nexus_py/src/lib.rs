@@ -18,7 +18,7 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 /// This is a simple example of exposing a Rust function to Python using PyO3.
 ///
 /// # Python Example
-///     sum_as_string(2, 3)  # returns '5'
+/// sum_as_string(2, 3)  # returns '5'
 #[pyfunction]
 fn sum_as_string(a: usize, b: usize) -> PyResult<String> {
     Ok((a + b).to_string())

@@ -18,9 +18,10 @@ Before you begin, ensure you have the following tools installed on your system:
 ```bash
 git clone REPO_URL
 cd anda_db
-cargo check -p andy_py
+cargo check -p anda_cognitive_nexus_py
 cargo test --package anda_cognitive_nexus_py -- tests::test_execute_kip_in_mem --show-output
 cargo run --example test_kip_stateful_execution
+cargo test -p anda_cognitive_nexus_py --doc
 ```
 
 ## Python Development Setup
